@@ -1,0 +1,10 @@
+# Logs
+*.log
+opencode_serve.log
+
+# Python cache
+__pycache__/
+*.pyc
+
+# OS files
+.DS_Store
