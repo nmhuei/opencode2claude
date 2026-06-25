@@ -60,11 +60,108 @@ class ClaudeOpenCodeBridge(BaseHTTPRequestHandler):
                         prompt += f"\n{content}"
             prompt = prompt.strip()
             
-            # Determine target model
             req_model = req.get('model', 'claude-3-5-sonnet')
+            stream = req.get('stream', False)
+
+            # --- SHELL COMMAND INTERCEPTION FEATURE ---
+            # If the user enters a prompt starting with "!", execute it directly on the local shell.
+            if prompt.startswith('!'):
+                shell_cmd = prompt[1:].strip()
+                log_info(f"Intercepted local shell command: '{shell_cmd}'")
+                
+                if stream:
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'text/event-stream')
+                    self.send_header('Cache-Control', 'no-cache')
+                    self.send_header('Connection', 'keep-alive')
+                    self.end_headers()
+                    
+                    self.send_event("message_start", {
+                        "type": "message_start",
+                        "message": {
+                            "id": "msg_local_shell",
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [],
+                            "model": req_model,
+                            "stop_reason": None,
+                            "stop_sequence": None,
+                            "usage": {"input_tokens": 0, "output_tokens": 0}
+                        }
+                    })
+                    self.send_event("content_block_start", {
+                        "type": "content_block_start",
+                        "index": 0,
+                        "content_block": {"type": "text", "text": ""}
+                    })
+                    
+                    try:
+                        # Run command, redirecting stderr to stdout so users see command errors
+                        process = subprocess.Popen(
+                            shell_cmd,
+                            shell=True,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True,
+                            bufsize=1,
+                            errors='replace'
+                        )
+                        
+                        while True:
+                            char = process.stdout.read(1)
+                            if not char and process.poll() is not None:
+                                break
+                            if char:
+                                self.send_event("content_block_delta", {
+                                    "type": "content_block_delta",
+                                    "index": 0,
+                                    "delta": {"type": "text_delta", "text": char}
+                                })
+                    except Exception as e:
+                        self.send_event("content_block_delta", {
+                            "type": "content_block_delta",
+                            "index": 0,
+                            "delta": {"type": "text_delta", "text": f"\n[Local Shell Error]: {str(e)}"}
+                        })
+                        
+                    self.send_event("content_block_stop", {"type": "content_block_stop", "index": 0})
+                    self.send_event("message_delta", {
+                        "type": "message_delta",
+                        "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                        "usage": {"output_tokens": 0}
+                    })
+                    self.send_event("message_stop", {"type": "message_stop"})
+                    
+                    duration = time.time() - start_time
+                    log_success(f"Local shell command completed in {duration:.2f}s")
+                else:
+                    try:
+                        result = subprocess.run(shell_cmd, shell=True, capture_output=True, text=True, timeout=60, errors='replace')
+                        response_text = result.stdout + result.stderr
+                        log_success(f"Local shell command completed in {time.time() - start_time:.2f}s")
+                    except Exception as e:
+                        response_text = f"Local Shell Error: {str(e)}"
+                    
+                    response_data = {
+                        "id": "msg_local_shell",
+                        "type": "message",
+                        "role": "assistant",
+                        "model": req_model,
+                        "content": [{"type": "text", "text": response_text}],
+                        "stop_reason": "end_turn",
+                        "stop_sequence": None,
+                        "usage": {"input_tokens": 0, "output_tokens": 0}
+                    }
+                    
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps(response_data).encode('utf-8'))
+                return
+            # ------------------------------------------
+
+            # Determine target model
             env_model = os.getenv('OPENCODE_MODEL')
-            
-            # Model mapping: If user requests a specific model or we have an env override
             target_model = env_model if env_model else None
             
             log_info(f"Incoming prompt: '{prompt[:60]}...' [Model: {req_model}]")
@@ -95,8 +192,6 @@ class ClaudeOpenCodeBridge(BaseHTTPRequestHandler):
             cmd += ["--dangerously-skip-permissions", prompt]
             
             # 4. Handle streaming vs non-streaming responses
-            stream = req.get('stream', False)
-            
             if stream:
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/event-stream')
