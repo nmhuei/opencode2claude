@@ -1,4 +1,4 @@
-# Claude to OpenCode API Bridge
+# OpenCode2Claude API Bridge
 
 An API bridge designed to route Anthropic-format requests (specifically from tools like Claude Code or agent wrappers) to a local **OpenCode** daemon process. 
 

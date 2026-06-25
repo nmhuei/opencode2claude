@@ -8,7 +8,7 @@ BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
 NC='\033[0;0m' # No Color
 
-echo -e "${BLUE}=== Starting Claude-OpenCode Bridge Setup ===${NC}"
+echo -e "${BLUE}=== Starting OpenCode2Claude Setup ===${NC}"
 
 # Check if opencode is installed
 if ! command -v opencode &> /dev/null; then
