@@ -274,6 +274,23 @@ check_opencode() {
 }
 
 # ══════════════════════════════════════════════════════════════════════
+#  Check for warp-cli (optional — IP rotation for rate-limit retry)
+# ══════════════════════════════════════════════════════════════════════
+check_warp() {
+    if command -v warp-cli >/dev/null 2>&1; then
+        ok "Cloudflare WARP CLI found — IP rotation enabled."
+    else
+        echo ""
+        info "Tip: Install Cloudflare WARP for automatic IP rotation on rate-limit retry."
+        echo ""
+        printf "  ${CYAN}curl -fsSL https://pkg.cloudflareclient.com/install.sh | sh${NC}\n"
+        echo ""
+        printf "  ${BOLD}Or download directly:${NC}\n"
+        printf "  https://developers.cloudflare.com/warp-client/get-started/linux/\n"
+    fi
+}
+
+# ══════════════════════════════════════════════════════════════════════
 #  Welcome message
 # ══════════════════════════════════════════════════════════════════════
 print_welcome() {
@@ -396,6 +413,7 @@ main() {
     if do_install; then
         verify_install
         check_opencode
+        check_warp
         print_welcome
     else
         suggest_fallback
