@@ -95,15 +95,22 @@ echo -e "${GREEN}✓ Started Rust API Bridge (PID: $BRIDGE_PID). Logs routed to 
 
 # Export the variables so they are active in the sourced terminal
 export ANTHROPIC_API_KEY="opencode-bridge"
-export ANTHROPIC_API_URL="http://127.0.0.1:${BRIDGE_PORT}/v1"
+export ANTHROPIC_BASE_URL="http://127.0.0.1:${BRIDGE_PORT}/v1"
 export OPENCODE_MODEL
 
 echo -e "\n${GREEN}✓ Setup completed successfully!${NC}"
-echo -e "Environment variables set in current session:"
-echo -e "  ${YELLOW}export ANTHROPIC_API_KEY=\"$ANTHROPIC_API_KEY\"${NC}"
-echo -e "  ${YELLOW}export ANTHROPIC_API_URL=\"$ANTHROPIC_API_URL\"${NC}"
-echo -e "  ${YELLOW}export OPENCODE_MODEL=\"$OPENCODE_MODEL\"${NC}"
-echo -e "\nYou can now run ${GREEN}claude${NC} directly in this terminal window."
+if [ "$is_sourced" = true ]; then
+    echo -e "Environment variables set in current session:"
+    echo -e "  ${YELLOW}export ANTHROPIC_API_KEY=\"$ANTHROPIC_API_KEY\"${NC}"
+    echo -e "  ${YELLOW}export ANTHROPIC_BASE_URL=\"$ANTHROPIC_BASE_URL\"${NC}"
+    echo -e "  ${YELLOW}export OPENCODE_MODEL=\"$OPENCODE_MODEL\"${NC}"
+    echo -e "\nYou can now run ${GREEN}claude${NC} directly in this terminal window."
+else
+    echo -e "${YELLOW}To use Claude Code in your active terminal, copy and run these commands:${NC}"
+    echo -e "\nexport ANTHROPIC_API_KEY=\"$ANTHROPIC_API_KEY\""
+    echo -e "export ANTHROPIC_BASE_URL=\"$ANTHROPIC_BASE_URL\""
+    echo -e "export OPENCODE_MODEL=\"$OPENCODE_MODEL\"\n"
+fi
 echo -e "To stop the bridge and daemon later, run: ${YELLOW}./stop.sh${NC}"
 
 if [ "$is_sourced" = false ]; then

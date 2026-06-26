@@ -33,7 +33,7 @@ else
     echo -e "Checking for any running bridge.py or opencode serve processes..."
     
     # Fallback to pkill for clean termination of defaults
-    pkill -f "python3 bridge.py" && echo -e "Terminated running bridge.py"
+    pkill -f "opencode2claude" && echo -e "Terminated running opencode2claude bridge"
     pkill -f "opencode serve" && echo -e "Terminated running opencode serve daemon"
     
     echo -e "${GREEN}✓ Cleanup complete.${NC}"
