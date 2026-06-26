@@ -7,7 +7,7 @@ license = "MIT"
 homepage = "https://github.com/nmhuei/opencode2claude"
 repository = "https://github.com/nmhuei/opencode2claude"
 readme = "README.md"
-keywords = ["claude", "opencode", "api-bridge", "llm", "proxy", "anthropic", "cli"]
+keywords = ["claude", "opencode", "llm", "proxy", "cli"]
 categories = ["command-line-utilities", "web-programming", "development-tools"]
 
 [dependencies]
