@@ -39,6 +39,8 @@ pub struct TomlConfig {
     pub exa_api_key: Option<String>,
     pub serper_api_key: Option<String>,
     pub searxng_url: Option<String>,
+    pub searxng_api_key: Option<String>,
+    pub max_search_loops: Option<u32>,
 }
 
 impl TomlConfig {
@@ -56,6 +58,11 @@ pub struct CliOverrides {
     pub model: Option<String>,
     pub shell_policy: Option<String>,
     pub config_path: Option<String>,
+    pub tavily_api_key: Option<String>,
+    pub exa_api_key: Option<String>,
+    pub serper_api_key: Option<String>,
+    pub searxng_url: Option<String>,
+    pub searxng_api_key: Option<String>,
 }
 
 /// Central configuration struct for the bridge.
@@ -87,6 +94,12 @@ pub struct BridgeConfig {
     pub serper_api_key: Option<String>,
     /// SearXNG self-hosted instance URL
     pub searxng_url: Option<String>,
+    /// SearXNG API key
+    #[allow(dead_code)]
+    pub searxng_api_key: Option<String>,
+    /// Maximum number of search loops
+    #[allow(dead_code)]
+    pub max_search_loops: u32,
 }
 
 impl BridgeConfig {
@@ -161,6 +174,7 @@ impl BridgeConfig {
         let exa_api_key = env::var("EXA_API_KEY").ok();
         let serper_api_key = env::var("SERPER_API_KEY").ok();
         let searxng_url = env::var("SEARXNG_URL").ok();
+        let searxng_api_key = env::var("SEARXNG_API_KEY").ok();
 
         BridgeConfig {
             host,
@@ -176,6 +190,8 @@ impl BridgeConfig {
             exa_api_key,
             serper_api_key,
             searxng_url,
+            searxng_api_key,
+            max_search_loops: 5,
         }
     }
 
@@ -277,21 +293,35 @@ impl BridgeConfig {
             .or_else(|| toml_config.as_ref().and_then(|t| t.channel_capacity))
             .unwrap_or(DEFAULT_CHANNEL_CAPACITY);
 
-        let tavily_api_key = env::var("TAVILY_API_KEY")
-            .ok()
+        let tavily_api_key = overrides
+            .tavily_api_key
+            .or_else(|| env::var("TAVILY_API_KEY").ok())
             .or_else(|| toml_config.as_ref().and_then(|t| t.tavily_api_key.clone()));
 
-        let exa_api_key = env::var("EXA_API_KEY")
-            .ok()
+        let exa_api_key = overrides
+            .exa_api_key
+            .or_else(|| env::var("EXA_API_KEY").ok())
             .or_else(|| toml_config.as_ref().and_then(|t| t.exa_api_key.clone()));
 
-        let serper_api_key = env::var("SERPER_API_KEY")
-            .ok()
+        let serper_api_key = overrides
+            .serper_api_key
+            .or_else(|| env::var("SERPER_API_KEY").ok())
             .or_else(|| toml_config.as_ref().and_then(|t| t.serper_api_key.clone()));
 
-        let searxng_url = env::var("SEARXNG_URL")
-            .ok()
+        let searxng_url = overrides
+            .searxng_url
+            .or_else(|| env::var("SEARXNG_URL").ok())
             .or_else(|| toml_config.as_ref().and_then(|t| t.searxng_url.clone()));
+
+        let searxng_api_key = overrides.searxng_api_key
+            .or_else(|| env::var("SEARXNG_API_KEY").ok())
+            .or_else(|| toml_config.as_ref().and_then(|t| t.searxng_api_key.clone()));
+
+        let max_search_loops = env::var("BRIDGE_MAX_SEARCH_LOOPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .or_else(|| toml_config.as_ref().and_then(|t| t.max_search_loops))
+            .unwrap_or(5);
 
         BridgeConfig {
             host,
@@ -307,6 +337,8 @@ impl BridgeConfig {
             exa_api_key,
             serper_api_key,
             searxng_url,
+            searxng_api_key,
+            max_search_loops,
         }
     }
 
