@@ -278,14 +278,37 @@ check_opencode() {
 # ══════════════════════════════════════════════════════════════════════
 check_warp() {
     if command -v warp-cli >/dev/null 2>&1; then
-        ok "Cloudflare WARP CLI found — IP rotation enabled."
+        # warp-cli is installed — check if registered
+        reg_status="$(warp-cli registration show 2>/dev/null || true)"
+        if echo "$reg_status" | grep -qi "error\|not registered\|no registration"; then
+            warn "WARP CLI found but not registered."
+            echo ""
+            printf "  ${BOLD}Register and start WARP:${NC}\n"
+            printf "  ${CYAN}warp-cli registration new${NC}\n"
+            printf "  ${CYAN}warp-cli mode proxy${NC}\n"
+            printf "  ${CYAN}warp-cli connect${NC}\n"
+            echo ""
+            printf "  ${BOLD}Then verify:${NC}\n"
+            printf "  ${CYAN}warp-cli status${NC}\n"
+        else
+            ok "Cloudflare WARP CLI found — IP rotation enabled."
+        fi
     else
         echo ""
         info "Tip: Install Cloudflare WARP for automatic IP rotation on rate-limit retry."
         echo ""
+        printf "  ${BOLD}1. Install WARP:${NC}\n"
         printf "  ${CYAN}curl -fsSL https://pkg.cloudflareclient.com/install.sh | sh${NC}\n"
         echo ""
-        printf "  ${BOLD}Or download directly:${NC}\n"
+        printf "  ${BOLD}2. Register and start (first time only):${NC}\n"
+        printf "  ${CYAN}warp-cli registration new${NC}\n"
+        printf "  ${CYAN}warp-cli mode proxy${NC}\n"
+        printf "  ${CYAN}warp-cli connect${NC}\n"
+        echo ""
+        printf "  ${BOLD}3. Verify:${NC}\n"
+        printf "  ${CYAN}warp-cli status${NC}\n"
+        echo ""
+        printf "  ${BOLD}Docs:${NC}\n"
         printf "  https://developers.cloudflare.com/warp-client/get-started/linux/\n"
     fi
 }
