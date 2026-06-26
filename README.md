@@ -60,7 +60,7 @@ A blazing-fast local API bridge written in **Rust** that lets you connect **Clau
 ### One-liner Setup
 
 ```bash
-git clone https://github.com/user/opencode2claude.git && cd opencode2claude
+git clone https://github.com/nmhuei/opencode2claude.git && cd opencode2claude
 source start.sh
 ```
 
@@ -246,11 +246,11 @@ Since the bridge is a thin translation layer, overhead is minimal:
 
 ## 🗺️ Roadmap
 
-- [ ] Authentication middleware (Bearer token)
-- [ ] `/health` status endpoint
-- [ ] Support for `/v1/models` endpoint
-- [ ] Configuration file support (TOML)
-- [ ] Dockerfile for containerized deployment
+- [x] Authentication middleware (Bearer token)
+- [x] `/health` status endpoint
+- [x] Support for `/v1/models` endpoint
+- [x] Configuration file support (TOML)
+- [x] Dockerfile for containerized deployment
 - [ ] Rate limiting
 - [ ] Request/response logging & analytics dashboard
 - [ ] Multi-model routing (different models for different tasks)
