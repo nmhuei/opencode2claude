@@ -1,0 +1,132 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  # ── Job 1: Build binary cho nhiều nền tảng ──────────────────────────
+  build-release:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: opencode2claude-linux-amd64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: opencode2claude-macos-amd64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: opencode2claude-macos-arm64
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Check binary size
+        run: ls -lh target/${{ matrix.target }}/release/opencode2claude
+
+      - name: Rename binary for upload
+        run: |
+          mkdir -p staging
+          cp target/${{ matrix.target }}/release/opencode2claude staging/${{ matrix.artifact_name }}
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: staging/${{ matrix.artifact_name }}
+
+  # ── Job 2: Upload tất cả binary lên GitHub Release ──────────────────
+  upload-release:
+    name: Upload to GitHub Release
+    needs: [build-release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lh artifacts/
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+
+  # ── Job 3: Publish lên crates.io ────────────────────────────────────
+  publish-cratesio:
+    name: Publish to crates.io
+    needs: [build-release]
+    # Chỉ chạy cho stable versions (v*.*.* không có pre-release suffix)
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish to crates.io
+        run: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # ── Job 4: Build và push Docker image ───────────────────────────────
+  docker:
+    name: Build and Push Docker Image
+    needs: [build-release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/opencode2claude
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{ is_default_branch }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

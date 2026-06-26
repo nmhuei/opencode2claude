@@ -2,10 +2,13 @@
 name = "opencode2claude"
 version = "0.2.0"
 edition = "2021"
-description = "A blazing-fast API bridge connecting Claude Code to OpenCode CLI and any LLM"
+description = "Use Claude Code with any LLM (DeepSeek, GPT-4o, Gemini, Llama, etc.) — for free"
 license = "MIT"
-keywords = ["claude", "opencode", "api-bridge", "llm", "proxy"]
-categories = ["command-line-utilities", "web-programming"]
+homepage = "https://github.com/nmhuei/opencode2claude"
+repository = "https://github.com/nmhuei/opencode2claude"
+readme = "README.md"
+keywords = ["claude", "opencode", "api-bridge", "llm", "proxy", "anthropic", "cli"]
+categories = ["command-line-utilities", "web-programming", "development-tools"]
 
 [dependencies]
 tokio = { version = "1.35", features = ["full"] }
