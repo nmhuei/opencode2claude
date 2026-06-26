@@ -22,7 +22,7 @@ A blazing-fast local API bridge written in **Rust** that lets you connect **Clau
 [Quick Start](#-quick-start) •
 [How It Works](#-how-it-works) •
 [Features](#-features) •
-[Configuration](#%EF%B8%8F-configuration) •
+[Configuration](#-configuration) •
 [Contributing](#-contributing)
 
 </div>
@@ -33,11 +33,11 @@ A blazing-fast local API bridge written in **Rust** that lets you connect **Clau
 
 **Claude Code** is an incredible AI coding agent — but it's locked to Anthropic's API and pricing. **OpenCode** supports dozens of LLM providers (including free tiers). This bridge connects them seamlessly.
 
-|        Without this bridge        |             With this bridge             |
-| :-------------------------------: | :--------------------------------------: |
-| Claude Code → Anthropic API only | Claude Code →**Any LLM provider** |
-|         💸 Pay per token         |         🆓 Free models available         |
-|              1 model              |              🌐 50+ models              |
+| Without this bridge | With this bridge |
+| :-----------------: | :--------------: |
+| Claude Code → Anthropic API only | Claude Code → **Any LLM provider** |
+| 💸 Pay per token | 🆓 Free models available |
+| 1 model | 🌐 50+ models |
 
 ### Key Benefits
 
@@ -46,6 +46,8 @@ A blazing-fast local API bridge written in **Rust** that lets you connect **Clau
 - 🔌 **Drop-in replacement** — Just set 2 environment variables, no code changes needed
 - 📡 **Real-time streaming** — Full SSE (Server-Sent Events) support matching the Anthropic protocol
 - 🖥️ **Shell passthrough** — Execute local commands instantly with `!` prefix (0.01s response)
+- 🛡️ **Auto WARP IP Rotation** — Automatically rotates IP on rate limits (429/400) via `warp-cli`
+- 🚦 **Inbound rate limiting** — Configurable max concurrent requests via `BRIDGE_RATE_LIMIT`
 - 📦 **Single binary** — Compile once, copy anywhere. No runtime dependencies
 
 ---
@@ -101,11 +103,11 @@ Now just run `claude` in the same terminal and start coding with your chosen mod
 
 The bridge translates between two protocols:
 
-| Incoming (Anthropic API)             | Outgoing (OpenCode CLI)            |
-| ------------------------------------ | ---------------------------------- |
-| `POST /v1/messages`                | `opencode run --attach <daemon>` |
-| SSE streaming events                 | Realtime stdout/stderr streaming   |
-| `{"role": "user", "content": ...}` | Extracted prompt text              |
+| Incoming (Anthropic API) | Outgoing (OpenCode CLI) |
+| ------------------------ | ----------------------- |
+| `POST /v1/messages` | `opencode run --attach <daemon>` |
+| SSE streaming events | Realtime stdout/stderr streaming |
+| `{"role": "user", "content": ...}` | Extracted prompt text |
 
 ---
 
@@ -133,28 +135,10 @@ You: !git status
 → Executes instantly on local shell (0.01s, zero tokens used)
 
 You: !docker ps
-
 → Direct terminal output streamed back via SSE
 
 You: What is recursion?
 → Routed through OpenCode → LLM as normal
-```
-
-### 🛡️ Auto WARP IP Rotation (Anti Rate-Limit)
-
-If you are using free-tier models (like `deepseek-v4-flash-free`), you may occasionally hit provider rate limits (429 or 400 Upstream errors). The bridge has a built-in automatic recovery mechanism:
-
-- **Auto-Detect:** Detects upstream `429 Too Many Requests` or `400 Bad Request` rate-limiting responses.
-- **Auto-Rotate:** Invokes `warp-cli disconnect` and `warp-cli connect` to instantly acquire a fresh public IP from Cloudflare.
-- **Auto-Retry:** Seamlessly retries the failed request (up to 3 times) with the new IP address, preventing interruptions in your agent session.
-
-To use this with WARP in local SOCKS5 proxy mode:
-```bash
-# 1. Set warp-cli to proxy mode (one-time setup)
-warp-cli mode proxy
-
-# 2. Run the startup script (it will auto-detect WARP Proxy and route only the bridge traffic through it)
-source start.sh
 ```
 
 ### 🔄 Smart Daemon Detection
@@ -164,17 +148,56 @@ The bridge automatically detects whether the OpenCode daemon is running:
 - **Daemon active** → Attaches for instant responses (shared context, warm model)
 - **Daemon not found** → Falls back to standalone mode (cold start, still works)
 
+### 🛡️ Auto WARP IP Rotation (Anti Rate-Limit)
+
+If you are using free-tier models (like `deepseek-v4-flash-free`), you may occasionally hit provider rate limits. The bridge has a built-in automatic recovery mechanism:
+
+- **Auto-Detect:** Detects upstream `429 Too Many Requests` or `400 Bad Request` rate-limiting responses.
+- **Auto-Rotate:** Invokes `warp-cli disconnect` + `warp-cli connect` to acquire a fresh public IP.
+- **Auto-Retry:** Seamlessly retries the failed request (up to 3 times).
+
+To use with WARP in local SOCKS5 proxy mode:
+```bash
+# 1. Set warp-cli to proxy mode (one-time setup)
+warp-cli mode proxy
+
+# 2. Run the startup script (auto-detects WARP Proxy and routes bridge traffic through it)
+source start.sh
+```
+
+### 🚦 Inbound Rate Limiting
+
+```bash
+export BRIDGE_RATE_LIMIT=10    # Max 10 concurrent requests (unset = unlimited)
+```
+
 ---
 
 ## 🛠️ Configuration
 
-All configuration is done through environment variables:
+Configuration priority: **CLI args > Environment vars > TOML file > Defaults**
 
-| Variable           | Default                             | Description                    |
-| ------------------ | ----------------------------------- | ------------------------------ |
-| `BRIDGE_PORT`    | `4000`                            | Port the API bridge listens on |
-| `OPENCODE_PORT`  | `4096`                            | Port of the OpenCode daemon    |
-| `OPENCODE_MODEL` | `opencode/deepseek-v4-flash-free` | Target LLM model identifier    |
+### Full Environment Variables
+
+| Variable | Default | Description |
+| -------- | ------- | ----------- |
+| `BRIDGE_PORT` | `4000` | Port the API bridge listens on |
+| `BRIDGE_HOST` | `127.0.0.1` | Bind address |
+| `OPENCODE_PORT` | `4096` | Port of the OpenCode daemon |
+| `OPENCODE_MODEL` | `opencode/deepseek-v4-flash-free` | Target LLM model identifier |
+| `BRIDGE_SHELL_POLICY` | `unrestricted` | Shell policy: `disabled`, `allowlist`, `unrestricted` |
+| `BRIDGE_SHELL_ALLOWLIST` | `git,ls,pwd,cat,...` | Comma-separated allowed commands |
+| `BRIDGE_AUTH_TOKEN` | (none) | Comma-separated Bearer tokens |
+| `BRIDGE_MAX_BODY_SIZE` | `1048576` | Max request body (bytes) |
+| `BRIDGE_STREAM_BUFFER_SIZE` | `4096` | Streaming read buffer size |
+| `BRIDGE_CHANNEL_CAPACITY` | `256` | SSE channel queue capacity |
+| `BRIDGE_MAX_SEARCH_LOOPS` | `5` | Max search-interception retries |
+| `BRIDGE_RATE_LIMIT` | (none) | Max concurrent requests (unset = unlimited) |
+| `TAVILY_API_KEY` | (none) | Tavily web search API key |
+| `EXA_API_KEY` | (none) | Exa web search API key |
+| `SERPER_API_KEY` | (none) | Serper.dev web search API key |
+| `SEARXNG_URL` | (none) | SearXNG self-hosted instance URL |
+| `SEARXNG_API_KEY` | (none) | SearXNG API key |
 
 ### Using a different model
 
@@ -192,9 +215,36 @@ export OPENCODE_MODEL="ollama/llama3"
 source start.sh
 ```
 
-### Manual Setup (Advanced)
+### CLI Flags
 
-If you prefer to start each component individually:
+All flags override env vars and TOML config:
+
+| Flag | Maps to |
+| ---- | ------- |
+| `-p, --port` | `BRIDGE_PORT` |
+| `--host` | `BRIDGE_HOST` |
+| `-m, --model` | `OPENCODE_MODEL` |
+| `-c, --config` | TOML config path |
+| `--shell-policy` | `BRIDGE_SHELL_POLICY` |
+| `--tavily-api-key` | `TAVILY_API_KEY` |
+| `--exa-api-key` | `EXA_API_KEY` |
+| `--serper-api-key` | `SERPER_API_KEY` |
+| `--searxng-url` | `SEARXNG_URL` |
+| `--searxng-api-key` | `SEARXNG_API_KEY` |
+
+### TOML Config File
+
+Create `opencode2claude.toml` in project root (or use `-c`):
+```toml
+port = 4000
+model = "openai/gpt-4o"
+shell_policy = "allowlist"
+shell_allowlist = "git,ls,pwd,echo"
+auth_tokens = "sk-123,sk-456"
+tavily_api_key = "tvly-..."
+```
+
+### Manual Setup (Advanced)
 
 ```bash
 # 1. Build
@@ -203,8 +253,8 @@ cargo build --release
 # 2. Start OpenCode daemon
 opencode serve --port 4096 --hostname 127.0.0.1
 
-# 3. Start the bridge
-./target/release/opencode2claude
+# 3. Start the bridge with custom options
+./target/release/opencode2claude --port 4000 --model "openai/gpt-4o"
 
 # 4. Configure Claude Code (in a new terminal)
 export ANTHROPIC_API_KEY="opencode-bridge"
@@ -225,23 +275,39 @@ claude
 ```
 opencode2claude/
 ├── src/
-│   └── main.rs          # Core bridge — Axum router, SSE streaming, process management
-├── Cargo.toml           # Rust dependencies (axum, tokio, serde, reqwest, tracing)
-├── start.sh             # One-command setup: compile → daemon → bridge → env export
-├── stop.sh              # Graceful shutdown of all background processes
-├── .gitignore
+│   ├── main.rs               # Entry point, Axum router, CLI args, graceful shutdown
+│   ├── config.rs              # Config chain: CLI > Env > TOML > Defaults
+│   ├── handlers.rs            # Anthropic API request parsing & routing
+│   ├── middleware.rs          # Bearer token auth middleware
+│   ├── shell.rs               # Shell command execution with security policy
+│   ├── sse.rs                 # SSE event builder (Anthropic protocol)
+│   ├── state.rs               # AppState: shared config, HTTP client, rate limiter
+│   ├── error.rs               # BridgeError → Anthropic JSON error responses
+│   └── opencode/              # OpenCode API gateway (module directory)
+│       ├── mod.rs             # Module re-exports
+│       ├── types.rs           # OpenAI API type definitions
+│       ├── search.rs          # Web search providers with enum dispatch
+│       ├── mapper.rs          # Anthropic → OpenAI request mapper
+│       └── forward.rs         # Sync/stream forwarding + WARP retry
+├── tests/
+│   ├── common/
+│   │   └── mod.rs             # Shared integration test harness
+│   └── integration.rs         # 17 integration tests
+├── Cargo.toml                 # Rust dependencies
+├── start.sh                   # One-command setup: compile → daemon → bridge → env
+├── stop.sh                    # Graceful shutdown of all background processes
 └── README.md
 ```
 
 ### Tech Stack
 
-| Component     | Technology                                     | Why                                              |
-| ------------- | ---------------------------------------------- | ------------------------------------------------ |
-| Web Framework | [Axum](https://github.com/tokio-rs/axum) 0.7      | Type-safe, ergonomic, fastest Rust web framework |
-| Async Runtime | [Tokio](https://tokio.rs/)                        | Industry-standard async I/O for Rust             |
-| Serialization | [Serde](https://serde.rs/)                        | Zero-copy JSON parsing                           |
-| HTTP Client   | [Reqwest](https://github.com/seanmonstar/reqwest) | Daemon health checks                             |
-| Logging       | [Tracing](https://github.com/tokio-rs/tracing)    | Structured, async-aware logging                  |
+| Component | Technology | Why |
+| --------- | ---------- | --- |
+| Web Framework | [Axum](https://github.com/tokio-rs/axum) 0.7 | Type-safe, ergonomic, fastest Rust web framework |
+| Async Runtime | [Tokio](https://tokio.rs/) | Industry-standard async I/O for Rust |
+| Serialization | [Serde](https://serde.rs/) | Zero-copy JSON parsing |
+| HTTP Client | [Reqwest](https://github.com/seanmonstar/reqwest) | Connection pooling for daemon + search APIs |
+| Logging | [Tracing](https://github.com/tokio-rs/tracing) | Structured, async-aware logging |
 
 ---
 
@@ -249,13 +315,13 @@ opencode2claude/
 
 Since the bridge is a thin translation layer, overhead is minimal:
 
-| Metric                         | Value                                   |
-| ------------------------------ | --------------------------------------- |
-| Bridge startup time            | **< 5ms**                         |
-| Request routing overhead       | **< 1ms**                         |
-| Shell command (`!`) response | **~10ms**                         |
-| Memory footprint               | **~3 MB**                         |
-| Binary size                    | **~5 MB** (static, release build) |
+| Metric | Value |
+| ------ | ----- |
+| Bridge startup time | **< 5ms** |
+| Request routing overhead | **< 1ms** |
+| Shell command (`!`) response | **~10ms** |
+| Memory footprint | **~3 MB** |
+| Binary size | **~5 MB** (static, release build) |
 
 > The bottleneck is always the LLM provider, never the bridge.
 
@@ -268,7 +334,11 @@ Since the bridge is a thin translation layer, overhead is minimal:
 - [x] Support for `/v1/models` endpoint
 - [x] Configuration file support (TOML)
 - [x] Dockerfile for containerized deployment
-- [ ] Rate limiting
+- [x] Inbound rate limiting
+- [x] Configurable search loop limit
+- [x] CLI args for search API keys
+- [x] Module refactoring (opencode.rs split into 5 modules)
+- [x] Test coverage improvements (60 unit + 17 integration tests)
 - [ ] Request/response logging & analytics dashboard
 - [ ] Multi-model routing (different models for different tasks)
 
