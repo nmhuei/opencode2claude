@@ -775,6 +775,67 @@ fn map_anthropic_to_openai(payload: &MessagesRequest, model: String) -> OpenAiRe
     }
 }
 
+async fn rotate_warp_ip() {
+    info!("Rotating WARP IP address...");
+    let _ = tokio::process::Command::new("warp-cli")
+        .arg("disconnect")
+        .output()
+        .await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+    let _ = tokio::process::Command::new("warp-cli")
+        .arg("connect")
+        .output()
+        .await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(2500)).await;
+    info!("WARP IP address rotated successfully.");
+}
+
+async fn execute_with_warp_retry(
+    client: &Client,
+    req_body: &OpenAiRequest,
+) -> Result<reqwest::Response, reqwest::Error> {
+    let mut retry_count = 0;
+    loop {
+        let res = client
+            .post("https://opencode.ai/zen/v1/chat/completions")
+            .json(req_body)
+            .send()
+            .await;
+
+        match res {
+            Ok(response) => {
+                let status = response.status();
+                // TOO_MANY_REQUESTS is 429, BAD_REQUEST (400) is returned by upstream on free rate limit errors too
+                let is_rate_limit = status == reqwest::StatusCode::TOO_MANY_REQUESTS || 
+                                   status == reqwest::StatusCode::BAD_REQUEST;
+                
+                if is_rate_limit && retry_count < 3 {
+                    retry_count += 1;
+                    warn!(
+                        "Upstream rate limit or request error hit (status {}). Attempting to rotate WARP IP (Attempt {}/3)...",
+                        status, retry_count
+                    );
+                    rotate_warp_ip().await;
+                    continue;
+                }
+                return Ok(response);
+            }
+            Err(e) => {
+                if retry_count < 3 {
+                    retry_count += 1;
+                    warn!(
+                        "Network error connecting upstream: {}. Attempting to rotate WARP IP (Attempt {}/3)...",
+                        e, retry_count
+                    );
+                    rotate_warp_ip().await;
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
+}
+
 // ── API Forwarding Implementations ──
 
 pub async fn forward_to_llm_sync(
@@ -796,10 +857,7 @@ pub async fn forward_to_llm_sync(
 
         info!("Forwarding sync request for model {}", model);
 
-        let res = client
-            .post("https://opencode.ai/zen/v1/chat/completions")
-            .json(&openai_req)
-            .send()
+        let res = execute_with_warp_retry(client, &openai_req)
             .await
             .map_err(|e| BridgeError::UpstreamError(e.to_string()))?;
 
@@ -1027,12 +1085,7 @@ pub async fn forward_to_llm_stream(
                 model_clone, loop_count
             );
 
-            let res = match client_clone
-                .post("https://opencode.ai/zen/v1/chat/completions")
-                .json(&openai_req)
-                .send()
-                .await
-            {
+            let res = match execute_with_warp_retry(&client_clone, &openai_req).await {
                 Ok(r) => r,
                 Err(e) => {
                     error!("Error forwarding upstream request: {}", e);
