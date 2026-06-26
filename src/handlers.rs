@@ -131,6 +131,13 @@ pub async fn handle_messages(
     State(state): State<AppState>,
     Json(payload): Json<MessagesRequest>,
 ) -> Result<axum::response::Response, BridgeError> {
+    // Acquire rate limiter permit if configured
+    if let Some(ref limiter) = state.rate_limiter {
+        let _permit = limiter.acquire().await.map_err(|_| {
+            BridgeError::InvalidRequest("Rate limit exceeded".to_string())
+        })?;
+    }
+
     if payload.messages.is_empty() {
         return Err(BridgeError::InvalidRequest("No messages found".to_string()));
     }
@@ -153,10 +160,6 @@ pub async fn handle_messages(
         info!(
             "Available tools from client: {:?}",
             tools.iter().map(|t| &t.name).collect::<Vec<_>>()
-        );
-        let _ = std::fs::write(
-            "client_tools.json",
-            serde_json::to_string_pretty(tools).unwrap_or_default(),
         );
     }
 

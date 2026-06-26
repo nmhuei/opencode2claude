@@ -39,6 +39,8 @@ pub struct TomlConfig {
     pub exa_api_key: Option<String>,
     pub serper_api_key: Option<String>,
     pub searxng_url: Option<String>,
+    pub searxng_api_key: Option<String>,
+    pub max_search_loops: Option<u32>,
 }
 
 impl TomlConfig {
@@ -56,6 +58,11 @@ pub struct CliOverrides {
     pub model: Option<String>,
     pub shell_policy: Option<String>,
     pub config_path: Option<String>,
+    pub tavily_api_key: Option<String>,
+    pub exa_api_key: Option<String>,
+    pub serper_api_key: Option<String>,
+    pub searxng_url: Option<String>,
+    pub searxng_api_key: Option<String>,
 }
 
 /// Central configuration struct for the bridge.
@@ -87,98 +94,15 @@ pub struct BridgeConfig {
     pub serper_api_key: Option<String>,
     /// SearXNG self-hosted instance URL
     pub searxng_url: Option<String>,
+    /// SearXNG API key
+    #[allow(dead_code)]
+    pub searxng_api_key: Option<String>,
+    /// Maximum number of search loops
+    #[allow(dead_code)]
+    pub max_search_loops: u32,
 }
 
 impl BridgeConfig {
-    /// Load configuration from environment variables.
-    #[allow(dead_code)]
-    pub fn from_env() -> Self {
-        let host: IpAddr = env::var("BRIDGE_HOST")
-            .unwrap_or_else(|_| DEFAULT_HOST.to_string())
-            .parse()
-            .unwrap_or_else(|_| DEFAULT_HOST.parse().unwrap());
-
-        if host.to_string() == "0.0.0.0" {
-            warn!("⚠️  Bridge is binding to 0.0.0.0 — accessible from ALL network interfaces. Consider using 127.0.0.1 for local-only access.");
-        }
-
-        let bridge_port: u16 = env::var("BRIDGE_PORT")
-            .unwrap_or_else(|_| DEFAULT_BRIDGE_PORT.to_string())
-            .parse()
-            .unwrap_or(DEFAULT_BRIDGE_PORT);
-
-        let opencode_port: u16 = env::var("OPENCODE_PORT")
-            .unwrap_or_else(|_| DEFAULT_OPENCODE_PORT.to_string())
-            .parse()
-            .unwrap_or(DEFAULT_OPENCODE_PORT);
-
-        let model = env::var("OPENCODE_MODEL").ok();
-
-        let shell_policy = match env::var("BRIDGE_SHELL_POLICY")
-            .unwrap_or_else(|_| "unrestricted".to_string())
-            .to_lowercase()
-            .as_str()
-        {
-            "disabled" => ShellPolicy::Disabled,
-            "allowlist" => {
-                let allowed: HashSet<String> = env::var("BRIDGE_SHELL_ALLOWLIST")
-                    .unwrap_or_else(|_| {
-                        "git,ls,pwd,cat,find,grep,echo,wc,head,tail,diff".to_string()
-                    })
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                ShellPolicy::AllowList(allowed)
-            }
-            _ => ShellPolicy::Unrestricted,
-        };
-
-        let auth_tokens = env::var("BRIDGE_AUTH_TOKEN").ok().map(|tokens| {
-            tokens
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect()
-        });
-
-        let max_body_size = env::var("BRIDGE_MAX_BODY_SIZE")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(DEFAULT_MAX_BODY_SIZE);
-
-        let stream_buffer_size = env::var("BRIDGE_STREAM_BUFFER_SIZE")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(DEFAULT_STREAM_BUFFER_SIZE);
-
-        let channel_capacity = env::var("BRIDGE_CHANNEL_CAPACITY")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(DEFAULT_CHANNEL_CAPACITY);
-
-        let tavily_api_key = env::var("TAVILY_API_KEY").ok();
-        let exa_api_key = env::var("EXA_API_KEY").ok();
-        let serper_api_key = env::var("SERPER_API_KEY").ok();
-        let searxng_url = env::var("SEARXNG_URL").ok();
-
-        BridgeConfig {
-            host,
-            bridge_port,
-            opencode_port,
-            model,
-            shell_policy,
-            auth_tokens,
-            max_body_size,
-            stream_buffer_size,
-            channel_capacity,
-            tavily_api_key,
-            exa_api_key,
-            serper_api_key,
-            searxng_url,
-        }
-    }
-
     /// Load configuration with priority: CLI args > Env vars > TOML file > Defaults.
     pub fn from_env_and_cli(overrides: CliOverrides) -> Self {
         let config_path = overrides
@@ -277,21 +201,35 @@ impl BridgeConfig {
             .or_else(|| toml_config.as_ref().and_then(|t| t.channel_capacity))
             .unwrap_or(DEFAULT_CHANNEL_CAPACITY);
 
-        let tavily_api_key = env::var("TAVILY_API_KEY")
-            .ok()
+        let tavily_api_key = overrides
+            .tavily_api_key
+            .or_else(|| env::var("TAVILY_API_KEY").ok())
             .or_else(|| toml_config.as_ref().and_then(|t| t.tavily_api_key.clone()));
 
-        let exa_api_key = env::var("EXA_API_KEY")
-            .ok()
+        let exa_api_key = overrides
+            .exa_api_key
+            .or_else(|| env::var("EXA_API_KEY").ok())
             .or_else(|| toml_config.as_ref().and_then(|t| t.exa_api_key.clone()));
 
-        let serper_api_key = env::var("SERPER_API_KEY")
-            .ok()
+        let serper_api_key = overrides
+            .serper_api_key
+            .or_else(|| env::var("SERPER_API_KEY").ok())
             .or_else(|| toml_config.as_ref().and_then(|t| t.serper_api_key.clone()));
 
-        let searxng_url = env::var("SEARXNG_URL")
-            .ok()
+        let searxng_url = overrides
+            .searxng_url
+            .or_else(|| env::var("SEARXNG_URL").ok())
             .or_else(|| toml_config.as_ref().and_then(|t| t.searxng_url.clone()));
+
+        let searxng_api_key = overrides.searxng_api_key
+            .or_else(|| env::var("SEARXNG_API_KEY").ok())
+            .or_else(|| toml_config.as_ref().and_then(|t| t.searxng_api_key.clone()));
+
+        let max_search_loops = env::var("BRIDGE_MAX_SEARCH_LOOPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .or_else(|| toml_config.as_ref().and_then(|t| t.max_search_loops))
+            .unwrap_or(5);
 
         BridgeConfig {
             host,
@@ -307,6 +245,8 @@ impl BridgeConfig {
             exa_api_key,
             serper_api_key,
             searxng_url,
+            searxng_api_key,
+            max_search_loops,
         }
     }
 
@@ -344,7 +284,7 @@ mod tests {
         env::remove_var("BRIDGE_SHELL_POLICY");
         env::remove_var("BRIDGE_AUTH_TOKEN");
 
-        let config = BridgeConfig::from_env();
+        let config = BridgeConfig::from_env_and_cli(CliOverrides::default());
         assert_eq!(config.bridge_port, DEFAULT_BRIDGE_PORT);
         assert_eq!(config.opencode_port, DEFAULT_OPENCODE_PORT);
         assert_eq!(config.host.to_string(), DEFAULT_HOST);
@@ -474,7 +414,10 @@ mod tests {
 
     #[test]
     fn test_auth_validation() {
-        let mut config = BridgeConfig::from_env();
+        let _lock = ENV_LOCK.lock().unwrap();
+        env::remove_var("BRIDGE_AUTH_TOKEN");
+
+        let mut config = BridgeConfig::from_env_and_cli(CliOverrides::default());
 
         // No auth configured — everything is valid
         config.auth_tokens = None;

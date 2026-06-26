@@ -53,6 +53,26 @@ struct Cli {
     /// Print version and exit
     #[arg(short = 'v', long = "version")]
     version: bool,
+
+    /// Tavily search API key override
+    #[arg(long)]
+    tavily_api_key: Option<String>,
+
+    /// Exa search API key override
+    #[arg(long)]
+    exa_api_key: Option<String>,
+
+    /// Serper.dev search API key override
+    #[arg(long)]
+    serper_api_key: Option<String>,
+
+    /// SearXNG instance URL override
+    #[arg(long)]
+    searxng_url: Option<String>,
+
+    /// SearXNG API key override
+    #[arg(long)]
+    searxng_api_key: Option<String>,
 }
 
 #[tokio::main]
@@ -81,6 +101,11 @@ async fn main() {
         model: cli.model,
         shell_policy: cli.shell_policy,
         config_path: cli.config,
+        tavily_api_key: cli.tavily_api_key,
+        exa_api_key: cli.exa_api_key,
+        serper_api_key: cli.serper_api_key,
+        searxng_url: cli.searxng_url,
+        searxng_api_key: cli.searxng_api_key,
     };
     let config = BridgeConfig::from_env_and_cli(overrides);
     let addr = SocketAddr::from((config.host, config.bridge_port));

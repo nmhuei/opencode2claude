@@ -4,6 +4,7 @@ use crate::config::BridgeConfig;
 use reqwest::Client;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Semaphore;
 
 /// Shared application state, injected into handlers via Axum's State extractor.
 #[derive(Debug, Clone)]
@@ -12,6 +13,8 @@ pub struct AppState {
     pub config: Arc<BridgeConfig>,
     /// Reusable HTTP client with connection pooling for daemon health checks.
     pub http_client: Client,
+    /// Optional rate limiter semaphore (None = no limit).
+    pub rate_limiter: Option<Arc<Semaphore>>,
 }
 
 impl AppState {
@@ -23,9 +26,44 @@ impl AppState {
             .build()
             .expect("Failed to create HTTP client");
 
+        let rate_limiter = std::env::var("BRIDGE_RATE_LIMIT")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .map(|permits| Arc::new(Semaphore::new(permits)));
+
         Self {
             config: Arc::new(config),
             http_client,
+            rate_limiter,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::BridgeConfig;
+
+    #[test]
+    fn test_app_state_creates_client() {
+        let config = BridgeConfig {
+            host: "127.0.0.1".parse().unwrap(),
+            bridge_port: 0,
+            opencode_port: 4096,
+            model: None,
+            shell_policy: crate::shell::ShellPolicy::Disabled,
+            auth_tokens: None,
+            max_body_size: 1024,
+            stream_buffer_size: 4096,
+            channel_capacity: 256,
+            tavily_api_key: None,
+            exa_api_key: None,
+            serper_api_key: None,
+            searxng_url: None,
+            searxng_api_key: None,
+            max_search_loops: 5,
+        };
+        let state = AppState::new(config);
+        assert_eq!(state.config.bridge_port, 0);
     }
 }

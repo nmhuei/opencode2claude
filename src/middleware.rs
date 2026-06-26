@@ -47,3 +47,110 @@ pub async fn auth_middleware(
 
     Ok(next.run(request).await)
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::config::BridgeConfig;
+    use crate::state::AppState;
+    use axum::body::Body;
+    use axum::http::Request;
+    use axum::routing::get;
+    use axum::routing::post;
+    use axum::Router;
+    use tower::util::ServiceExt;
+
+    fn make_app(auth_tokens: Option<Vec<String>>) -> Router {
+        let config = BridgeConfig {
+            host: "127.0.0.1".parse().unwrap(),
+            bridge_port: 0,
+            opencode_port: 4096,
+            model: None,
+            shell_policy: crate::shell::ShellPolicy::Disabled,
+            auth_tokens,
+            max_body_size: 1024,
+            stream_buffer_size: 4096,
+            channel_capacity: 256,
+            tavily_api_key: None,
+            exa_api_key: None,
+            serper_api_key: None,
+            searxng_url: None,
+            searxng_api_key: None,
+            max_search_loops: 5,
+        };
+        let state = AppState::new(config);
+
+        Router::new()
+            .route("/v1/messages", post(|| async { "ok" }))
+            .route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                super::auth_middleware,
+            ))
+            .route("/health", get(|| async { "ok" }))
+            .with_state(state)
+    }
+
+    #[tokio::test]
+    async fn test_auth_middleware_skips_health() {
+        let app = make_app(Some(vec!["secret".to_string()]));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_auth_middleware_passes_valid_token() {
+        let app = make_app(Some(vec!["secret".to_string()]));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("Authorization", "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_auth_middleware_rejects_invalid() {
+        let app = make_app(Some(vec!["secret".to_string()]));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("Authorization", "Bearer wrong")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 401);
+    }
+
+    #[tokio::test]
+    async fn test_auth_middleware_no_auth_configured() {
+        let app = make_app(None);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+}
