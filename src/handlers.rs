@@ -205,7 +205,7 @@ pub async fn handle_messages(
                 payload,
                 req_model,
                 state.config.channel_capacity,
-                state.config.clone(),
+                state.search_client.clone(),
             )
             .await?;
             let response = Sse::new(stream)
@@ -222,7 +222,7 @@ pub async fn handle_messages(
                 &state.http_client,
                 payload,
                 req_model,
-                state.config.clone(),
+                state.search_client.clone(),
             )
             .await?;
             Ok(Json(response).into_response())

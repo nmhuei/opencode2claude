@@ -35,6 +35,29 @@ pub fn is_web_search_tool(name: &str) -> bool {
         || name_lower == "web_fetch"
 }
 
+/// Extract the search query from tool call arguments.
+///
+/// Parses the JSON tool arguments and looks for common query fields:
+/// "query" or "q", falling back to the first string field found.
+pub fn extract_search_query(tool_args: &str) -> String {
+    let input_val: serde_json::Value = serde_json::from_str(tool_args)
+        .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+    if let Some(obj) = input_val.as_object() {
+        if let Some(q_val) = obj.get("query").and_then(|v| v.as_str()) {
+            return q_val.to_string();
+        }
+        if let Some(q_val) = obj.get("q").and_then(|v| v.as_str()) {
+            return q_val.to_string();
+        }
+        for (_, v) in obj {
+            if let Some(s) = v.as_str() {
+                return s.to_string();
+            }
+        }
+    }
+    String::new()
+}
+
 pub fn map_model_name(model: &str) -> String {
     let mut name = model.to_string();
     if name.starts_with("opencode/") {
@@ -283,70 +306,21 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_system_prompt_string() {
-        let val = serde_json::json!("you are a helpful assistant");
+    fn test_extract_search_query() {
         assert_eq!(
-            extract_system_prompt(&val),
-            "you are a helpful assistant"
-        );
-    }
-
-    #[test]
-    fn test_extract_system_prompt_array() {
-        let val = serde_json::json!([
-            {"type": "text", "text": "Be concise."},
-            {"type": "text", "text": "Use markdown."}
-        ]);
-        assert_eq!(
-            extract_system_prompt(&val),
-            "Be concise.\nUse markdown."
-        );
-    }
-
-    #[test]
-    fn test_extract_system_prompt_mixed() {
-        // Array với text và non-text blocks — chỉ text được extract
-        let val = serde_json::json!([
-            {"type": "text", "text": "Hello"},
-            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "abc"}},
-            {"type": "text", "text": "World"}
-        ]);
-        assert_eq!(extract_system_prompt(&val), "Hello\nWorld");
-    }
-
-    #[test]
-    fn test_extract_system_prompt_empty() {
-        let val = serde_json::json!("");
-        assert_eq!(extract_system_prompt(&val), "");
-    }
-
-    #[test]
-    fn test_extract_system_prompt_null() {
-        let val = serde_json::json!(null);
-        assert_eq!(extract_system_prompt(&val), "");
-    }
-
-    #[test]
-    fn test_map_model_name_opencode_prefix() {
-        assert_eq!(map_model_name("opencode/gpt-4"), "gpt-4");
-    }
-
-    #[test]
-    fn test_map_model_name_free_mapping() {
-        assert_eq!(
-            map_model_name("deepseek-v4-flash"),
-            "deepseek-v4-flash-free"
+            extract_search_query(r#"{"query": "test query"}"#),
+            "test query"
         );
         assert_eq!(
-            map_model_name("nemotron-3-ultra"),
-            "nemotron-3-ultra-free"
+            extract_search_query(r#"{"q": "short query"}"#),
+            "short query"
         );
-    }
-
-    #[test]
-    fn test_map_model_name_identity() {
-        assert_eq!(map_model_name("gpt-4"), "gpt-4");
-        assert_eq!(map_model_name("claude-3-opus"), "claude-3-opus");
+        assert_eq!(
+            extract_search_query(r#"{"other": "fallback"}"#),
+            "fallback"
+        );
+        assert_eq!(extract_search_query(r#"{}"#), "");
+        assert_eq!(extract_search_query(r#"invalid json"#), "");
     }
 
     #[test]
@@ -487,5 +461,63 @@ mod tests {
             result.tool_choice,
             Some(serde_json::Value::String("required".to_string()))
         );
+    }
+
+    #[test]
+    fn test_map_model_name() {
+        assert_eq!(map_model_name("deepseek-v4-flash"), "deepseek-v4-flash-free");
+        assert_eq!(map_model_name("gpt-4"), "gpt-4");
+        assert_eq!(map_model_name("opencode/gpt-4"), "gpt-4");
+    }
+
+    #[test]
+    fn test_map_model_name_free_mapping() {
+        assert_eq!(
+            map_model_name("nemotron-3-ultra"),
+            "nemotron-3-ultra-free"
+        );
+    }
+
+    #[test]
+    fn test_extract_system_prompt_string() {
+        let val = serde_json::json!("you are a helpful assistant");
+        assert_eq!(
+            extract_system_prompt(&val),
+            "you are a helpful assistant"
+        );
+    }
+
+    #[test]
+    fn test_extract_system_prompt_array() {
+        let val = serde_json::json!([
+            {"type": "text", "text": "Be concise."},
+            {"type": "text", "text": "Use markdown."}
+        ]);
+        assert_eq!(
+            extract_system_prompt(&val),
+            "Be concise.\nUse markdown."
+        );
+    }
+
+    #[test]
+    fn test_extract_system_prompt_mixed() {
+        let val = serde_json::json!([
+            {"type": "text", "text": "Hello"},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "abc"}},
+            {"type": "text", "text": "World"}
+        ]);
+        assert_eq!(extract_system_prompt(&val), "Hello\nWorld");
+    }
+
+    #[test]
+    fn test_extract_system_prompt_empty() {
+        let val = serde_json::json!("");
+        assert_eq!(extract_system_prompt(&val), "");
+    }
+
+    #[test]
+    fn test_extract_system_prompt_null() {
+        let val = serde_json::json!(null);
+        assert_eq!(extract_system_prompt(&val), "");
     }
 }

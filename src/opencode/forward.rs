@@ -3,11 +3,10 @@
 //! Handles synchronous and streaming requests, search tool interception,
 //! WARP IP rotation for rate-limit retry, and SSE event construction.
 
-use crate::config::BridgeConfig;
 use crate::error::BridgeError;
 use crate::handlers::{ContentVal, MessagesRequest};
-use crate::opencode::mapper::{is_web_search_tool, map_anthropic_to_openai};
-use crate::opencode::search::perform_search_fallback;
+use crate::opencode::mapper::{extract_search_query, is_web_search_tool, map_anthropic_to_openai};
+use crate::opencode::search::SearchClient;
 use crate::opencode::types::*;
 use crate::sse::SseEventBuilder;
 use axum::response::sse::Event;
@@ -15,7 +14,6 @@ use futures_util::{Stream, StreamExt};
 use reqwest::Client;
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::sync::Arc;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{error, info, warn};
 
@@ -97,7 +95,7 @@ pub async fn forward_to_llm_sync(
     client: &Client,
     mut payload: MessagesRequest,
     model: String,
-    config: Arc<BridgeConfig>,
+    search_client: SearchClient,
 ) -> Result<serde_json::Value, BridgeError> {
     let mut loop_count = 0;
     loop {
@@ -148,24 +146,11 @@ pub async fn forward_to_llm_sync(
                     has_search = true;
                     search_tc_id = tc.id.clone();
                     search_tc_name = tc.function.name.clone();
-                    let input_val: serde_json::Value = serde_json::from_str(&tc.function.arguments)
-                        .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-                    search_tc_input = input_val.clone();
-
-                    if let Some(obj) = input_val.as_object() {
-                        if let Some(q_val) = obj.get("query").and_then(|v| v.as_str()) {
-                            search_query = q_val.to_string();
-                        } else if let Some(q_val) = obj.get("q").and_then(|v| v.as_str()) {
-                            search_query = q_val.to_string();
-                        } else {
-                            for (_, v) in obj {
-                                if let Some(s) = v.as_str() {
-                                    search_query = s.to_string();
-                                    break;
-                                }
-                            }
-                        }
-                    }
+                    let input_val: serde_json::Value =
+                        serde_json::from_str(&tc.function.arguments)
+                            .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                    search_tc_input = input_val;
+                    search_query = extract_search_query(&tc.function.arguments);
                     break;
                 }
             }
@@ -176,7 +161,7 @@ pub async fn forward_to_llm_sync(
                 "Intercepted sync search tool call. Query: '{}'",
                 search_query
             );
-            let search_results = perform_search_fallback(&search_query, &config).await;
+            let search_results = search_client.search(&search_query).await;
             info!("Search completed. Results length: {}", search_results.len());
 
             // Append assistant's tool call turn
@@ -308,7 +293,7 @@ pub async fn forward_to_llm_stream(
     payload: MessagesRequest,
     model: String,
     channel_capacity: usize,
-    config: Arc<BridgeConfig>,
+    search_client: SearchClient,
 ) -> Result<impl Stream<Item = Result<Event, Infallible>>, BridgeError> {
     let (tx, rx) = tokio::sync::mpsc::channel(channel_capacity);
     let msg_id = format!(
@@ -620,30 +605,16 @@ pub async fn forward_to_llm_stream(
             }
 
             if intercepting_search {
-                // Perform DuckDuckGo Search
+                // Extract query from accumulated arguments
                 let input_val: serde_json::Value = serde_json::from_str(&search_tc_args)
                     .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-                let mut search_query = String::new();
-                if let Some(obj) = input_val.as_object() {
-                    if let Some(q_val) = obj.get("query").and_then(|v| v.as_str()) {
-                        search_query = q_val.to_string();
-                    } else if let Some(q_val) = obj.get("q").and_then(|v| v.as_str()) {
-                        search_query = q_val.to_string();
-                    } else {
-                        for (_, v) in obj {
-                            if let Some(s) = v.as_str() {
-                                search_query = s.to_string();
-                                break;
-                            }
-                        }
-                    }
-                }
+                let search_query = extract_search_query(&search_tc_args);
 
                 info!(
                     "Intercepted stream search tool call. Query: '{}'",
                     search_query
                 );
-                let search_results = perform_search_fallback(&search_query, &config).await;
+                let search_results = search_client.search(&search_query).await;
                 info!("Search completed. Results length: {}", search_results.len());
 
                 // Append assistant turn
