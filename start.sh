@@ -12,6 +12,7 @@ NC='\033[0m' # No Color
 # Configurations (Overridable via environment variables)
 BRIDGE_PORT=${BRIDGE_PORT:-4000}
 OPENCODE_PORT=${OPENCODE_PORT:-4096}
+OPENCODE_MODEL=${OPENCODE_MODEL:-"opencode/deepseek-v4-flash-free"}
 PID_FILE=".bridge.pids"
 
 # Determine if script is being sourced or run directly
@@ -85,6 +86,7 @@ fi
 echo -e "${BLUE}Starting Rust API Bridge on port ${BRIDGE_PORT} in background...${NC}"
 export BRIDGE_PORT
 export OPENCODE_PORT
+export OPENCODE_MODEL
 
 ./target/release/opencode2claude > bridge.log 2>&1 &
 BRIDGE_PID=$!
@@ -94,11 +96,13 @@ echo -e "${GREEN}✓ Started Rust API Bridge (PID: $BRIDGE_PID). Logs routed to 
 # Export the variables so they are active in the sourced terminal
 export ANTHROPIC_API_KEY="opencode-bridge"
 export ANTHROPIC_API_URL="http://127.0.0.1:${BRIDGE_PORT}/v1"
+export OPENCODE_MODEL
 
 echo -e "\n${GREEN}✓ Setup completed successfully!${NC}"
 echo -e "Environment variables set in current session:"
 echo -e "  ${YELLOW}export ANTHROPIC_API_KEY=\"$ANTHROPIC_API_KEY\"${NC}"
 echo -e "  ${YELLOW}export ANTHROPIC_API_URL=\"$ANTHROPIC_API_URL\"${NC}"
+echo -e "  ${YELLOW}export OPENCODE_MODEL=\"$OPENCODE_MODEL\"${NC}"
 echo -e "\nYou can now run ${GREEN}claude${NC} directly in this terminal window."
 echo -e "To stop the bridge and daemon later, run: ${YELLOW}./stop.sh${NC}"
 
