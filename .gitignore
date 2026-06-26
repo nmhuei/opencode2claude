@@ -13,3 +13,4 @@
 # Ignore tests folder as requested
 /tests
 
+.claude/
