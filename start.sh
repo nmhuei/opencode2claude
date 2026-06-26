@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Robust startup script for OpenCode2Claude Bridge
+# Robust startup script for Rust version of OpenCode2Claude Bridge
 # Designed to be sourced: source start.sh
 
 GREEN='\033[0;32m'
@@ -42,6 +42,17 @@ if [ -f "$PID_FILE" ]; then
     rm -f "$PID_FILE"
 fi
 
+# Compile Rust binary if missing or code is updated
+if [ ! -f "target/release/opencode2claude" ]; then
+    echo -e "${BLUE}Compiling Rust bridge in release mode... (first build may take a minute)${NC}"
+    cargo build --release
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Compilation failed.${NC}"
+        if [ "$is_sourced" = true ]; then return 1; else exit 1; fi
+    fi
+    echo -e "${GREEN}✓ Compilation completed successfully.${NC}"
+fi
+
 # Start opencode serve daemon if not already running
 if curl -s "http://127.0.0.1:${OPENCODE_PORT}/doc" > /dev/null; then
     echo -e "${GREEN}✓ OpenCode Daemon is already listening on port ${OPENCODE_PORT}.${NC}"
@@ -70,15 +81,15 @@ if nc -z 127.0.0.1 "$BRIDGE_PORT" 2>/dev/null; then
     if [ "$is_sourced" = true ]; then return 1; else exit 1; fi
 fi
 
-# Start the python bridge in the background
-echo -e "${BLUE}Starting API Bridge on port ${BRIDGE_PORT} in background...${NC}"
+# Start the Rust bridge in the background
+echo -e "${BLUE}Starting Rust API Bridge on port ${BRIDGE_PORT} in background...${NC}"
 export BRIDGE_PORT
 export OPENCODE_PORT
 
-python3 bridge.py > bridge.log 2>&1 &
+./target/release/opencode2claude > bridge.log 2>&1 &
 BRIDGE_PID=$!
 echo "$BRIDGE_PID" >> "$PID_FILE"
-echo -e "${GREEN}✓ Started API Bridge (PID: $BRIDGE_PID). Logs routed to bridge.log${NC}"
+echo -e "${GREEN}✓ Started Rust API Bridge (PID: $BRIDGE_PID). Logs routed to bridge.log${NC}"
 
 # Export the variables so they are active in the sourced terminal
 export ANTHROPIC_API_KEY="opencode-bridge"

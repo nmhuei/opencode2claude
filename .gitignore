@@ -8,3 +8,8 @@ __pycache__/
 
 # OS files
 .DS_Store
+
+
+# Added by cargo
+
+/target
