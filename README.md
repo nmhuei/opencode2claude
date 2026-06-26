@@ -8,6 +8,7 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/nmhuei/opencode2claude/ci.yml?style=flat-square&branch=main)](https://github.com/nmhuei/opencode2claude/actions)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io-blue?style=flat-square&logo=docker)](https://github.com/nmhuei/opencode2claude/pkgs/container/opencode2claude)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)](LICENSE)
+[![GitHub Release](https://img.shields.io/github/v/release/nmhuei/opencode2claude?style=flat-square&logo=github)](https://github.com/nmhuei/opencode2claude/releases)
 
 **Claude Code** → `opencode2claude` → **OpenCode CLI** → **Any LLM**
 
@@ -36,18 +37,17 @@ Claude Code is locked to Anthropic's API. This bridge routes it through [OpenCod
 ## 📦 Install
 
 ```bash
-# One-liner (recommended)
-git clone https://github.com/nmhuei/opencode2claude.git && cd opencode2claude
-source start.sh
+# One-liner (recommended) — auto-detects OS + arch
+curl -fsSL https://raw.githubusercontent.com/nmhuei/opencode2claude/main/install.sh | sh
 
-# Or via cargo
+# Or via cargo (if you have Rust)
 cargo install opencode2claude
 
 # Or via Docker
 docker pull ghcr.io/nmhuei/opencode2claude:latest
 ```
 
-Then just run `claude` in the same terminal.
+No dependencies needed. The binary is **~5MB** and starts instantly.
 
 ---
 
