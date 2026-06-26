@@ -150,12 +150,11 @@ If you are using free-tier models (like `deepseek-v4-flash-free`), you may occas
 
 To use this with WARP in local SOCKS5 proxy mode:
 ```bash
-# 1. Set warp-cli to proxy mode and connect
-warp-cli set-mode proxy
-warp-cli connect
+# 1. Set warp-cli to proxy mode (one-time setup)
+warp-cli mode proxy
 
-# 2. Run the bridge with proxy routing
-ALL_PROXY="socks5://127.0.0.1:40000" ./start.sh
+# 2. Run the startup script (it will auto-detect WARP Proxy and route only the bridge traffic through it)
+source start.sh
 ```
 
 ### 🔄 Smart Daemon Detection

@@ -806,9 +806,9 @@ async fn execute_with_warp_retry(
             Ok(response) => {
                 let status = response.status();
                 // TOO_MANY_REQUESTS is 429, BAD_REQUEST (400) is returned by upstream on free rate limit errors too
-                let is_rate_limit = status == reqwest::StatusCode::TOO_MANY_REQUESTS || 
-                                   status == reqwest::StatusCode::BAD_REQUEST;
-                
+                let is_rate_limit = status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                    || status == reqwest::StatusCode::BAD_REQUEST;
+
                 if is_rate_limit && retry_count < 3 {
                     retry_count += 1;
                     warn!(

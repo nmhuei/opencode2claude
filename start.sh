@@ -61,6 +61,7 @@ else
     echo -e "${BLUE}Starting OpenCode serve daemon in background (port ${OPENCODE_PORT})...${NC}"
     opencode serve --port "$OPENCODE_PORT" --hostname 127.0.0.1 > opencode_serve.log 2>&1 &
     DAEMON_PID=$!
+    disown "$DAEMON_PID" 2>/dev/null
     echo "$DAEMON_PID" >> "$PID_FILE"
     echo -e "${GREEN}✓ Started OpenCode serve daemon (PID: $DAEMON_PID). Logs routed to opencode_serve.log${NC}"
     
@@ -82,14 +83,28 @@ if nc -z 127.0.0.1 "$BRIDGE_PORT" 2>/dev/null; then
     if [ "$is_sourced" = true ]; then return 1; else exit 1; fi
 fi
 
+# Auto-detect Cloudflare WARP proxy settings
+BRIDGE_ALL_PROXY=""
+BRIDGE_NO_PROXY=""
+if command -v warp-cli &> /dev/null; then
+    warp_settings=$(warp-cli settings list 2>/dev/null || warp-cli settings 2>/dev/null)
+    if echo "$warp_settings" | grep -q "WarpProxy"; then
+        echo -e "${GREEN}✓ Cloudflare WARP Proxy support detected.${NC}"
+        BRIDGE_ALL_PROXY="socks5://127.0.0.1:40000"
+        BRIDGE_NO_PROXY="localhost,127.0.0.1"
+        echo -e "  Routing bridge traffic via ${YELLOW}socks5://127.0.0.1:40000${NC} (Other terminal commands remain unaffected)"
+    fi
+fi
+
 # Start the Rust bridge in the background
 echo -e "${BLUE}Starting Rust API Bridge on port ${BRIDGE_PORT} in background...${NC}"
 export BRIDGE_PORT
 export OPENCODE_PORT
 export OPENCODE_MODEL
 
-./target/release/opencode2claude > bridge.log 2>&1 &
+nohup env ALL_PROXY="$BRIDGE_ALL_PROXY" NO_PROXY="$BRIDGE_NO_PROXY" ./target/release/opencode2claude > bridge.log 2>&1 &
 BRIDGE_PID=$!
+disown "$BRIDGE_PID" 2>/dev/null
 echo "$BRIDGE_PID" >> "$PID_FILE"
 echo -e "${GREEN}✓ Started Rust API Bridge (PID: $BRIDGE_PID). Logs routed to bridge.log${NC}"
 

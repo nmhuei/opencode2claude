@@ -38,3 +38,12 @@ else
     
     echo -e "${GREEN}✓ Cleanup complete.${NC}"
 fi
+
+# Inform about WARP CLI status if it is connected
+if command -v warp-cli &> /dev/null; then
+    warp_status=$(warp-cli status 2>/dev/null)
+    if echo "$warp_status" | grep -q "Connected"; then
+        echo -e "\n${YELLOW}Note: Cloudflare WARP is still connected.${NC}"
+        echo -e "To disconnect WARP, run: ${YELLOW}warp-cli disconnect${NC}"
+    fi
+fi
