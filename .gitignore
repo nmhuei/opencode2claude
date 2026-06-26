@@ -9,3 +9,7 @@
 
 # Added by cargo
 /target
+
+# Ignore tests folder as requested
+/tests
+
