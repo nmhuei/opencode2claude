@@ -373,6 +373,61 @@ mod tests {
         assert_eq!(url_decode("abc"), "abc");
     }
 
+    #[test]
+    fn test_url_encode_basic() {
+        assert_eq!(urlencoding_simple("hello world"), "hello+world");
+    }
+
+    #[test]
+    fn test_url_encode_special_chars() {
+        assert_eq!(urlencoding_simple("a/b?c=d"), "a%2Fb%3Fc%3Dd");
+    }
+
+    #[test]
+    fn test_url_encode_alphanumeric() {
+        assert_eq!(urlencoding_simple("abc123"), "abc123");
+    }
+
+    #[test]
+    fn test_url_decode_roundtrip() {
+        // Uses only chars that survive percent-encoding roundtrip:
+        // urlencoding_simple encodes non-alphanumeric chars as %XX (except space -> +),
+        // and url_decode only handles %XX (not + -> space).
+        let original = "a/b?c=d&e=f";
+        assert_eq!(
+            url_decode(&urlencoding_simple(original)),
+            original
+        );
+    }
+
+    #[test]
+    fn test_strip_html_tags_basic() {
+        let html = "<p>Hello <b>World</b></p>";
+        assert_eq!(strip_html_tags(html), "Hello World");
+    }
+
+    #[test]
+    fn test_strip_html_tags_entities() {
+        let html = "&quot;quoted&quot; &amp; &lt;tag&gt;";
+        assert_eq!(strip_html_tags(html), "\"quoted\" & <tag>");
+    }
+
+    #[test]
+    fn test_strip_html_tags_nested() {
+        let html = "<div><span>nested</span></div>";
+        assert_eq!(strip_html_tags(html), "nested");
+    }
+
+    #[test]
+    fn test_strip_html_tags_no_tags() {
+        assert_eq!(strip_html_tags("plain text"), "plain text");
+    }
+
+    #[test]
+    fn test_strip_html_tags_empty() {
+        assert_eq!(strip_html_tags(""), "");
+    }
+
     #[tokio::test]
     async fn test_perform_duckduckgo_search() {
         let results = perform_duckduckgo_search("rust programming").await;

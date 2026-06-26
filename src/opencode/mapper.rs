@@ -283,6 +283,73 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_system_prompt_string() {
+        let val = serde_json::json!("you are a helpful assistant");
+        assert_eq!(
+            extract_system_prompt(&val),
+            "you are a helpful assistant"
+        );
+    }
+
+    #[test]
+    fn test_extract_system_prompt_array() {
+        let val = serde_json::json!([
+            {"type": "text", "text": "Be concise."},
+            {"type": "text", "text": "Use markdown."}
+        ]);
+        assert_eq!(
+            extract_system_prompt(&val),
+            "Be concise.\nUse markdown."
+        );
+    }
+
+    #[test]
+    fn test_extract_system_prompt_mixed() {
+        // Array với text và non-text blocks — chỉ text được extract
+        let val = serde_json::json!([
+            {"type": "text", "text": "Hello"},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "abc"}},
+            {"type": "text", "text": "World"}
+        ]);
+        assert_eq!(extract_system_prompt(&val), "Hello\nWorld");
+    }
+
+    #[test]
+    fn test_extract_system_prompt_empty() {
+        let val = serde_json::json!("");
+        assert_eq!(extract_system_prompt(&val), "");
+    }
+
+    #[test]
+    fn test_extract_system_prompt_null() {
+        let val = serde_json::json!(null);
+        assert_eq!(extract_system_prompt(&val), "");
+    }
+
+    #[test]
+    fn test_map_model_name_opencode_prefix() {
+        assert_eq!(map_model_name("opencode/gpt-4"), "gpt-4");
+    }
+
+    #[test]
+    fn test_map_model_name_free_mapping() {
+        assert_eq!(
+            map_model_name("deepseek-v4-flash"),
+            "deepseek-v4-flash-free"
+        );
+        assert_eq!(
+            map_model_name("nemotron-3-ultra"),
+            "nemotron-3-ultra-free"
+        );
+    }
+
+    #[test]
+    fn test_map_model_name_identity() {
+        assert_eq!(map_model_name("gpt-4"), "gpt-4");
+        assert_eq!(map_model_name("claude-3-opus"), "claude-3-opus");
+    }
+
+    #[test]
     fn test_tool_result_content_to_string() {
         // String variant
         let val_str = serde_json::Value::String("hello world".to_string());
