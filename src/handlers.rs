@@ -133,9 +133,10 @@ pub async fn handle_messages(
 ) -> Result<axum::response::Response, BridgeError> {
     // Acquire rate limiter permit if configured
     if let Some(ref limiter) = state.rate_limiter {
-        let _permit = limiter.acquire().await.map_err(|_| {
-            BridgeError::InvalidRequest("Rate limit exceeded".to_string())
-        })?;
+        let _permit = limiter
+            .acquire()
+            .await
+            .map_err(|_| BridgeError::InvalidRequest("Rate limit exceeded".to_string()))?;
     }
 
     if payload.messages.is_empty() {

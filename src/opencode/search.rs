@@ -160,9 +160,7 @@ impl SearchClient {
 
         // 5. DuckDuckGo as default fallback
         info!("Attempting DuckDuckGo search...");
-        self.duckduckgo_search(query)
-            .await
-            .unwrap_or_else(|e| e)
+        self.duckduckgo_search(query).await.unwrap_or_else(|e| e)
     }
 
     // ── Private provider methods ──
@@ -408,10 +406,7 @@ impl SearchClient {
                         if let Some(anchor_end) = text_content.find("</a>") {
                             let snippet = &text_content[..anchor_end];
                             let clean_snippet = strip_html_tags(snippet);
-                            results.push(format!(
-                                "URL: {}\nSnippet: {}\n",
-                                url, clean_snippet
-                            ));
+                            results.push(format!("URL: {}\nSnippet: {}\n", url, clean_snippet));
                         }
                     }
                 }

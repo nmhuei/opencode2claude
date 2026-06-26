@@ -1,9 +1,9 @@
+use reqwest::Client;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::net::TcpListener;
 use std::time::Duration;
 use tokio::time::sleep;
-use serde_json::Value;
-use reqwest::Client;
 
 /// A spawned bridge instance for testing.
 pub struct TestBridge {

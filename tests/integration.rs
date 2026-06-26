@@ -97,7 +97,10 @@ async fn test_shell_command_streaming_sse() {
     );
 
     // Verify output content is in the stream
-    assert!(body.contains("sse_test_456"), "Should contain command output");
+    assert!(
+        body.contains("sse_test_456"),
+        "Should contain command output"
+    );
 
     // Verify event order (message_start before content, content before stop)
     let start_pos = body.find("event: message_start").unwrap();
@@ -135,11 +138,7 @@ async fn test_shell_command_streaming_sse() {
 async fn test_invalid_route_404() {
     let bridge = TestBridge::start(HashMap::new()).await;
     let client = reqwest::Client::new();
-    let resp = client
-        .get(bridge.url("/nonexistent"))
-        .send()
-        .await
-        .unwrap();
+    let resp = client.get(bridge.url("/nonexistent")).send().await.unwrap();
 
     assert_eq!(resp.status(), 404);
 }
@@ -204,11 +203,7 @@ async fn test_shell_allowlist_policy() {
         .post_messages(&build_request("!rm -rf /", false))
         .await
         .unwrap();
-    assert_eq!(
-        resp.status(),
-        403,
-        "Blocked command should return 403"
-    );
+    assert_eq!(resp.status(), 403, "Blocked command should return 403");
 }
 
 /// Test multi-content message format (array of content blocks).
@@ -276,11 +271,7 @@ async fn test_auth_flow() {
         .post_messages_auth(&build_request("!echo test", false), "valid-secret-token")
         .await
         .unwrap();
-    assert_eq!(
-        resp.status(),
-        200,
-        "Should succeed with valid Bearer token"
-    );
+    assert_eq!(resp.status(), 200, "Should succeed with valid Bearer token");
 }
 
 // ── New tests ──
@@ -289,8 +280,7 @@ async fn test_auth_flow() {
 #[tokio::test]
 #[ignore]
 async fn test_health_with_auth_enabled() {
-    let bridge =
-        TestBridge::start(HashMap::from([("BRIDGE_AUTH_TOKEN", "secret")])).await;
+    let bridge = TestBridge::start(HashMap::from([("BRIDGE_AUTH_TOKEN", "secret")])).await;
     let resp = bridge.get_health().await.unwrap();
     assert_eq!(resp.status(), 200);
 }
@@ -387,8 +377,7 @@ async fn test_concurrent_requests() {
 #[tokio::test]
 #[ignore]
 async fn test_shell_disabled_streaming() {
-    let bridge =
-        TestBridge::start(HashMap::from([("BRIDGE_SHELL_POLICY", "disabled")])).await;
+    let bridge = TestBridge::start(HashMap::from([("BRIDGE_SHELL_POLICY", "disabled")])).await;
 
     let resp = bridge
         .post_messages(&build_request("!echo hi", true))

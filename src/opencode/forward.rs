@@ -146,9 +146,8 @@ pub async fn forward_to_llm_sync(
                     has_search = true;
                     search_tc_id = tc.id.clone();
                     search_tc_name = tc.function.name.clone();
-                    let input_val: serde_json::Value =
-                        serde_json::from_str(&tc.function.arguments)
-                            .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                    let input_val: serde_json::Value = serde_json::from_str(&tc.function.arguments)
+                        .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
                     search_tc_input = input_val;
                     search_query = extract_search_query(&tc.function.arguments);
                     break;

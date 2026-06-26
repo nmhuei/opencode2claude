@@ -221,7 +221,8 @@ impl BridgeConfig {
             .or_else(|| env::var("SEARXNG_URL").ok())
             .or_else(|| toml_config.as_ref().and_then(|t| t.searxng_url.clone()));
 
-        let searxng_api_key = overrides.searxng_api_key
+        let searxng_api_key = overrides
+            .searxng_api_key
             .or_else(|| env::var("SEARXNG_API_KEY").ok())
             .or_else(|| toml_config.as_ref().and_then(|t| t.searxng_api_key.clone()));
 

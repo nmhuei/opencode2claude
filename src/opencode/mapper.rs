@@ -315,10 +315,7 @@ mod tests {
             extract_search_query(r#"{"q": "short query"}"#),
             "short query"
         );
-        assert_eq!(
-            extract_search_query(r#"{"other": "fallback"}"#),
-            "fallback"
-        );
+        assert_eq!(extract_search_query(r#"{"other": "fallback"}"#), "fallback");
         assert_eq!(extract_search_query(r#"{}"#), "");
         assert_eq!(extract_search_query(r#"invalid json"#), "");
     }
@@ -465,26 +462,23 @@ mod tests {
 
     #[test]
     fn test_map_model_name() {
-        assert_eq!(map_model_name("deepseek-v4-flash"), "deepseek-v4-flash-free");
+        assert_eq!(
+            map_model_name("deepseek-v4-flash"),
+            "deepseek-v4-flash-free"
+        );
         assert_eq!(map_model_name("gpt-4"), "gpt-4");
         assert_eq!(map_model_name("opencode/gpt-4"), "gpt-4");
     }
 
     #[test]
     fn test_map_model_name_free_mapping() {
-        assert_eq!(
-            map_model_name("nemotron-3-ultra"),
-            "nemotron-3-ultra-free"
-        );
+        assert_eq!(map_model_name("nemotron-3-ultra"), "nemotron-3-ultra-free");
     }
 
     #[test]
     fn test_extract_system_prompt_string() {
         let val = serde_json::json!("you are a helpful assistant");
-        assert_eq!(
-            extract_system_prompt(&val),
-            "you are a helpful assistant"
-        );
+        assert_eq!(extract_system_prompt(&val), "you are a helpful assistant");
     }
 
     #[test]
@@ -493,10 +487,7 @@ mod tests {
             {"type": "text", "text": "Be concise."},
             {"type": "text", "text": "Use markdown."}
         ]);
-        assert_eq!(
-            extract_system_prompt(&val),
-            "Be concise.\nUse markdown."
-        );
+        assert_eq!(extract_system_prompt(&val), "Be concise.\nUse markdown.");
     }
 
     #[test]
