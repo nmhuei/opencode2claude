@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 # Robust startup script for OpenCode2Claude Bridge
+# Designed to be sourced: source start.sh
 
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
@@ -13,13 +14,20 @@ BRIDGE_PORT=${BRIDGE_PORT:-4000}
 OPENCODE_PORT=${OPENCODE_PORT:-4096}
 PID_FILE=".bridge.pids"
 
+# Determine if script is being sourced or run directly
+if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+    is_sourced=true
+else
+    is_sourced=false
+fi
+
 echo -e "${BLUE}=== Starting OpenCode2Claude Setup ===${NC}"
 
 # Check for opencode CLI
 if ! command -v opencode &> /dev/null; then
     echo -e "${RED}Error: 'opencode' CLI command not found in PATH.${NC}"
     echo -e "Please install OpenCode first or make sure it is in your PATH."
-    exit 1
+    if [ "$is_sourced" = true ]; then return 1; else exit 1; fi
 fi
 
 # Clean up stale pid file if it exists
@@ -59,30 +67,33 @@ fi
 # Check bridge port
 if nc -z 127.0.0.1 "$BRIDGE_PORT" 2>/dev/null; then
     echo -e "${RED}Error: Port ${BRIDGE_PORT} is already in use by another process.${NC}"
-    echo -e "You can configure a different port by setting the BRIDGE_PORT environment variable."
-    exit 1
+    if [ "$is_sourced" = true ]; then return 1; else exit 1; fi
 fi
 
-# Start the python bridge
-echo -e "${BLUE}Starting API Bridge on port ${BRIDGE_PORT}...${NC}"
+# Start the python bridge in the background
+echo -e "${BLUE}Starting API Bridge on port ${BRIDGE_PORT} in background...${NC}"
 export BRIDGE_PORT
 export OPENCODE_PORT
 
-# Start python bridge in foreground but catch SIGINT cleanly to stop daemon as well
-python3 bridge.py &
+python3 bridge.py > bridge.log 2>&1 &
 BRIDGE_PID=$!
 echo "$BRIDGE_PID" >> "$PID_FILE"
+echo -e "${GREEN}✓ Started API Bridge (PID: $BRIDGE_PID). Logs routed to bridge.log${NC}"
 
-# Setup trap to terminate background daemon if start.sh script is interrupted
-trap 'echo -e "\n${YELLOW}Shutting down processes...${NC}"; kill $(cat '"$PID_FILE"') 2>/dev/null; rm -f '"$PID_FILE"'; exit 0' SIGINT SIGTERM
+# Export the variables so they are active in the sourced terminal
+export ANTHROPIC_API_KEY="opencode-bridge"
+export ANTHROPIC_API_URL="http://127.0.0.1:${BRIDGE_PORT}/v1"
 
-echo -e "${GREEN}✓ Setup completed successfully!${NC}"
-echo -e "To configure Claude Code to use this bridge, run:"
-echo -e "  ${YELLOW}export ANTHROPIC_API_KEY=\"opencode-bridge\"${NC}"
-echo -e "  ${YELLOW}export ANTHROPIC_API_URL=\"http://127.0.0.1:${BRIDGE_PORT}/v1\"${NC}"
-echo -e "  ${YELLOW}claude${NC}"
-echo -e "${BLUE}Press Ctrl+C to terminate the bridge and the background daemon.${NC}"
-echo -e "--- Bridge logs follow ---"
+echo -e "\n${GREEN}✓ Setup completed successfully!${NC}"
+echo -e "Environment variables set in current session:"
+echo -e "  ${YELLOW}export ANTHROPIC_API_KEY=\"$ANTHROPIC_API_KEY\"${NC}"
+echo -e "  ${YELLOW}export ANTHROPIC_API_URL=\"$ANTHROPIC_API_URL\"${NC}"
+echo -e "\nYou can now run ${GREEN}claude${NC} directly in this terminal window."
+echo -e "To stop the bridge and daemon later, run: ${YELLOW}./stop.sh${NC}"
 
-# Keep script running to show logs and catch SIGINT
-wait "$BRIDGE_PID"
+if [ "$is_sourced" = false ]; then
+    # If not sourced, wait to keep the foreground process alive
+    echo -e "\n${BLUE}Press Ctrl+C to terminate the bridge and the background daemon.${NC}"
+    trap 'echo -e "\n${YELLOW}Shutting down processes...${NC}"; kill $(cat '"$PID_FILE"') 2>/dev/null; rm -f '"$PID_FILE"'; exit 0' SIGINT SIGTERM
+    wait "$BRIDGE_PID"
+fi
