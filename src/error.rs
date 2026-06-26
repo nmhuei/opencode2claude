@@ -9,15 +9,17 @@ use axum::Json;
 use serde_json::json;
 
 /// Central error type for the OpenCode2Claude bridge.
-#[allow(dead_code)]
 #[derive(Debug, thiserror::Error)]
 pub enum BridgeError {
+    #[allow(dead_code)]
     #[error("Failed to bind to address: {0}")]
     BindFailed(#[source] std::io::Error),
 
+    #[allow(dead_code)]
     #[error("Failed to spawn process: {0}")]
     ProcessSpawnFailed(#[source] std::io::Error),
 
+    #[allow(dead_code)]
     #[error("Shell commands are disabled by policy. Set BRIDGE_SHELL_POLICY=allowlist or unrestricted to enable.")]
     ShellDisabled,
 
@@ -30,6 +32,7 @@ pub enum BridgeError {
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
 
+    #[allow(dead_code)]
     #[error("OpenCode daemon unavailable on port {0}")]
     DaemonUnavailable(u16),
 
@@ -85,5 +88,42 @@ impl IntoResponse for BridgeError {
         });
 
         (status, Json(body)).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::StatusCode;
+
+    #[test]
+    fn test_bridge_error_into_response_unauthorized() {
+        let err = BridgeError::Unauthorized("bad token".to_string());
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn test_bridge_error_into_response_shell_blocked() {
+        let err = BridgeError::ShellBlocked {
+            command: "rm".to_string(),
+            allowed: "git,ls,pwd".to_string(),
+        };
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn test_bridge_error_into_response_upstream() {
+        let err = BridgeError::UpstreamError("timeout".to_string());
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn test_bridge_error_into_response_invalid_request() {
+        let err = BridgeError::InvalidRequest("bad input".to_string());
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }
