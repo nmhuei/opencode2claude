@@ -140,6 +140,24 @@ You: What is recursion?
 → Routed through OpenCode → LLM as normal
 ```
 
+### 🛡️ Auto WARP IP Rotation (Anti Rate-Limit)
+
+If you are using free-tier models (like `deepseek-v4-flash-free`), you may occasionally hit provider rate limits (429 or 400 Upstream errors). The bridge has a built-in automatic recovery mechanism:
+
+- **Auto-Detect:** Detects upstream `429 Too Many Requests` or `400 Bad Request` rate-limiting responses.
+- **Auto-Rotate:** Invokes `warp-cli disconnect` and `warp-cli connect` to instantly acquire a fresh public IP from Cloudflare.
+- **Auto-Retry:** Seamlessly retries the failed request (up to 3 times) with the new IP address, preventing interruptions in your agent session.
+
+To use this with WARP in local SOCKS5 proxy mode:
+```bash
+# 1. Set warp-cli to proxy mode and connect
+warp-cli set-mode proxy
+warp-cli connect
+
+# 2. Run the bridge with proxy routing
+ALL_PROXY="socks5://127.0.0.1:40000" ./start.sh
+```
+
 ### 🔄 Smart Daemon Detection
 
 The bridge automatically detects whether the OpenCode daemon is running:
