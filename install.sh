@@ -250,6 +250,30 @@ verify_install() {
 }
 
 # ══════════════════════════════════════════════════════════════════════
+#  Check for opencode dependency
+# ══════════════════════════════════════════════════════════════════════
+check_opencode() {
+    if command -v opencode >/dev/null 2>&1; then
+        ok "OpenCode CLI found: $(opencode --version 2>/dev/null | head -1)"
+    else
+        echo ""
+        warn "OpenCode CLI is not installed — the bridge needs it at runtime."
+        echo ""
+        printf "  ${BOLD}Install OpenCode:${NC}\n"
+        echo ""
+        printf "  ${CYAN}curl -fsSL https://docs.opencode.ai/install.sh | sh${NC}\n"
+        echo ""
+        printf "  ${BOLD}Alternative methods:${NC}\n"
+        echo ""
+        printf "  • npm:    ${CYAN}npm install -g @opencode/cli${NC}\n"
+        printf "  • brew:   ${CYAN}brew install opencode-ai/cli/opencode${NC}\n"
+        printf "  • cargo:  ${CYAN}cargo install opencode-cli${NC}\n"
+        echo ""
+        printf "  See: https://github.com/opencode-ai/opencode\n"
+    fi
+}
+
+# ══════════════════════════════════════════════════════════════════════
 #  Welcome message
 # ══════════════════════════════════════════════════════════════════════
 print_welcome() {
@@ -260,14 +284,24 @@ print_welcome() {
     echo ""
     printf "  ${BOLD}Quick start${NC}\n"
     echo ""
-    printf "  1. Start the bridge:\n"
-    printf "     ${CYAN}opencode2claude${NC}\n"
-    echo ""
-    printf "  2. Use Claude Code with any LLM:\n"
-    printf "     ${CYAN}claude${NC}\n"
-    echo ""
-    printf "  3. Use a specific model:\n"
-    printf "     ${CYAN}OPENCODE_MODEL=\"openai/gpt-4o\" opencode2claude${NC}\n"
+
+    if command -v opencode >/dev/null 2>&1; then
+        printf "  1. Start the bridge:\n"
+        printf "     ${CYAN}opencode2claude${NC}\n"
+        echo ""
+        printf "  2. Use Claude Code with any LLM:\n"
+        printf "     ${CYAN}claude${NC}\n"
+        echo ""
+        printf "  3. Use a specific model:\n"
+        printf "     ${CYAN}OPENCODE_MODEL=\"openai/gpt-4o\" opencode2claude${NC}\n"
+    else
+        printf "  1. Install OpenCode first, then start the bridge:\n"
+        printf "     ${CYAN}curl -fsSL https://docs.opencode.ai/install.sh | sh${NC}\n"
+        printf "     ${CYAN}opencode2claude${NC}\n"
+        echo ""
+        printf "  2. Use Claude Code with any LLM:\n"
+        printf "     ${CYAN}claude${NC}\n"
+    fi
     echo ""
     printf "  ${BOLD}Resources${NC}\n"
     printf "    ${GITHUB}\n"
@@ -361,6 +395,7 @@ main() {
 
     if do_install; then
         verify_install
+        check_opencode
         print_welcome
     else
         suggest_fallback
