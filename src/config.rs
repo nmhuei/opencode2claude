@@ -41,6 +41,7 @@ pub struct TomlConfig {
     pub searxng_url: Option<String>,
     pub searxng_api_key: Option<String>,
     pub max_search_loops: Option<u32>,
+    pub proxies: Option<Vec<String>>,
 }
 
 impl TomlConfig {
@@ -100,6 +101,8 @@ pub struct BridgeConfig {
     /// Maximum number of search loops
     #[allow(dead_code)]
     pub max_search_loops: u32,
+    /// Comma-separated list of SOCKS5/HTTP proxies for multi-agent support
+    pub proxies: Option<Vec<String>>,
 }
 
 impl BridgeConfig {
@@ -232,6 +235,20 @@ impl BridgeConfig {
             .or_else(|| toml_config.as_ref().and_then(|t| t.max_search_loops))
             .unwrap_or(5);
 
+        let proxies = env::var("BRIDGE_PROXIES")
+            .ok()
+            .or_else(|| {
+                toml_config.as_ref().and_then(|t| {
+                    t.proxies.as_ref().map(|p| p.join(","))
+                })
+            })
+            .map(|s| {
+                s.split(',')
+                    .map(|item| item.trim().to_string())
+                    .filter(|item| !item.is_empty())
+                    .collect::<Vec<String>>()
+            });
+
         BridgeConfig {
             host,
             bridge_port,
@@ -248,6 +265,7 @@ impl BridgeConfig {
             searxng_url,
             searxng_api_key,
             max_search_loops,
+            proxies,
         }
     }
 

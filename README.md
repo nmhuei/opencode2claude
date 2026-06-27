@@ -95,8 +95,26 @@ Priority: **CLI args > Env vars > TOML file > Defaults**
 | `BRIDGE_RATE_LIMIT` | (none) | Max concurrent requests (unset = unlimited) |
 | `BRIDGE_MAX_SEARCH_LOOPS` | `5` | Search interception retries |
 | `TAVILY_API_KEY` | (none) | Web search API keys... |
+| `BRIDGE_PROXIES` | (none) | Comma-separated list of SOCKS5/HTTP proxies for multi-agent independent IP mapping |
 
 Full list: see [CLAUDE.md](CLAUDE.md) or `opencode2claude --help`
+
+---
+
+## 🔄 Multi-Agent & Proxy Routing (Avoid Rate Limits)
+
+When running multiple concurrent Claude Code agents, they can hit the free-tier rate limits quickly if they share a single IP. 
+
+To prevent this, `opencode2claude` supports a pool of SOCKS5 or HTTP proxies. 
+
+1. **Independent IP Mapping**: The bridge automatically hashes each agent's API key (provided by Claude Code) to route it through a specific proxy in the pool. This ensures that different agents use different proxies/IPs.
+2. **Automatic Cooldown & Failover**: If a proxy hits a `429 Too Many Requests` or network error, the bridge automatically marks it as rate-limited, puts it on cooldown, and routes the request through the next available proxy in the pool.
+
+To configure a proxy pool:
+```bash
+export BRIDGE_PROXIES="socks5://127.0.0.1:40001,socks5://127.0.0.1:40002,socks5://127.0.0.1:40003"
+source start.sh
+```
 
 ---
 

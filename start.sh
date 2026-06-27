@@ -86,13 +86,20 @@ fi
 # Auto-detect Cloudflare WARP proxy settings
 BRIDGE_ALL_PROXY=""
 BRIDGE_NO_PROXY=""
-if command -v warp-cli &> /dev/null; then
-    warp_settings=$(warp-cli settings list 2>/dev/null || warp-cli settings 2>/dev/null)
-    if echo "$warp_settings" | grep -q "WarpProxy"; then
-        echo -e "${GREEN}✓ Cloudflare WARP Proxy support detected.${NC}"
-        BRIDGE_ALL_PROXY="socks5://127.0.0.1:40000"
-        BRIDGE_NO_PROXY="localhost,127.0.0.1"
-        echo -e "  Routing bridge traffic via ${YELLOW}socks5://127.0.0.1:40000${NC} (Other terminal commands remain unaffected)"
+
+if [ -n "$BRIDGE_PROXIES" ]; then
+    echo -e "${GREEN}✓ Proxy Pool configuration detected via BRIDGE_PROXIES.${NC}"
+    echo -e "  Proxies in pool: ${YELLOW}$BRIDGE_PROXIES${NC}"
+    echo -e "  Requests will be balanced/failovered dynamically based on client API keys."
+else
+    if command -v warp-cli &> /dev/null; then
+        warp_settings=$(warp-cli settings list 2>/dev/null || warp-cli settings 2>/dev/null)
+        if echo "$warp_settings" | grep -q "WarpProxy"; then
+            echo -e "${GREEN}✓ Cloudflare WARP Proxy support detected.${NC}"
+            BRIDGE_ALL_PROXY="socks5://127.0.0.1:40000"
+            BRIDGE_NO_PROXY="localhost,127.0.0.1"
+            echo -e "  Routing bridge traffic via ${YELLOW}socks5://127.0.0.1:40000${NC} (Other terminal commands remain unaffected)"
+        fi
     fi
 fi
 
@@ -101,6 +108,7 @@ echo -e "${BLUE}Starting Rust API Bridge on port ${BRIDGE_PORT} in background...
 export BRIDGE_PORT
 export OPENCODE_PORT
 export OPENCODE_MODEL
+export BRIDGE_PROXIES
 
 nohup env ALL_PROXY="$BRIDGE_ALL_PROXY" NO_PROXY="$BRIDGE_NO_PROXY" ./target/release/opencode2claude > bridge.log 2>&1 &
 BRIDGE_PID=$!

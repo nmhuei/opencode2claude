@@ -8,6 +8,7 @@ mod error;
 mod handlers;
 mod middleware;
 mod opencode;
+mod proxy_pool;
 mod shell;
 mod sse;
 mod state;

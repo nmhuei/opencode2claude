@@ -2,9 +2,11 @@
 
 use crate::config::BridgeConfig;
 use crate::opencode::search::SearchClient;
+use crate::proxy_pool::ProxyPool;
 use reqwest::Client;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::RwLock;
 use tokio::sync::Semaphore;
 
 /// Shared application state, injected into handlers via Axum's State extractor.
@@ -18,6 +20,8 @@ pub struct AppState {
     pub http_client: Client,
     /// Optional rate limiter semaphore (None = no limit).
     pub rate_limiter: Option<Arc<Semaphore>>,
+    /// Thread-safe SOCKS5/HTTP proxy pool for multi-agent support.
+    pub proxy_pool: Arc<RwLock<ProxyPool>>,
 }
 
 impl AppState {
@@ -35,11 +39,18 @@ impl AppState {
             .map(|permits| Arc::new(Semaphore::new(permits)));
         let search_client = SearchClient::new(http_client.clone(), &config);
 
+        let proxy_pool = if let Some(ref urls) = config.proxies {
+            ProxyPool::new(urls)
+        } else {
+            ProxyPool::default()
+        };
+
         Self {
             config: Arc::new(config),
             search_client,
             http_client,
             rate_limiter,
+            proxy_pool: Arc::new(RwLock::new(proxy_pool)),
         }
     }
 }
@@ -67,6 +78,7 @@ mod tests {
             searxng_url: None,
             searxng_api_key: None,
             max_search_loops: 5,
+            proxies: None,
         };
         let state = AppState::new(config);
         assert_eq!(state.config.bridge_port, 0);

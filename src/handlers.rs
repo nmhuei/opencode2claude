@@ -126,11 +126,16 @@ pub fn extract_prompt(messages: &[Message]) -> String {
 
 // ── Handlers ──
 
-/// POST /v1/messages — Main message handler (Anthropic API compatible).
 pub async fn handle_messages(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(payload): Json<MessagesRequest>,
 ) -> Result<axum::response::Response, BridgeError> {
+    let api_key = headers
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("default-agent")
+        .to_string();
     // Acquire rate limiter permit if configured
     if let Some(ref limiter) = state.rate_limiter {
         let _permit = limiter
@@ -202,7 +207,8 @@ pub async fn handle_messages(
         // OpenCode path — forward directly to upstream API
         if payload.stream {
             let stream = opencode::forward_to_llm_stream(
-                &state.http_client,
+                &state,
+                api_key,
                 payload,
                 req_model,
                 state.config.channel_capacity,
@@ -220,7 +226,8 @@ pub async fn handle_messages(
             Ok(res)
         } else {
             let response = opencode::forward_to_llm_sync(
-                &state.http_client,
+                &state,
+                api_key,
                 payload,
                 req_model,
                 state.search_client.clone(),

@@ -477,6 +477,7 @@ mod tests {
             searxng_url: None,
             searxng_api_key: None,
             max_search_loops: 5,
+            proxies: None,
         }
     }
 
@@ -499,6 +500,7 @@ mod tests {
             searxng_url: None,
             searxng_api_key: None,
             max_search_loops: 5,
+            proxies: None,
         };
         let search_client = SearchClient::new(client, &config);
         assert_eq!(search_client.tavily_key, Some("test-key".to_string()));

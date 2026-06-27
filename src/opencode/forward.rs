@@ -5,6 +5,7 @@
 
 use crate::error::BridgeError;
 use crate::handlers::{ContentVal, MessagesRequest};
+use crate::state::AppState;
 use crate::opencode::mapper::{extract_search_query, is_web_search_tool, map_anthropic_to_openai};
 use crate::opencode::search::SearchClient;
 use crate::opencode::types::*;
@@ -44,11 +45,22 @@ async fn rotate_warp_ip() {
 }
 
 async fn execute_with_warp_retry(
-    client: &Client,
+    state: &AppState,
+    api_key: &str,
     req_body: &OpenAiRequest,
 ) -> Result<reqwest::Response, reqwest::Error> {
     let mut retry_count = 0;
     loop {
+        // Select the client from the proxy pool if configured
+        let (client, proxy_url, idx) = {
+            let pool = state.proxy_pool.read().await;
+            if let Some((c, url, idx)) = pool.get_client(api_key) {
+                (c, Some(url), Some(idx))
+            } else {
+                (state.http_client.clone(), None, None)
+            }
+        };
+
         let res = client
             .post("https://opencode.ai/zen/v1/chat/completions")
             .json(req_body)
@@ -64,11 +76,20 @@ async fn execute_with_warp_retry(
 
                 if is_rate_limit && retry_count < 3 {
                     retry_count += 1;
-                    warn!(
-                        "Upstream rate limit or request error hit (status {}). Attempting to rotate WARP IP (Attempt {}/3)...",
-                        status, retry_count
-                    );
-                    rotate_warp_ip().await;
+                    if let (Some(idx), Some(url)) = (idx, proxy_url) {
+                        warn!(
+                            "Upstream rate limit hit (status {}) on proxy #{} ({}). Putting proxy on cool-down...",
+                            status, idx, url
+                        );
+                        let mut pool = state.proxy_pool.write().await;
+                        pool.mark_rate_limited(idx, std::time::Duration::from_secs(300)); // 5 mins cooldown
+                    } else {
+                        warn!(
+                            "Upstream rate limit or request error hit (status {}). Attempting to rotate WARP IP (Attempt {}/3)...",
+                            status, retry_count
+                        );
+                        rotate_warp_ip().await;
+                    }
                     continue;
                 }
                 return Ok(response);
@@ -76,11 +97,20 @@ async fn execute_with_warp_retry(
             Err(e) => {
                 if retry_count < 3 {
                     retry_count += 1;
-                    warn!(
-                        "Network error connecting upstream: {}. Attempting to rotate WARP IP (Attempt {}/3)...",
-                        e, retry_count
-                    );
-                    rotate_warp_ip().await;
+                    if let (Some(idx), Some(url)) = (idx, proxy_url) {
+                        warn!(
+                            "Network error connecting via proxy #{} ({}): {}. Putting proxy on cool-down...",
+                            idx, url, e
+                        );
+                        let mut pool = state.proxy_pool.write().await;
+                        pool.mark_rate_limited(idx, std::time::Duration::from_secs(60)); // 1 min cooldown
+                    } else {
+                        warn!(
+                            "Network error connecting upstream: {}. Attempting to rotate WARP IP (Attempt {}/3)...",
+                            e, retry_count
+                        );
+                        rotate_warp_ip().await;
+                    }
                     continue;
                 }
                 return Err(e);
@@ -92,7 +122,8 @@ async fn execute_with_warp_retry(
 // ── API Forwarding Implementations ──
 
 pub async fn forward_to_llm_sync(
-    client: &Client,
+    state: &AppState,
+    api_key: String,
     mut payload: MessagesRequest,
     model: String,
     search_client: SearchClient,
@@ -110,7 +141,7 @@ pub async fn forward_to_llm_sync(
 
         info!("Forwarding sync request for model {}", model);
 
-        let res = execute_with_warp_retry(client, &openai_req)
+        let res = execute_with_warp_retry(state, &api_key, &openai_req)
             .await
             .map_err(|e| BridgeError::UpstreamError(e.to_string()))?;
 
@@ -288,7 +319,8 @@ pub async fn forward_to_llm_sync(
 
 /// Perform a streaming completions request to upstream OpenCode API and stream Anthropic SSE chunks.
 pub async fn forward_to_llm_stream(
-    client: &Client,
+    state: &AppState,
+    api_key: String,
     payload: MessagesRequest,
     model: String,
     channel_capacity: usize,
@@ -303,7 +335,8 @@ pub async fn forward_to_llm_stream(
             .as_millis()
     );
     let builder = SseEventBuilder::new(msg_id, model.clone());
-    let client_clone = client.clone();
+    let state_clone = state.clone();
+    let api_key_clone = api_key;
     let model_clone = model.clone();
 
     tokio::spawn(async move {
@@ -324,7 +357,7 @@ pub async fn forward_to_llm_stream(
                 model_clone, loop_count
             );
 
-            let res = match execute_with_warp_retry(&client_clone, &openai_req).await {
+            let res = match execute_with_warp_retry(&state_clone, &api_key_clone, &openai_req).await {
                 Ok(r) => r,
                 Err(e) => {
                     error!("Error forwarding upstream request: {}", e);
