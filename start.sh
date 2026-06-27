@@ -83,19 +83,57 @@ if nc -z 127.0.0.1 "$BRIDGE_PORT" 2>/dev/null; then
     if [ "$is_sourced" = true ]; then return 1; else exit 1; fi
 fi
 
-# Auto-detect Cloudflare WARP proxy settings
+# Auto-detect Cloudflare WARP proxy settings or spin up Docker proxy pool
 BRIDGE_ALL_PROXY=""
 BRIDGE_NO_PROXY=""
 
-if [ -n "$BRIDGE_PROXIES" ]; then
-    echo -e "${GREEN}✓ Proxy Pool configuration detected via BRIDGE_PROXIES.${NC}"
+if command -v docker &> /dev/null && docker info &>/dev/null; then
+    echo -e "${GREEN}✓ Docker is running. Automating SOCKS5 proxy pool setup for multi-agent support...${NC}"
+    PROXY_PORTS=(40001 40002 40003)
+    BRIDGE_PROXIES_LIST=()
+    any_new_created=false
+
+    for i in "${!PROXY_PORTS[@]}"; do
+        port=${PROXY_PORTS[$i]}
+        container_name="opencode-warp-$((i+1))"
+        BRIDGE_PROXIES_LIST+=("socks5://127.0.0.1:$port")
+
+        if docker ps -a --format '{{.Names}}' | grep -q "^${container_name}$"; then
+            if ! docker ps --format '{{.Names}}' | grep -q "^${container_name}$"; then
+                echo -e "  Starting stopped proxy container: ${YELLOW}${container_name}${NC} on port ${port}..."
+                docker start "$container_name" >/dev/null
+            fi
+        else
+            echo -e "  Creating new WARP proxy container: ${YELLOW}${container_name}${NC} on port ${port}..."
+            docker run -d \
+                --name "$container_name" \
+                --restart always \
+                --cap-add=NET_ADMIN \
+                --sysctl net.ipv4.conf.all.src_valid_mark=1 \
+                -p "$port":1080 \
+                ghcr.io/mon-ius/docker-warp-socks:latest >/dev/null
+            any_new_created=true
+        fi
+    done
+
+    BRIDGE_PROXIES=$(IFS=,; echo "${BRIDGE_PROXIES_LIST[*]}")
+    export BRIDGE_PROXIES
+
+    if [ "$any_new_created" = true ]; then
+        echo -e "${YELLOW}  Waiting 8 seconds for new Cloudflare WARP containers to initialize...${NC}"
+        sleep 8
+    fi
+    echo -e "  Proxies in pool: ${YELLOW}$BRIDGE_PROXIES${NC}"
+    echo -e "  Requests will be dynamically load-balanced and failovered."
+elif [ -n "$BRIDGE_PROXIES" ]; then
+    echo -e "${GREEN}✓ Proxy Pool configuration detected via BRIDGE_PROXIES env var.${NC}"
     echo -e "  Proxies in pool: ${YELLOW}$BRIDGE_PROXIES${NC}"
     echo -e "  Requests will be balanced/failovered dynamically based on client API keys."
 else
     if command -v warp-cli &> /dev/null; then
         warp_settings=$(warp-cli settings list 2>/dev/null || warp-cli settings 2>/dev/null)
         if echo "$warp_settings" | grep -q "WarpProxy"; then
-            echo -e "${GREEN}✓ Cloudflare WARP Proxy support detected.${NC}"
+            echo -e "${GREEN}✓ Cloudflare WARP Proxy support detected on host.${NC}"
             BRIDGE_ALL_PROXY="socks5://127.0.0.1:40000"
             BRIDGE_NO_PROXY="localhost,127.0.0.1"
             echo -e "  Routing bridge traffic via ${YELLOW}socks5://127.0.0.1:40000${NC} (Other terminal commands remain unaffected)"

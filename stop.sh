@@ -39,11 +39,25 @@ else
     echo -e "${GREEN}✓ Cleanup complete.${NC}"
 fi
 
+# Stop Docker Proxy Pool containers if running
+if command -v docker &> /dev/null && docker info &>/dev/null; then
+    echo -e "${BLUE}Stopping multi-agent SOCKS5 proxy pool containers...${NC}"
+    for i in {1..3}; do
+        container_name="opencode-warp-$i"
+        if docker ps --format '{{.Names}}' | grep -q "^${container_name}$"; then
+            echo -e "Stopping container: $container_name"
+            docker stop "$container_name" >/dev/null &
+        fi
+    done
+    wait # Wait for all background stops to finish
+    echo -e "${GREEN}✓ Stopped proxy pool containers.${NC}"
+fi
+
 # Inform about WARP CLI status if it is connected
 if command -v warp-cli &> /dev/null; then
     warp_status=$(warp-cli status 2>/dev/null)
     if echo "$warp_status" | grep -q "Connected"; then
-        echo -e "\n${YELLOW}Note: Cloudflare WARP is still connected.${NC}"
-        echo -e "To disconnect WARP, run: ${YELLOW}warp-cli disconnect${NC}"
+        echo -e "\n${YELLOW}Note: Cloudflare WARP is still connected on host.${NC}"
+        echo -e "To disconnect host WARP, run: ${YELLOW}warp-cli disconnect${NC}"
     fi
 fi
