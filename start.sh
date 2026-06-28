@@ -89,7 +89,11 @@ BRIDGE_NO_PROXY=""
 
 if command -v docker &> /dev/null && docker info &>/dev/null; then
     echo -e "${GREEN}✓ Docker is running. Automating SOCKS5 proxy pool setup for multi-agent support...${NC}"
-    PROXY_PORTS=(40001 40002 40003)
+    PROXY_POOL_SIZE=${PROXY_POOL_SIZE:-3}
+    PROXY_PORTS=()
+    for ((idx=0; idx<PROXY_POOL_SIZE; idx++)); do
+        PROXY_PORTS+=($((40001 + idx)))
+    done
     BRIDGE_PROXIES_LIST=()
     any_new_created=false
 
@@ -110,7 +114,7 @@ if command -v docker &> /dev/null && docker info &>/dev/null; then
                 --restart always \
                 --cap-add=NET_ADMIN \
                 --sysctl net.ipv4.conf.all.src_valid_mark=1 \
-                -p "$port":1080 \
+                -p "$port":9091 \
                 ghcr.io/mon-ius/docker-warp-socks:latest >/dev/null
             any_new_created=true
         fi

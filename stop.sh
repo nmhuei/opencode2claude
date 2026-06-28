@@ -39,18 +39,18 @@ else
     echo -e "${GREEN}✓ Cleanup complete.${NC}"
 fi
 
-# Stop Docker Proxy Pool containers if running
+# Stop and remove Docker Proxy Pool containers if running
 if command -v docker &> /dev/null && docker info &>/dev/null; then
-    echo -e "${BLUE}Stopping multi-agent SOCKS5 proxy pool containers...${NC}"
-    for i in {1..3}; do
-        container_name="opencode-warp-$i"
-        if docker ps --format '{{.Names}}' | grep -q "^${container_name}$"; then
-            echo -e "Stopping container: $container_name"
-            docker stop "$container_name" >/dev/null &
-        fi
-    done
-    wait # Wait for all background stops to finish
-    echo -e "${GREEN}✓ Stopped proxy pool containers.${NC}"
+    containers=$(docker ps -a --format '{{.Names}}' | grep "^opencode-warp-")
+    if [ -n "$containers" ]; then
+        echo -e "${BLUE}Stopping and removing multi-agent SOCKS5 proxy pool containers...${NC}"
+        for container_name in $containers; do
+            echo -e "Stopping and removing container: $container_name"
+            docker rm -f "$container_name" >/dev/null &
+        done
+        wait # Wait for all background tasks to finish
+        echo -e "${GREEN}✓ Stopped and removed proxy pool containers.${NC}"
+    fi
 fi
 
 # Inform about WARP CLI status if it is connected
