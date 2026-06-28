@@ -38,9 +38,46 @@ if [ -f "$PID_FILE" ]; then
         if kill -0 "$pid" 2>/dev/null; then
             echo -e "Terminating process: $pid"
             kill "$pid" 2>/dev/null
+            sleep 0.3
+            # Force kill if still active
+            if kill -0 "$pid" 2>/dev/null; then
+                echo -e "Force killing process: $pid"
+                kill -9 "$pid" 2>/dev/null
+            fi
         fi
     done < "$PID_FILE"
     rm -f "$PID_FILE"
+fi
+
+# Kill any rogue opencode2claude process holding the bridge port (not tracked in PID file)
+if nc -z 127.0.0.1 "$BRIDGE_PORT" 2>/dev/null; then
+    rogue_pid=$(lsof -ti :"$BRIDGE_PORT" 2>/dev/null)
+    if [ -n "$rogue_pid" ]; then
+        echo -e "${YELLOW}Found untracked process ($rogue_pid) on port ${BRIDGE_PORT}. Killing it...${NC}"
+        kill "$rogue_pid" 2>/dev/null
+        sleep 0.5
+        if kill -0 "$rogue_pid" 2>/dev/null; then
+            kill -9 "$rogue_pid" 2>/dev/null
+        fi
+    fi
+
+    # Wait for port to be freed (up to 5 seconds)
+    echo -n "Waiting for port ${BRIDGE_PORT} to be freed..."
+    for i in {1..10}; do
+        if ! nc -z 127.0.0.1 "$BRIDGE_PORT" 2>/dev/null; then
+            echo -e " ${GREEN}OK${NC}"
+            break
+        fi
+        echo -n "."
+        sleep 0.5
+    done
+
+    # Final check — abort if port is still busy
+    if nc -z 127.0.0.1 "$BRIDGE_PORT" 2>/dev/null; then
+        echo -e "\n${RED}Error: Port ${BRIDGE_PORT} is still in use after cleanup. Cannot start.${NC}"
+        echo -e "Try manually: lsof -i :${BRIDGE_PORT} | kill"
+        if [ "$is_sourced" = true ]; then return 1; else exit 1; fi
+    fi
 fi
 
 # Compile Rust binary if missing or code is updated
@@ -75,12 +112,6 @@ else
         echo -n "."
         sleep 0.5
     done
-fi
-
-# Check bridge port
-if nc -z 127.0.0.1 "$BRIDGE_PORT" 2>/dev/null; then
-    echo -e "${RED}Error: Port ${BRIDGE_PORT} is already in use by another process.${NC}"
-    if [ "$is_sourced" = true ]; then return 1; else exit 1; fi
 fi
 
 # Auto-detect Cloudflare WARP proxy settings or spin up Docker proxy pool

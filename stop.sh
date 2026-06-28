@@ -49,6 +49,26 @@ else
     echo -e "${GREEN}✓ Cleanup complete.${NC}"
 fi
 
+# Catch any rogue process still holding the bridge port (regardless of PID file)
+BRIDGE_PORT=${BRIDGE_PORT:-4000}
+if nc -z 127.0.0.1 "$BRIDGE_PORT" 2>/dev/null; then
+    rogue_pid=$(lsof -ti :"$BRIDGE_PORT" 2>/dev/null)
+    if [ -n "$rogue_pid" ]; then
+        echo -e "${YELLOW}Found process ($rogue_pid) still on port ${BRIDGE_PORT}. Force killing...${NC}"
+        kill "$rogue_pid" 2>/dev/null
+        sleep 0.3
+        if kill -0 "$rogue_pid" 2>/dev/null; then
+            kill -9 "$rogue_pid" 2>/dev/null
+        fi
+        sleep 0.2
+        if nc -z 127.0.0.1 "$BRIDGE_PORT" 2>/dev/null; then
+            echo -e "${RED}⚠ Port ${BRIDGE_PORT} is still occupied. You may need to kill it manually: lsof -i :${BRIDGE_PORT}${NC}"
+        else
+            echo -e "${GREEN}✓ Port ${BRIDGE_PORT} is now free.${NC}"
+        fi
+    fi
+fi
+
 # Stop and remove Docker Proxy Pool containers if running
 if command -v docker &> /dev/null && docker info &>/dev/null; then
     containers=$(docker ps -a --format '{{.Names}}' | grep "^opencode-warp-")
