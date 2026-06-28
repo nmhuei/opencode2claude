@@ -213,6 +213,7 @@ pub async fn handle_messages(
                 req_model,
                 state.config.channel_capacity,
                 state.search_client.clone(),
+                state.config.max_search_loops,
             )
             .await?;
             let response = Sse::new(stream)
@@ -231,6 +232,7 @@ pub async fn handle_messages(
                 payload,
                 req_model,
                 state.search_client.clone(),
+                state.config.max_search_loops,
             )
             .await?;
             Ok(Json(response).into_response())

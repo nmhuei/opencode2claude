@@ -2,12 +2,13 @@
 
 use crate::config::BridgeConfig;
 use crate::opencode::search::SearchClient;
-use crate::proxy_pool::ProxyPool;
+use crate::proxy_pool::{health_monitor, process_restart_queue, ProxyPool};
 use reqwest::Client;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::sync::Semaphore;
+use tracing::info;
 
 /// Shared application state, injected into handlers via Axum's State extractor.
 #[derive(Debug, Clone)]
@@ -39,10 +40,31 @@ impl AppState {
             .map(|permits| Arc::new(Semaphore::new(permits)));
         let search_client = SearchClient::new(http_client.clone(), &config);
 
+        // Create proxy pool with hot-spare model
         let proxy_pool = if let Some(ref urls) = config.proxies {
-            ProxyPool::new(urls)
+            let pool = ProxyPool::new(urls);
+            // Spawn background tasks for pool management
+            if !pool.proxies.is_empty() {
+                let pool_arc = Arc::new(RwLock::new(pool));
+                let hc_pool = pool_arc.clone();
+                let rq_pool = pool_arc.clone();
+
+                tokio::spawn(async move {
+                    health_monitor(hc_pool).await;
+                });
+                info!("Proxy pool health monitor spawned.");
+
+                tokio::spawn(async move {
+                    process_restart_queue(rq_pool).await;
+                });
+                info!("Proxy pool restart queue processor spawned.");
+
+                pool_arc
+            } else {
+                Arc::new(RwLock::new(pool))
+            }
         } else {
-            ProxyPool::default()
+            Arc::new(RwLock::new(ProxyPool::default()))
         };
 
         Self {
@@ -50,7 +72,7 @@ impl AppState {
             search_client,
             http_client,
             rate_limiter,
-            proxy_pool: Arc::new(RwLock::new(proxy_pool)),
+            proxy_pool,
         }
     }
 }

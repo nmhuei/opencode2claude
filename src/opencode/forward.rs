@@ -15,6 +15,7 @@ use futures_util::{Stream, StreamExt};
 use reqwest::Client;
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::time::Duration;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{error, info, warn};
 
@@ -31,15 +32,53 @@ pub async fn check_daemon(client: &Client, port: u16) -> bool {
 
 async fn rotate_warp_ip() {
     info!("Rotating WARP IP address...");
-    let _ = tokio::process::Command::new("warp-cli")
+
+    let disconnect = tokio::process::Command::new("warp-cli")
         .arg("disconnect")
         .output()
         .await;
+
+    match disconnect {
+        Ok(output) if output.status.success() => {
+            info!("warp-cli disconnect succeeded");
+        }
+        Ok(output) => {
+            warn!(
+                "warp-cli disconnect returned non-zero: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Err(e) => {
+            warn!("warp-cli disconnect failed (maybe not installed?): {}", e);
+            return;
+        }
+    }
+
     tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
-    let _ = tokio::process::Command::new("warp-cli")
+
+    let connect = tokio::process::Command::new("warp-cli")
         .arg("connect")
         .output()
         .await;
+
+    match connect {
+        Ok(output) if output.status.success() => {
+            info!("warp-cli connect succeeded");
+        }
+        Ok(output) => {
+            warn!(
+                "warp-cli connect returned non-zero: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            tokio::time::sleep(tokio::time::Duration::from_millis(2500)).await;
+            return;
+        }
+        Err(e) => {
+            warn!("warp-cli connect failed: {}", e);
+            return;
+        }
+    }
+
     tokio::time::sleep(tokio::time::Duration::from_millis(2500)).await;
     info!("WARP IP address rotated successfully.");
 }
@@ -105,7 +144,19 @@ async fn execute_with_warp_retry(
                                 status, idx, url, retry_count, max_retries
                             );
                             let mut pool = state.proxy_pool.write().await;
-                            pool.mark_rate_limited_adaptive(idx, retry_count);
+                            // Try Retry-After header first (HTTP/1.1 standard)
+                            let cooldown = response
+                                .headers()
+                                .get("retry-after")
+                                .and_then(|v| v.to_str().ok())
+                                .and_then(|s| s.parse::<u64>().ok())
+                                .map(Duration::from_secs);
+                            if let Some(d) = cooldown {
+                                pool.mark_rate_limited(idx, d);
+                                info!("Using Retry-After header: {}s cooldown", d.as_secs());
+                            } else {
+                                pool.mark_rate_limited_adaptive(idx, retry_count);
+                            }
                             last_failed_idx = Some(idx);
                         } else {
                             warn!(
@@ -119,7 +170,10 @@ async fn execute_with_warp_retry(
                         tokio::time::sleep(backoff).await;
                         continue;
                     }
-                    return Ok(response);
+                    return Err(BridgeError::UpstreamError(format!(
+                        "Rate limited after {} retries (status {})",
+                        retry_count, status
+                    )));
                 } else if status == reqwest::StatusCode::BAD_REQUEST {
                     // 400: Read body to distinguish genuine errors from rate limits
                     let body_bytes = response.bytes().await.unwrap_or_default();
@@ -208,11 +262,12 @@ pub async fn forward_to_llm_sync(
     mut payload: MessagesRequest,
     model: String,
     search_client: SearchClient,
+    max_search_loops: u32,
 ) -> Result<serde_json::Value, BridgeError> {
     let mut loop_count = 0;
     loop {
         loop_count += 1;
-        if loop_count > 5 {
+        if loop_count > max_search_loops {
             return Err(BridgeError::UpstreamError(
                 "Search loop protection triggered".to_string(),
             ));
@@ -404,6 +459,7 @@ pub async fn forward_to_llm_stream(
     model: String,
     channel_capacity: usize,
     search_client: SearchClient,
+    max_search_loops: u32,
 ) -> Result<impl Stream<Item = Result<Event, Infallible>>, BridgeError> {
     let (tx, rx) = tokio::sync::mpsc::channel(channel_capacity);
     let msg_id = format!(
@@ -424,7 +480,7 @@ pub async fn forward_to_llm_stream(
 
         loop {
             loop_count += 1;
-            if loop_count > 5 {
+            if loop_count > max_search_loops {
                 error!("Search loop protection triggered!");
                 break;
             }
