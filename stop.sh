@@ -12,6 +12,16 @@ PID_FILE=".bridge.pids"
 
 echo -e "${BLUE}=== Stopping OpenCode2Claude Processes ===${NC}"
 
+# Stop systemd units if running
+if systemctl --user is-active --quiet opencode-bridge 2>/dev/null; then
+    echo -e "Stopping systemd unit: opencode-bridge"
+    systemctl --user stop opencode-bridge 2>/dev/null
+fi
+if systemctl --user is-active --quiet opencode-serve 2>/dev/null; then
+    echo -e "Stopping systemd unit: opencode-serve"
+    systemctl --user stop opencode-serve 2>/dev/null
+fi
+
 if [ -f "$PID_FILE" ]; then
     while read -r pid; do
         if kill -0 "$pid" 2>/dev/null; then

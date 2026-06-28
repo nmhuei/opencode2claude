@@ -44,17 +44,39 @@ async fn rotate_warp_ip() {
     info!("WARP IP address rotated successfully.");
 }
 
+/// Check if a response body text indicates a rate-limit error.
+fn is_rate_limit_body(body: &str) -> bool {
+    let lower = body.to_lowercase();
+    lower.contains("rate") || lower.contains("limit") || lower.contains("quota")
+        || lower.contains("too many") || lower.contains("throttl")
+}
+
 async fn execute_with_warp_retry(
     state: &AppState,
     api_key: &str,
     req_body: &OpenAiRequest,
-) -> Result<reqwest::Response, reqwest::Error> {
-    let mut retry_count = 0;
+) -> Result<reqwest::Response, BridgeError> {
+    // Calculate max retries based on proxy pool size (at least 5)
+    let pool_size = {
+        let pool = state.proxy_pool.read().await;
+        pool.proxies.len()
+    };
+    let max_retries = pool_size.max(3) + 2;
+
+    let mut retry_count: u32 = 0;
+    let mut last_failed_idx: Option<usize> = None;
+
     loop {
         // Select the client from the proxy pool if configured
         let (client, proxy_url, idx) = {
-            let pool = state.proxy_pool.read().await;
-            if let Some((c, url, idx)) = pool.get_client(api_key) {
+            let mut pool = state.proxy_pool.write().await;
+            let result = if let Some(exclude) = last_failed_idx {
+                pool.get_client_excluding(api_key, exclude)
+                    .or_else(|| pool.get_client(api_key))
+            } else {
+                pool.get_client(api_key)
+            };
+            if let Some((c, url, idx)) = result {
                 (c, Some(url), Some(idx))
             } else {
                 (state.http_client.clone(), None, None)
@@ -70,50 +92,109 @@ async fn execute_with_warp_retry(
         match res {
             Ok(response) => {
                 let status = response.status();
-                // TOO_MANY_REQUESTS is 429, BAD_REQUEST (400) is returned by upstream on free rate limit errors too
-                let is_rate_limit = status == reqwest::StatusCode::TOO_MANY_REQUESTS
-                    || status == reqwest::StatusCode::BAD_REQUEST;
 
-                if is_rate_limit && retry_count < 3 {
-                    retry_count += 1;
-                    if let (Some(idx), Some(url)) = (idx, proxy_url) {
-                        warn!(
-                            "Upstream rate limit hit (status {}) on proxy #{} ({}). Putting proxy on cool-down...",
-                            status, idx, url
-                        );
-                        let mut pool = state.proxy_pool.write().await;
-                        pool.mark_rate_limited(idx, std::time::Duration::from_secs(300)); // 5 mins cooldown
-                    } else {
-                        warn!(
-                            "Upstream rate limit or request error hit (status {}). Attempting to rotate WARP IP (Attempt {}/3)...",
-                            status, retry_count
-                        );
-                        rotate_warp_ip().await;
+                if status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                    || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+                {
+                    // 429 and 503 are always rate-limit / overload
+                    if (retry_count as usize) < max_retries {
+                        retry_count += 1;
+                        if let (Some(idx), Some(ref url)) = (idx, &proxy_url) {
+                            warn!(
+                                "Upstream rate limit hit (status {}) on proxy #{} ({}). Putting proxy on cool-down (attempt {}/{})...",
+                                status, idx, url, retry_count, max_retries
+                            );
+                            let mut pool = state.proxy_pool.write().await;
+                            pool.mark_rate_limited_adaptive(idx, retry_count);
+                            last_failed_idx = Some(idx);
+                        } else {
+                            warn!(
+                                "Upstream rate limit hit (status {}). Attempting to rotate WARP IP (attempt {}/{})...",
+                                status, retry_count, max_retries
+                            );
+                            rotate_warp_ip().await;
+                        }
+                        let backoff = std::time::Duration::from_secs(2u64.pow(retry_count.min(4)));
+                        info!("Backing off for {:?} before retry...", backoff);
+                        tokio::time::sleep(backoff).await;
+                        continue;
                     }
-                    continue;
+                    return Ok(response);
+                } else if status == reqwest::StatusCode::BAD_REQUEST {
+                    // 400: Read body to distinguish genuine errors from rate limits
+                    let body_bytes = response.bytes().await.unwrap_or_default();
+                    let body_text = String::from_utf8_lossy(&body_bytes);
+                    if is_rate_limit_body(&body_text) {
+                        warn!(
+                            "Upstream returned 400 with rate-limit body: {}",
+                            body_text.chars().take(200).collect::<String>()
+                        );
+                        if (retry_count as usize) < max_retries {
+                            retry_count += 1;
+                            if let (Some(idx), Some(ref url)) = (idx, &proxy_url) {
+                                warn!(
+                                    "Rate-limit on proxy #{} ({}). Cool-down (attempt {}/{})...",
+                                    idx, url, retry_count, max_retries
+                                );
+                                let mut pool = state.proxy_pool.write().await;
+                                pool.mark_rate_limited_adaptive(idx, retry_count);
+                                last_failed_idx = Some(idx);
+                            } else {
+                                rotate_warp_ip().await;
+                            }
+                            let backoff = std::time::Duration::from_secs(2u64.pow(retry_count.min(4)));
+                            info!("Backing off for {:?} before retry...", backoff);
+                            tokio::time::sleep(backoff).await;
+                            continue;
+                        }
+                        return Err(BridgeError::UpstreamError(format!(
+                            "Rate limited (400) after {} retries: {}",
+                            retry_count, body_text
+                        )));
+                    } else {
+                        // Genuine 400 error — don't retry, propagate immediately
+                        warn!(
+                            "Upstream returned genuine 400 error: {}",
+                            body_text.chars().take(300).collect::<String>()
+                        );
+                        return Err(BridgeError::UpstreamError(format!(
+                            "Upstream returned 400: {}",
+                            body_text
+                        )));
+                    }
+                } else {
+                    // Success or other status — return as-is
+                    return Ok(response);
                 }
-                return Ok(response);
             }
             Err(e) => {
-                if retry_count < 3 {
+                if (retry_count as usize) < max_retries {
                     retry_count += 1;
-                    if let (Some(idx), Some(url)) = (idx, proxy_url) {
+                    if let (Some(idx), Some(ref url)) = (idx, &proxy_url) {
                         warn!(
-                            "Network error connecting via proxy #{} ({}): {}. Putting proxy on cool-down...",
-                            idx, url, e
+                            "Network error connecting via proxy #{} ({}): {}. Putting proxy on cool-down (attempt {}/{})...",
+                            idx, url, e, retry_count, max_retries
                         );
                         let mut pool = state.proxy_pool.write().await;
-                        pool.mark_rate_limited(idx, std::time::Duration::from_secs(60)); // 1 min cooldown
+                        pool.mark_rate_limited(idx, std::time::Duration::from_secs(60));
+                        last_failed_idx = Some(idx);
                     } else {
                         warn!(
-                            "Network error connecting upstream: {}. Attempting to rotate WARP IP (Attempt {}/3)...",
-                            e, retry_count
+                            "Network error connecting upstream: {}. Attempting to rotate WARP IP (attempt {}/{})...",
+                            e, retry_count, max_retries
                         );
                         rotate_warp_ip().await;
                     }
+                    // Exponential backoff
+                    let backoff = std::time::Duration::from_secs(2u64.pow(retry_count.min(4)));
+                    info!("Backing off for {:?} before retry...", backoff);
+                    tokio::time::sleep(backoff).await;
                     continue;
                 }
-                return Err(e);
+                return Err(BridgeError::UpstreamError(format!(
+                    "Network error after {} retries: {}",
+                    retry_count, e
+                )));
             }
         }
     }
@@ -141,9 +222,7 @@ pub async fn forward_to_llm_sync(
 
         info!("Forwarding sync request for model {}", model);
 
-        let res = execute_with_warp_retry(state, &api_key, &openai_req)
-            .await
-            .map_err(|e| BridgeError::UpstreamError(e.to_string()))?;
+        let res = execute_with_warp_retry(state, &api_key, &openai_req).await?;
 
         if !res.status().is_success() {
             let status = res.status();
@@ -361,6 +440,18 @@ pub async fn forward_to_llm_stream(
                 Ok(r) => r,
                 Err(e) => {
                     error!("Error forwarding upstream request: {}", e);
+                    // Send error SSE event so Claude Code gets a clear message
+                    let error_ev = Event::default()
+                        .event("error")
+                        .json_data(serde_json::json!({
+                            "type": "error",
+                            "error": {
+                                "type": "api_error",
+                                "message": format!("Bridge upstream error: {}", e)
+                            }
+                        }))
+                        .unwrap_or_else(|_| Event::default().data("{}"));
+                    let _ = tx.send(error_ev).await;
                     break;
                 }
             };
@@ -369,6 +460,18 @@ pub async fn forward_to_llm_stream(
                 let status = res.status();
                 let body = res.text().await.unwrap_or_default();
                 error!("Upstream API returned status {}: {}", status, body);
+                // Send error SSE event with the actual error details
+                let error_ev = Event::default()
+                    .event("error")
+                    .json_data(serde_json::json!({
+                        "type": "error",
+                        "error": {
+                            "type": "api_error",
+                            "message": format!("Upstream returned {}: {}", status, body.chars().take(500).collect::<String>())
+                        }
+                    }))
+                    .unwrap_or_else(|_| Event::default().data("{}"));
+                let _ = tx.send(error_ev).await;
                 break;
             }
 

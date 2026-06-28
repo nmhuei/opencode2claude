@@ -123,10 +123,40 @@ if command -v docker &> /dev/null && docker info &>/dev/null; then
     BRIDGE_PROXIES=$(IFS=,; echo "${BRIDGE_PROXIES_LIST[*]}")
     export BRIDGE_PROXIES
 
+    # Function to verify proxy connectivity
+    verify_proxies() {
+        local all_ok=true
+        for i in "${!PROXY_PORTS[@]}"; do
+            port=${PROXY_PORTS[$i]}
+            container_name="opencode-warp-$((i+1))"
+            echo -n "  Verifying proxy ${container_name} (port ${port})..."
+            local ok=false
+            for attempt in $(seq 1 12); do
+                if curl -s -o /dev/null -w '' -x socks5h://127.0.0.1:$port --max-time 5 https://cloudflare.com/cdn-cgi/trace 2>/dev/null; then
+                    echo -e " ${GREEN}✓ Online${NC}"
+                    ok=true
+                    break
+                fi
+                echo -n "."
+                sleep 5
+            done
+            if [ "$ok" = false ]; then
+                echo -e " ${RED}✗ Failed (container may still be initializing)${NC}"
+                all_ok=false
+            fi
+        done
+        if [ "$all_ok" = false ]; then
+            echo -e "${YELLOW}  ⚠ Some proxies failed verification. They may come online shortly.${NC}"
+        else
+            echo -e "${GREEN}  ✓ All proxies verified and online!${NC}"
+        fi
+    }
+
     if [ "$any_new_created" = true ]; then
-        echo -e "${YELLOW}  Waiting 8 seconds for new Cloudflare WARP containers to initialize...${NC}"
-        sleep 8
+        echo -e "${YELLOW}  Waiting 10 seconds for Cloudflare WARP registration...${NC}"
+        sleep 10
     fi
+    verify_proxies
     echo -e "  Proxies in pool: ${YELLOW}$BRIDGE_PROXIES${NC}"
     echo -e "  Requests will be dynamically load-balanced and failovered."
 elif [ -n "$BRIDGE_PROXIES" ]; then

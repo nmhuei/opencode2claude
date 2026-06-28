@@ -44,7 +44,7 @@ impl ProxyPool {
         Self { proxies }
     }
 
-    pub fn get_client(&self, api_key: &str) -> Option<(Client, String, usize)> {
+    pub fn get_client(&mut self, api_key: &str) -> Option<(Client, String, usize)> {
         if self.proxies.is_empty() {
             return None;
         }
@@ -57,13 +57,20 @@ impl ProxyPool {
 
         let now = Instant::now();
 
-        // 2. Try to find the first active proxy starting from preferred_idx
+        // 2. Clear expired cooldowns
+        for i in 0..self.proxies.len() {
+            if let Some(until) = self.proxies[i].rate_limited_until {
+                if now >= until {
+                    info!("Proxy #{} ({}) cooldown expired, proxy is back online.", i, self.proxies[i].url);
+                    self.proxies[i].rate_limited_until = None;
+                }
+            }
+        }
+
+        // 3. Try to find the first active proxy starting from preferred_idx
         for i in 0..self.proxies.len() {
             let idx = (preferred_idx + i) % self.proxies.len();
-            let item = &self.proxies[idx];
-            
-            // Check if rate limited
-            let is_limited = item.rate_limited_until
+            let is_limited = self.proxies[idx].rate_limited_until
                 .map(|until| now < until)
                 .unwrap_or(false);
 
@@ -71,12 +78,12 @@ impl ProxyPool {
                 if i > 0 {
                     warn!(
                         "Preferred proxy #{} ({}) is rate-limited. Failing over to proxy #{} ({}).",
-                        preferred_idx, self.proxies[preferred_idx].url, idx, item.url
+                        preferred_idx, self.proxies[preferred_idx].url, idx, self.proxies[idx].url
                     );
                 } else {
-                    info!("Using preferred proxy #{} ({}) for agent", idx, item.url);
+                    info!("Using preferred proxy #{} ({}) for agent", idx, self.proxies[idx].url);
                 }
-                return Some((item.client.clone(), item.url.clone(), idx));
+                return Some((self.proxies[idx].client.clone(), self.proxies[idx].url.clone(), idx));
             }
         }
 
@@ -99,6 +106,77 @@ impl ProxyPool {
             );
         }
     }
+
+    pub fn mark_rate_limited_adaptive(&mut self, idx: usize, retry_count: u32) {
+        let secs = 60 * 2u64.pow(retry_count.min(3));
+        let duration = Duration::from_secs(secs);
+        self.mark_rate_limited(idx, duration);
+    }
+
+    #[allow(dead_code)]
+    pub fn mark_healthy(&mut self, idx: usize) {
+        if idx < self.proxies.len() {
+            self.proxies[idx].rate_limited_until = None;
+            info!(
+                "Proxy #{} ({}) marked as healthy.",
+                idx, self.proxies[idx].url
+            );
+        }
+    }
+
+    pub fn get_client_excluding(&mut self, api_key: &str, exclude_idx: usize) -> Option<(Client, String, usize)> {
+        if self.proxies.is_empty() {
+            return None;
+        }
+
+        let mut hasher = DefaultHasher::new();
+        api_key.hash(&mut hasher);
+        let hash_val = hasher.finish() as usize;
+        let preferred_idx = hash_val % self.proxies.len();
+
+        let now = Instant::now();
+
+        // Clear expired cooldowns
+        for i in 0..self.proxies.len() {
+            if let Some(until) = self.proxies[i].rate_limited_until {
+                if now >= until {
+                    info!("Proxy #{} ({}) cooldown expired, proxy is back online.", i, self.proxies[i].url);
+                    self.proxies[i].rate_limited_until = None;
+                }
+            }
+        }
+
+        for i in 0..self.proxies.len() {
+            let idx = (preferred_idx + i) % self.proxies.len();
+            if idx == exclude_idx {
+                continue;
+            }
+
+            let is_limited = self.proxies[idx].rate_limited_until
+                .map(|until| now < until)
+                .unwrap_or(false);
+
+            if !is_limited {
+                info!("Using proxy #{} ({}) (excluding #{})", idx, self.proxies[idx].url, exclude_idx);
+                return Some((self.proxies[idx].client.clone(), self.proxies[idx].url.clone(), idx));
+            }
+        }
+
+        // Fallback: all non-excluded proxies are rate-limited, pick first non-excluded
+        for i in 0..self.proxies.len() {
+            let idx = (preferred_idx + i) % self.proxies.len();
+            if idx != exclude_idx {
+                let item = &self.proxies[idx];
+                warn!(
+                    "All non-excluded proxies are rate-limited. Falling back to proxy #{} ({}).",
+                    idx, item.url
+                );
+                return Some((item.client.clone(), item.url.clone(), idx));
+            }
+        }
+
+        None
+    }
 }
 
 #[cfg(test)]
@@ -112,7 +190,7 @@ mod tests {
             "socks5://127.0.0.1:40002".to_string(),
             "socks5://127.0.0.1:40003".to_string(),
         ];
-        let pool = ProxyPool::new(&urls);
+        let mut pool = ProxyPool::new(&urls);
         assert_eq!(pool.proxies.len(), 3);
 
         // Same API key should always map to same proxy index
@@ -154,5 +232,26 @@ mod tests {
         // Get client. It should fallback to preferred index
         let fallback = pool.get_client("agent-test").unwrap();
         assert_eq!(fallback.2, preferred);
+    }
+
+    #[test]
+    fn test_get_client_excluding() {
+        let urls = vec![
+            "socks5://127.0.0.1:40001".to_string(),
+            "socks5://127.0.0.1:40002".to_string(),
+            "socks5://127.0.0.1:40003".to_string(),
+        ];
+        let mut pool = ProxyPool::new(&urls);
+
+        let preferred = pool.get_client("agent-excl").unwrap().2;
+
+        // Excluding the preferred proxy should return a different one
+        let result = pool.get_client_excluding("agent-excl", preferred).unwrap();
+        assert_ne!(result.2, preferred);
+
+        // Excluding a non-preferred proxy should still return the preferred one
+        let other_idx = (preferred + 1) % 3;
+        let result2 = pool.get_client_excluding("agent-excl", other_idx).unwrap();
+        assert_eq!(result2.2, preferred);
     }
 }
