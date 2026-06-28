@@ -96,6 +96,7 @@ Priority: **CLI args > Env vars > TOML file > Defaults**
 | `BRIDGE_MAX_SEARCH_LOOPS` | `5` | Search interception retries |
 | `TAVILY_API_KEY` | (none) | Web search API keys... |
 | `BRIDGE_PROXIES` | (none) | Comma-separated list of SOCKS5/HTTP proxies for multi-agent independent IP mapping |
+| `PROXY_POOL_SIZE` | `3` | Number of Cloudflare WARP proxy containers to spawn dynamically (when Docker is available) |
 
 Full list: see [CLAUDE.md](CLAUDE.md) or `opencode2claude --help`
 
@@ -110,7 +111,24 @@ To prevent this, `opencode2claude` supports a pool of SOCKS5 or HTTP proxies.
 1. **Independent IP Mapping**: The bridge automatically hashes each agent's API key (provided by Claude Code) to route it through a specific proxy in the pool. This ensures that different agents use different proxies/IPs.
 2. **Automatic Cooldown & Failover**: If a proxy hits a `429 Too Many Requests` or network error, the bridge automatically marks it as rate-limited, puts it on cooldown, and routes the request through the next available proxy in the pool.
 
-To configure a proxy pool:
+### Automated Setup with Docker
+
+If Docker is running on your host, `start.sh` will **automatically** spawn isolated Cloudflare WARP proxy containers for you. You can dynamically scale the pool using `PROXY_POOL_SIZE`:
+
+```bash
+# Spawn 5 WARP proxy containers on ports 40001 - 40005
+export PROXY_POOL_SIZE=5
+source start.sh
+```
+
+To clean up all containers and stop the bridge, simply run:
+```bash
+./stop.sh
+```
+
+### Manual Proxy Pool Configuration
+
+If you prefer to configure your own SOCKS5/HTTP proxies (e.g. Tor or private proxies):
 ```bash
 export BRIDGE_PROXIES="socks5://127.0.0.1:40001,socks5://127.0.0.1:40002,socks5://127.0.0.1:40003"
 source start.sh
