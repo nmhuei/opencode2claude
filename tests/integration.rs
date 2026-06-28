@@ -436,9 +436,9 @@ async fn test_health_daemon_status() {
 #[tokio::test]
 #[ignore]
 async fn test_proxy_pool_failover_integration() {
-    use tokio::net::TcpListener;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
     use tokio::sync::Mutex;
 
     // 1. Start two mock proxy servers
@@ -459,7 +459,7 @@ async fn test_proxy_pool_failover_integration() {
         if let Ok((mut socket, _)) = proxy1_listener.accept().await {
             let mut buf = [0; 1024];
             let _ = socket.read(&mut buf).await;
-            
+
             // Mark as connected
             *proxy1_connected_clone.lock().await = true;
 
@@ -474,7 +474,7 @@ async fn test_proxy_pool_failover_integration() {
         if let Ok((mut socket, _)) = proxy2_listener.accept().await {
             // Mark as connected
             *proxy2_connected_clone.lock().await = true;
-            
+
             // Close connection or return 502 to finish
             let response = "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n";
             let _ = socket.write_all(response.as_bytes()).await;
@@ -483,7 +483,10 @@ async fn test_proxy_pool_failover_integration() {
 
     // 2. Start the bridge with BRIDGE_PROXIES pointing to our mock proxies
     let mut envs = HashMap::new();
-    let proxies_str = format!("http://127.0.0.1:{},http://127.0.0.1:{}", proxy1_port, proxy2_port);
+    let proxies_str = format!(
+        "http://127.0.0.1:{},http://127.0.0.1:{}",
+        proxy1_port, proxy2_port
+    );
     envs.insert("BRIDGE_PROXIES", proxies_str.as_str());
     envs.insert("OPENCODE_MODEL", "opencode/deepseek-v4-flash-free");
 
@@ -495,7 +498,12 @@ async fn test_proxy_pool_failover_integration() {
 
     // 4. Verify that both proxies were connected to in order!
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-    assert!(*proxy1_connected.lock().await, "Proxy 1 should have been tried first");
-    assert!(*proxy2_connected.lock().await, "Proxy 2 should have been tried after Proxy 1 failed with 429");
+    assert!(
+        *proxy1_connected.lock().await,
+        "Proxy 1 should have been tried first"
+    );
+    assert!(
+        *proxy2_connected.lock().await,
+        "Proxy 2 should have been tried after Proxy 1 failed with 429"
+    );
 }
-

@@ -5,11 +5,11 @@
 
 use crate::error::BridgeError;
 use crate::handlers::{ContentVal, MessagesRequest};
-use crate::state::AppState;
 use crate::opencode::mapper::{extract_search_query, is_web_search_tool, map_anthropic_to_openai};
 use crate::opencode::search::SearchClient;
 use crate::opencode::types::*;
 use crate::sse::SseEventBuilder;
+use crate::state::AppState;
 use axum::response::sse::Event;
 use futures_util::{Stream, StreamExt};
 use reqwest::Client;
@@ -86,8 +86,11 @@ async fn rotate_warp_ip() {
 /// Check if a response body text indicates a rate-limit error.
 fn is_rate_limit_body(body: &str) -> bool {
     let lower = body.to_lowercase();
-    lower.contains("rate") || lower.contains("limit") || lower.contains("quota")
-        || lower.contains("too many") || lower.contains("throttl")
+    lower.contains("rate")
+        || lower.contains("limit")
+        || lower.contains("quota")
+        || lower.contains("too many")
+        || lower.contains("throttl")
 }
 
 async fn execute_with_warp_retry(
@@ -196,7 +199,8 @@ async fn execute_with_warp_retry(
                             } else {
                                 rotate_warp_ip().await;
                             }
-                            let backoff = std::time::Duration::from_secs(2u64.pow(retry_count.min(4)));
+                            let backoff =
+                                std::time::Duration::from_secs(2u64.pow(retry_count.min(4)));
                             info!("Backing off for {:?} before retry...", backoff);
                             tokio::time::sleep(backoff).await;
                             continue;
@@ -492,7 +496,8 @@ pub async fn forward_to_llm_stream(
                 model_clone, loop_count
             );
 
-            let res = match execute_with_warp_retry(&state_clone, &api_key_clone, &openai_req).await {
+            let res = match execute_with_warp_retry(&state_clone, &api_key_clone, &openai_req).await
+            {
                 Ok(r) => r,
                 Err(e) => {
                     error!("Error forwarding upstream request: {}", e);

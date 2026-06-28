@@ -89,7 +89,7 @@ BRIDGE_NO_PROXY=""
 
 if command -v docker &> /dev/null && docker info &>/dev/null; then
     echo -e "${GREEN}✓ Docker is running. Automating SOCKS5 proxy pool setup for multi-agent support...${NC}"
-    PROXY_POOL_SIZE=${PROXY_POOL_SIZE:-3}
+    PROXY_POOL_SIZE=${PROXY_POOL_SIZE:-5}
     PROXY_PORTS=()
     for ((idx=0; idx<PROXY_POOL_SIZE; idx++)); do
         PROXY_PORTS+=($((40001 + idx)))

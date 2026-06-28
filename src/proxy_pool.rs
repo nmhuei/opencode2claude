@@ -1,10 +1,10 @@
-use std::time::{Instant, Duration};
 use reqwest::Client;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use tracing::{info, warn, error};
-use tokio::sync::RwLock as TokioRwLock;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::RwLock as TokioRwLock;
+use tracing::{error, info, warn};
 
 // ── Types ──
 
@@ -38,21 +38,11 @@ pub struct ProxyEntry {
 /// - indices `[0..active_count)` là active slots (có thể Active, Cooldown, Dead, Starting)
 /// - indices `[active_count..]` là spare slots (thường là Spare)
 /// - Khi 1 active chết → swap status với 1 spare, push dead index vào restart_queue
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ProxyPool {
     pub proxies: Vec<ProxyEntry>,
     pub active_count: usize,
     pub restart_queue: Vec<usize>,
-}
-
-impl Default for ProxyPool {
-    fn default() -> Self {
-        Self {
-            proxies: Vec::new(),
-            active_count: 0,
-            restart_queue: Vec::new(),
-        }
-    }
 }
 
 // ── Helpers ──
@@ -66,7 +56,7 @@ fn extract_port(url: &str) -> u16 {
 
 fn container_name(url: &str) -> String {
     let port = extract_port(url);
-    if port >= 40001 && port <= 40099 {
+    if (40001..=40099).contains(&port) {
         format!("opencode-warp-{}", port - 40000)
     } else {
         format!("opencode-proxy-{}", port)
@@ -119,8 +109,8 @@ impl ProxyPool {
         };
 
         // Set indices >= active_count as Spare
-        for i in active_count..total {
-            proxies[i].status = ProxyStatus::Spare;
+        for proxy in proxies.iter_mut().take(total).skip(active_count) {
+            proxy.status = ProxyStatus::Spare;
         }
 
         info!(
@@ -148,9 +138,9 @@ impl ProxyPool {
 
     fn remaining_cooldown(status: &ProxyStatus) -> Duration {
         match status {
-            ProxyStatus::Cooldown(until) => {
-                until.checked_duration_since(Instant::now()).unwrap_or_default()
-            }
+            ProxyStatus::Cooldown(until) => until
+                .checked_duration_since(Instant::now())
+                .unwrap_or_default(),
             ProxyStatus::Active => Duration::ZERO,
             _ => Duration::MAX,
         }
@@ -205,13 +195,14 @@ impl ProxyPool {
                 .find(|&i| matches!(self.proxies[i].status, ProxyStatus::Spare));
 
             if let Some(spare) = spare_idx {
-                let dead_idx = (0..self.active_count).find(|&i| {
-                    !Self::is_usable(&self.proxies[i].status)
-                });
+                let dead_idx =
+                    (0..self.active_count).find(|&i| !Self::is_usable(&self.proxies[i].status));
 
                 if let Some(dead) = dead_idx {
                     self.proxies[spare].status = ProxyStatus::Active;
-                    self.proxies[dead].status = ProxyStatus::Dead { restart_attempts: 0 };
+                    self.proxies[dead].status = ProxyStatus::Dead {
+                        restart_attempts: 0,
+                    };
                     self.restart_queue.push(dead);
                     active_indices = vec![spare]; // spare now lives at its original index but is Active
                     info!(
@@ -304,8 +295,9 @@ impl ProxyPool {
 
         if active_indices.is_empty() {
             // Try spare excluding exclude_idx
-            let spare = (self.active_count..self.proxies.len())
-                .find(|&i| matches!(self.proxies[i].status, ProxyStatus::Spare) && i != exclude_idx);
+            let spare = (self.active_count..self.proxies.len()).find(|&i| {
+                matches!(self.proxies[i].status, ProxyStatus::Spare) && i != exclude_idx
+            });
             if let Some(spare) = spare {
                 return Some((
                     self.proxies[spare].client.clone(),
@@ -378,7 +370,10 @@ impl ProxyPool {
     pub fn mark_healthy(&mut self, idx: usize) {
         if idx < self.proxies.len() {
             self.proxies[idx].status = ProxyStatus::Active;
-            info!("Proxy #{} ({}) marked as healthy.", idx, self.proxies[idx].url);
+            info!(
+                "Proxy #{} ({}) marked as healthy.",
+                idx, self.proxies[idx].url
+            );
         }
     }
 
@@ -445,7 +440,10 @@ pub async fn health_monitor(pool: Arc<TokioRwLock<ProxyPool>>) {
                 let mut p = pool.write().await;
                 if idx < p.proxies.len() {
                     // Only mark as Spare if still dead (not manually re-assigned)
-                    if matches!(p.proxies[idx].status, ProxyStatus::Dead { .. } | ProxyStatus::Starting) {
+                    if matches!(
+                        p.proxies[idx].status,
+                        ProxyStatus::Dead { .. } | ProxyStatus::Starting
+                    ) {
                         p.proxies[idx].status = ProxyStatus::Spare;
                         info!(
                             "Proxy #{} ({}) recovered via TCP health check.",
@@ -490,7 +488,10 @@ async fn restart_container(idx: usize, pool: Arc<TokioRwLock<ProxyPool>>) {
     match &rm {
         Ok(o) if !o.status.success() => {
             let stderr = String::from_utf8_lossy(&o.stderr);
-            warn!("docker rm -f {} (may not exist): {}", container_name, stderr);
+            warn!(
+                "docker rm -f {} (may not exist): {}",
+                container_name, stderr
+            );
         }
         Err(e) => {
             warn!("docker rm -f {} failed: {}", container_name, e);
@@ -553,7 +554,9 @@ async fn restart_container(idx: usize, pool: Arc<TokioRwLock<ProxyPool>>) {
         );
     } else {
         let attempts = match p.proxies[idx].status {
-            ProxyStatus::Dead { restart_attempts: n } => n + 1,
+            ProxyStatus::Dead {
+                restart_attempts: n,
+            } => n + 1,
             _ => 1,
         };
         if attempts < 3 {
@@ -569,10 +572,7 @@ async fn restart_container(idx: usize, pool: Arc<TokioRwLock<ProxyPool>>) {
             p.proxies[idx].status = ProxyStatus::Dead {
                 restart_attempts: attempts,
             };
-            error!(
-                "Proxy #{} failed restart after 3 attempts. Giving up.",
-                idx
-            );
+            error!("Proxy #{} failed restart after 3 attempts. Giving up.", idx);
         }
     }
 }
@@ -584,7 +584,9 @@ async fn requeue_or_giveup(idx: usize, pool: &Arc<TokioRwLock<ProxyPool>>, reaso
         return;
     }
     let attempts = match p.proxies[idx].status {
-        ProxyStatus::Dead { restart_attempts: n } => n + 1,
+        ProxyStatus::Dead {
+            restart_attempts: n,
+        } => n + 1,
         _ => 1,
     };
     if attempts < 3 {
@@ -686,7 +688,10 @@ mod tests {
 
         // Get preferred proxy for "agent-test"
         let preferred = pool.get_client("agent-test").unwrap().2;
-        assert!(preferred < pool.active_count, "preferred should be in active set");
+        assert!(
+            preferred < pool.active_count,
+            "preferred should be in active set"
+        );
 
         // Mark preferred proxy as rate-limited
         pool.mark_rate_limited(preferred, Duration::from_secs(60));
@@ -741,7 +746,11 @@ mod tests {
         assert_eq!(result.2, 2, "should return spare at index 2");
 
         // No restart queue entry because cooldown proxies recover naturally
-        assert_eq!(pool.restart_queue.len(), 0, "cooldown should not trigger restart");
+        assert_eq!(
+            pool.restart_queue.len(),
+            0,
+            "cooldown should not trigger restart"
+        );
     }
 
     #[test]

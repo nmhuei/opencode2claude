@@ -238,9 +238,9 @@ impl BridgeConfig {
         let proxies = env::var("BRIDGE_PROXIES")
             .ok()
             .or_else(|| {
-                toml_config.as_ref().and_then(|t| {
-                    t.proxies.as_ref().map(|p| p.join(","))
-                })
+                toml_config
+                    .as_ref()
+                    .and_then(|t| t.proxies.as_ref().map(|p| p.join(",")))
             })
             .map(|s| {
                 s.split(',')
