@@ -14,3 +14,7 @@
 client_tools.json
 RELEASE_GUIDE.md
 
+# Temporary test files (excluding tests/ directory)
+/test
+/test.*
+
