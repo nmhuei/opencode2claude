@@ -992,8 +992,10 @@ mod tests {
         assert_eq!(strip_system_tags("Hello</think>"), "Hello");
         assert_eq!(strip_system_tags("Hello</parameter>World"), "HelloWorld");
         assert_eq!(strip_system_tags("</｜DSML｜parameter>\nHello"), "Hello");
-        assert_eq!(strip_system_tags("<think>Some thinking</think>Response"), "Some thinkingResponse");
+        assert_eq!(
+            strip_system_tags("<think>Some thinking</think>Response"),
+            "Some thinkingResponse"
+        );
         assert_eq!(strip_system_tags("Normal text"), "Normal text");
     }
 }
-

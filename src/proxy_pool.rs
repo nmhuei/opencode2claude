@@ -3,12 +3,12 @@
 /// Consecutive failures before proxy enters cooldown.
 pub const FAILURE_THRESHOLD: u32 = 2;
 /// Consecutive successes after cooldown to be considered fully healthy.
-#[allow(dead_code)]
 pub const RECOVERY_SUCCESS_COUNT: u32 = 2;
 /// Default cooldown duration when failure threshold is reached (seconds).
 pub const COOLDOWN_SECS: u64 = 120;
 
 use reqwest::Client;
+use serde::Serialize;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -34,7 +34,7 @@ pub enum ProxyStatus {
 }
 
 /// Proxy role in the two-tier architecture.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub enum ProxyRole {
     /// Primary managed proxy (40001-40003) — CLI may restart/stop/recover
     Primary,
@@ -43,7 +43,7 @@ pub enum ProxyRole {
 }
 
 /// Proxy lifecycle management policy.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub enum ProxyLifecycle {
     /// Fully managed by CLI — can be restarted, purged, recreated
     Managed,
@@ -84,6 +84,42 @@ pub struct ProxyPool {
     #[allow(dead_code)]
     pub active_count: usize,
     pub restart_queue: Vec<usize>,
+}
+
+// ── Stats types (exposed via /health and status) ──
+
+/// Snapshot of a single proxy node for health/status display.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProxyNodeStats {
+    pub port: u16,
+    pub role: ProxyRole,
+    pub lifecycle: ProxyLifecycle,
+    pub status: String,
+    pub failure_count: u32,
+    pub success_count: u32,
+    pub cooldown_remaining_secs: Option<u64>,
+}
+
+/// Aggregate stats for a tier (primary or warm-standby).
+#[derive(Debug, Clone, Serialize)]
+pub struct ProxyTierStats {
+    pub ports: Vec<u16>,
+    pub total: usize,
+    pub healthy: usize,
+    pub degraded: usize,
+    pub cooldown: usize,
+    pub recovering: usize,
+    pub dead: usize,
+    pub protected: bool,
+}
+
+/// Full proxy pool snapshot for health/status endpoints.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProxyPoolStats {
+    pub policy: String,
+    pub primary: ProxyTierStats,
+    pub warm_standby: ProxyTierStats,
+    pub nodes: Vec<ProxyNodeStats>,
 }
 
 // ── Helpers ──
@@ -133,6 +169,19 @@ pub fn get_warm_standby_ports() -> [u16; 2] {
 }
 
 // ── Implementation ──
+
+impl ProxyStatus {
+    /// Human-readable description of the current status.
+    pub fn description(&self) -> &'static str {
+        match self {
+            ProxyStatus::Active => "healthy",
+            ProxyStatus::Spare => "spare",
+            ProxyStatus::Cooldown(_) => "cooldown",
+            ProxyStatus::Dead { .. } => "dead",
+            ProxyStatus::Starting => "starting",
+        }
+    }
+}
 
 impl ProxyPool {
     /// Create pool from a list of proxy URLs.
@@ -232,18 +281,29 @@ impl ProxyPool {
     // ── Health tracking ──
 
     /// Record a success for a proxy, building toward recovery threshold.
-    #[allow(dead_code)]
     pub fn record_success(&mut self, idx: usize) {
         if idx >= self.proxies.len() {
             return;
         }
-        self.proxies[idx].consecutive_failures = 0;
-        self.proxies[idx].consecutive_successes =
-            self.proxies[idx].consecutive_successes.saturating_add(1);
+        let entry = &mut self.proxies[idx];
+        entry.consecutive_failures = 0;
+        entry.consecutive_successes = entry.consecutive_successes.saturating_add(1);
+
+        // Auto-recover from cooldown after enough consecutive successes
+        if matches!(entry.status, ProxyStatus::Cooldown(_))
+            && entry.consecutive_successes >= RECOVERY_SUCCESS_COUNT
+        {
+            entry.status = ProxyStatus::Active;
+            entry.consecutive_failures = 0;
+            entry.consecutive_successes = 0;
+            info!(
+                "Proxy #{} ({}) recovered from cooldown after {} consecutive successes.",
+                idx, entry.url, RECOVERY_SUCCESS_COUNT
+            );
+        }
     }
 
     /// Record a failure for a proxy, potentially triggering cooldown.
-    #[allow(dead_code)]
     pub fn record_failure(&mut self, idx: usize) {
         if idx >= self.proxies.len() {
             return;
@@ -460,6 +520,100 @@ impl ProxyPool {
     /// Drain the restart queue.
     pub fn drain_restart_queue(&mut self) -> Vec<usize> {
         std::mem::take(&mut self.restart_queue)
+    }
+
+    // ── Snapshot ──
+
+    /// Build a full health snapshot of the proxy pool.
+    pub fn snapshot(&self) -> ProxyPoolStats {
+        let mut primary_ports = Vec::new();
+        let mut ws_ports = Vec::new();
+        let mut primary_healthy = 0usize;
+        let mut primary_degraded = 0usize;
+        let mut primary_cooldown = 0usize;
+        let mut primary_recovering = 0usize;
+        let mut primary_dead = 0usize;
+        let mut ws_healthy = 0usize;
+        let mut ws_degraded = 0usize;
+        let mut ws_cooldown = 0usize;
+        let mut ws_recovering = 0usize;
+        let mut ws_dead = 0usize;
+        let mut nodes = Vec::new();
+
+        for p in &self.proxies {
+            let status_str = p.status.description().to_string();
+            let cooldown_remaining = if let ProxyStatus::Cooldown(until) = p.status {
+                Some(
+                    until
+                        .checked_duration_since(Instant::now())
+                        .unwrap_or_default()
+                        .as_secs(),
+                )
+            } else {
+                None
+            };
+
+            nodes.push(ProxyNodeStats {
+                port: p.port,
+                role: p.role,
+                lifecycle: p.lifecycle,
+                status: status_str,
+                failure_count: p.consecutive_failures,
+                success_count: p.consecutive_successes,
+                cooldown_remaining_secs: cooldown_remaining,
+            });
+
+            match p.role {
+                ProxyRole::Primary => {
+                    primary_ports.push(p.port);
+                    match p.status {
+                        ProxyStatus::Active => primary_healthy += 1,
+                        ProxyStatus::Spare => primary_degraded += 1,
+                        ProxyStatus::Cooldown(_) => primary_cooldown += 1,
+                        ProxyStatus::Dead { .. } => primary_dead += 1,
+                        ProxyStatus::Starting => primary_recovering += 1,
+                    }
+                }
+                ProxyRole::WarmStandby => {
+                    ws_ports.push(p.port);
+                    match p.status {
+                        ProxyStatus::Active => ws_healthy += 1,
+                        ProxyStatus::Spare => ws_degraded += 1,
+                        ProxyStatus::Cooldown(_) => ws_cooldown += 1,
+                        ProxyStatus::Dead { .. } => ws_dead += 1,
+                        ProxyStatus::Starting => ws_recovering += 1,
+                    }
+                }
+            }
+        }
+
+        let total_primary = primary_ports.len();
+        let total_ws = ws_ports.len();
+
+        ProxyPoolStats {
+            policy: "primary-with-warm-standby".to_string(),
+            primary: ProxyTierStats {
+                ports: primary_ports,
+                total: total_primary,
+                healthy: primary_healthy,
+                degraded: primary_degraded,
+                cooldown: primary_cooldown,
+                recovering: primary_recovering,
+                dead: primary_dead,
+                protected: false,
+            },
+            warm_standby: ProxyTierStats {
+                ports: ws_ports,
+                total: total_ws,
+                healthy: ws_healthy,
+                degraded: ws_degraded,
+                cooldown: ws_cooldown,
+                recovering: ws_recovering,
+                dead: ws_dead,
+                protected: true,
+            },
+            nodes,
+        }
     }
 
     // ── Private ──
@@ -1046,5 +1200,122 @@ mod tests {
         assert_eq!(extract_port("socks5://127.0.0.1:40001"), 40001);
         assert_eq!(extract_port("http://127.0.0.1:8080/"), 8080);
         assert_eq!(extract_port("invalid"), 0);
+    }
+
+    // ── Phase 6: Telemetry & Health tests ──
+
+    #[test]
+    fn test_record_failure_enters_cooldown() {
+        let urls = make_test_urls(1);
+        let mut pool = ProxyPool::new(&urls);
+
+        // Initial state: healthy
+        assert_eq!(pool.proxies[0].consecutive_failures, 0);
+        assert!(matches!(pool.proxies[0].status, ProxyStatus::Active));
+
+        // First failure should not trigger cooldown (threshold is 2)
+        pool.record_failure(0);
+        assert_eq!(pool.proxies[0].consecutive_failures, 1);
+        assert!(matches!(pool.proxies[0].status, ProxyStatus::Active));
+
+        // Second failure triggers cooldown
+        pool.record_failure(0);
+        assert!(matches!(pool.proxies[0].status, ProxyStatus::Cooldown(_)));
+    }
+
+    #[test]
+    fn test_http_400_does_not_mark_proxy_failed() {
+        // record_success is called for any HTTP response, including 400.
+        // It resets failure count — confirming HTTP 400 does NOT mark proxy failed.
+        let urls = make_test_urls(1);
+        let mut pool = ProxyPool::new(&urls);
+
+        // Set up a failure first so we can verify success resets it
+        pool.record_failure(0);
+        assert_eq!(pool.proxies[0].consecutive_failures, 1);
+
+        // Simulate HTTP 400 response: record_success (transport worked)
+        pool.record_success(0);
+        assert_eq!(pool.proxies[0].consecutive_failures, 0);
+        assert_eq!(pool.proxies[0].consecutive_successes, 1);
+        assert!(matches!(pool.proxies[0].status, ProxyStatus::Active));
+    }
+
+    #[test]
+    fn test_health_json_contains_proxy_pool() {
+        let urls: Vec<String> = (0..5)
+            .map(|i| format!("socks5://127.0.0.1:{}", 40001 + i))
+            .collect();
+        let pool = ProxyPool::new(&urls);
+        let stats = pool.snapshot();
+
+        // policy
+        assert_eq!(stats.policy, "primary-with-warm-standby");
+
+        // Primary tier
+        assert_eq!(stats.primary.ports, vec![40001, 40002, 40003]);
+        assert_eq!(stats.primary.total, 3);
+        assert_eq!(stats.primary.healthy, 3);
+        assert!(!stats.primary.protected);
+
+        // WarmStandby tier
+        assert_eq!(stats.warm_standby.ports, vec![40004, 40005]);
+        assert_eq!(stats.warm_standby.total, 2);
+        assert_eq!(stats.warm_standby.healthy, 2);
+        assert!(stats.warm_standby.protected);
+
+        // Nodes
+        assert_eq!(stats.nodes.len(), 5);
+        assert_eq!(stats.nodes[0].role, ProxyRole::Primary);
+        assert_eq!(stats.nodes[3].role, ProxyRole::WarmStandby);
+        assert_eq!(stats.nodes[3].lifecycle, ProxyLifecycle::Protected);
+        assert!(stats.nodes[0].cooldown_remaining_secs.is_none());
+    }
+
+    #[test]
+    fn test_snapshot_shows_cooldown_count() {
+        let urls = make_test_urls(5);
+        let mut pool = ProxyPool::new(&urls);
+
+        // Mark two primaries and one warm-standby as rate-limited
+        pool.mark_rate_limited(1, Duration::from_secs(60));
+        pool.mark_rate_limited(2, Duration::from_secs(120));
+        pool.mark_rate_limited(3, Duration::from_secs(300));
+
+        let stats = pool.snapshot();
+
+        assert_eq!(stats.primary.cooldown, 2);
+        assert_eq!(stats.primary.healthy, 1);
+        assert_eq!(stats.warm_standby.cooldown, 1);
+        assert_eq!(stats.warm_standby.healthy, 1);
+    }
+
+    #[test]
+    fn test_record_success_recovers_after_threshold() {
+        let urls = make_test_urls(1);
+        let mut pool = ProxyPool::new(&urls);
+
+        // Force proxy into cooldown via failure threshold
+        pool.record_failure(0); // failure 1
+        pool.record_failure(0); // failure 2 → enters cooldown
+        assert!(matches!(pool.proxies[0].status, ProxyStatus::Cooldown(_)));
+        assert_eq!(pool.proxies[0].consecutive_successes, 0);
+
+        // RECOVERY_SUCCESS_COUNT = 2. After 2 successes it should recover.
+        pool.record_success(0);
+        assert!(
+            matches!(pool.proxies[0].status, ProxyStatus::Cooldown(_)),
+            "still in cooldown after 1 success"
+        );
+        assert_eq!(pool.proxies[0].consecutive_successes, 1);
+
+        pool.record_success(0);
+        assert!(
+            matches!(pool.proxies[0].status, ProxyStatus::Active),
+            "recovered after {} successes",
+            RECOVERY_SUCCESS_COUNT
+        );
+        assert_eq!(pool.proxies[0].consecutive_failures, 0);
+        assert_eq!(pool.proxies[0].consecutive_successes, 0);
     }
 }

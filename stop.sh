@@ -83,6 +83,16 @@ fi
 # Handle Docker Proxy Pool containers
 if command -v docker &>/dev/null && docker info &>/dev/null; then
     containers=$(docker ps -a --format '{{.Names}}' | grep "^opencode-warp-")
+    # Also clean up stray WARP containers not in the numbered pool (e.g. deprecated warp-external on 40010)
+    stray_containers=$(docker ps -a --format '{{.Names}}' | grep "^warp-external$" 2>/dev/null || true)
+    if [ -n "$stray_containers" ]; then
+        echo -e "${YELLOW}Cleaning up deprecated WARP container(s) (no longer in pool)...${NC}"
+        for container_name in $stray_containers; do
+            echo -e "  Removing container: $container_name"
+            docker rm -f "$container_name" >/dev/null 2>&1 &
+        done
+        wait
+    fi
     if [ -n "$containers" ]; then
         if [ "$PURGE" = true ]; then
             echo -e "${BLUE}Purging proxy pool containers (full removal)...${NC}"

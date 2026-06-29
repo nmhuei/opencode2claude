@@ -19,8 +19,9 @@ curl -fsSL https://raw.githubusercontent.com/nmhuei/opencode2claude/main/install
 **Claude Code** → `opencode2claude` → **OpenCode CLI** → **Any LLM**
 
 ```
-source start.sh   # 5 seconds → ready to use
-claude            # works with any model
+opencode2claude start  # Start the bridge daemon (background)
+opencode2claude status # Check if it's running
+claude                 # Works with any model
 ```
 
 [Install](#-install) • [Usage](#-usage) • [Configuration](#-configuration) • [Benchmark](#-benchmark)
@@ -56,20 +57,30 @@ No dependencies needed. The binary is **~5MB** and starts instantly.
 ## 👀 Usage
 
 ```bash
-# Use a specific model
+# Start the bridge daemon (background)
+opencode2claude start
+
+# Check status
+opencode2claude status
+
+# Use a specific model (via env or CLI flag)
 export OPENCODE_MODEL="openai/gpt-4o"
-source start.sh
+opencode2claude start
 
-# Enable auth
-export BRIDGE_AUTH_TOKEN="sk-your-token"
-source start.sh
+# Stop the bridge
+opencode2claude stop
 
-# Rate limiting
-export BRIDGE_RATE_LIMIT=10
+# Manage proxy pool
+opencode2claude proxy status
+opencode2claude proxy restart   # Recreate primary proxies (40001-40003 only)
+opencode2claude proxy purge     # Remove + recreate primary proxies
+opencode2claude proxy logs      # View proxy container logs
+
+# Traditional start.sh (still works for convenience)
 source start.sh
 
 # CLI flags (override all config)
-./target/release/opencode2claude --port 4000 --model "google/gemini-2.5-pro"
+opencode2claude serve --port 4000 --model "google/gemini-2.5-pro"
 ```
 
 Shell commands bypass the LLM entirely — prefix with `!`:
@@ -95,8 +106,10 @@ Priority: **CLI args > Env vars > TOML file > Defaults**
 | `BRIDGE_RATE_LIMIT` | (none) | Max concurrent requests (unset = unlimited) |
 | `BRIDGE_MAX_SEARCH_LOOPS` | `5` | Search interception retries |
 | `TAVILY_API_KEY` | (none) | Web search API keys... |
-| `BRIDGE_PROXIES` | (none) | Comma-separated list of SOCKS5/HTTP proxies for multi-agent independent IP mapping |
-| `PROXY_POOL_SIZE` | `3` | Number of Cloudflare WARP proxy containers to spawn dynamically (when Docker is available) |
+| `BRIDGE_PRIMARY_PROXIES` | (none) | Primary proxy URLs (socks5://...) |
+| `BRIDGE_WARM_STANDBY_PROXIES` | (none) | Warm-standby proxy URLs (protected) |
+| `PRIMARY_POOL_SIZE` | `3` | Number of primary WARP proxy containers (40001+) |
+| `STANDBY_POOL_SIZE` | `2` | Number of warm-standby proxy containers (follows primary) |
 
 Full list: see [CLAUDE.md](CLAUDE.md) or `opencode2claude --help`
 
@@ -106,32 +119,49 @@ Full list: see [CLAUDE.md](CLAUDE.md) or `opencode2claude --help`
 
 When running multiple concurrent Claude Code agents, they can hit the free-tier rate limits quickly if they share a single IP. 
 
-To prevent this, `opencode2claude` supports a pool of SOCKS5 or HTTP proxies. 
+To prevent this, `opencode2claude` uses a **two-tier proxy pool**:
 
-1. **Independent IP Mapping**: The bridge automatically hashes each agent's API key (provided by Claude Code) to route it through a specific proxy in the pool. This ensures that different agents use different proxies/IPs.
-2. **Automatic Cooldown & Failover**: If a proxy hits a `429 Too Many Requests` or network error, the bridge automatically marks it as rate-limited, puts it on cooldown, and routes the request through the next available proxy in the pool.
+1. **Primary Managed Pool** (ports 40001–40003) — normal routing targets
+2. **Warm-Standby Protected Pool** (ports 40004–40005) — failover only, protected from CLI modification
+
+### How It Works
+
+- The bridge hashes each agent's API key via **Rendezvous hashing** to a deterministic primary proxy
+- Each agent always maps to the same primary proxy (sticky assignment)
+- If the selected primary is unhealthy/cooldown/dead, traffic **fails over to WarmStandby**
+- **Only affected agents remap** — healthy primaries don't lose their agents
+- WarmStandby proxies are never used for normal traffic
 
 ### Automated Setup with Docker
 
-If Docker is running on your host, `start.sh` will **automatically** spawn isolated Cloudflare WARP proxy containers for you. You can dynamically scale the pool using `PROXY_POOL_SIZE`:
+If Docker is running on your host, `start.sh` will **automatically** spawn isolated Cloudflare WARP proxy containers:
 
 ```bash
-# Spawn 5 WARP proxy containers on ports 40001 - 40005
-export PROXY_POOL_SIZE=5
+# Standard: 3 primary + 2 warm-standby proxies on ports 40001–40005
 source start.sh
 ```
 
-To clean up all containers and stop the bridge, simply run:
+To manage proxy containers via CLI:
+
 ```bash
-./stop.sh
+opencode2claude proxy status      # List with roles (primary vs protected)
+opencode2claude proxy restart      # Recreate primary proxies only
+opencode2claude proxy purge        # Remove + recreate primary proxies
+```
+
+To clean up all containers and stop the bridge:
+
+```bash
+opencode2claude stop
 ```
 
 ### Manual Proxy Pool Configuration
 
 If you prefer to configure your own SOCKS5/HTTP proxies (e.g. Tor or private proxies):
 ```bash
-export BRIDGE_PROXIES="socks5://127.0.0.1:40001,socks5://127.0.0.1:40002,socks5://127.0.0.1:40003"
-source start.sh
+export BRIDGE_PRIMARY_PROXIES="socks5://127.0.0.1:40001,socks5://127.0.0.1:40002,socks5://127.0.0.1:40003"
+export BRIDGE_WARM_STANDBY_PROXIES="socks5://127.0.0.1:40004,socks5://127.0.0.1:40005"
+opencode2claude start
 ```
 
 ---
