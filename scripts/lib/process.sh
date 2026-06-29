@@ -22,7 +22,9 @@ wait_for_http() {
   local timeout="${2:-10}"
   local interval="${3:-0.5}"
   local waited=0
-  while [[ "$waited" -lt "$timeout" ]]; do
+  local max_iterations
+  max_iterations=$(awk "BEGIN { printf \"%d\", $timeout / $interval }" 2>/dev/null || echo "$timeout")
+  while [[ "$waited" -lt "$max_iterations" ]]; do
     if curl -sf "$url" >/dev/null 2>&1; then
       return 0
     fi

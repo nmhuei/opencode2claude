@@ -45,7 +45,7 @@ gate_release_build() {
 
 gate_ci_yml_verify() {
   info "Gate 8.7: .github/workflows/ci.yml calls verify.sh"
-  grep -q "verify.sh" "$ROOT_DIR/.github/workflows/ci.yml" || return 1
+  grep -qE "^\s+run:\s+\./scripts/verify\.sh" "$ROOT_DIR/.github/workflows/ci.yml" || return 1
   pass "CI uses verify.sh"
 }
 

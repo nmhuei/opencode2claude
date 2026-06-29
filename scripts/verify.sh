@@ -56,7 +56,7 @@ if [[ "$PHASE" == "all" ]]; then
     PROFILE="$PROFILE" FROM_GATE="$FROM_GATE" ONLY_GATE="$ONLY_GATE" LIST_GATES="$LIST_GATES" \
       "$script" || { error "Phase failed: $p"; exit 1; }
   done
-  summary_pass "All phases passed"
+  summary_all_pass
 elif script=$(phase_script_for "$PHASE"); then
   exec "$script"
 else

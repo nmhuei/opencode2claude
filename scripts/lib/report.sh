@@ -7,7 +7,6 @@ source "$ROOT_DIR/scripts/lib/common.sh" 2>/dev/null || true
 _GATE_PASSED=0
 _GATE_FAILED=0
 _GATE_SKIPPED=0
-_GATE_NAMES=()
 
 run_gates() {
   local from_gate="${FROM_GATE:-}"
@@ -70,6 +69,10 @@ run_gates() {
 
 summary_pass() {
   printf "\n[SUMMARY] \342\234\205 All %d gates passed for %s\n" "$_GATE_PASSED" "$PHASE_NAME"
+}
+
+summary_all_pass() {
+  printf "\n[SUMMARY] \342\234\205 All phases passed!\n"
 }
 
 summary_fail() {
