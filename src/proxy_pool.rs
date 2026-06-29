@@ -28,8 +28,8 @@ pub enum ProxyStatus {
 pub enum ProxyRole {
     /// Primary managed proxy (40001-40003) — CLI may restart/stop/recover
     Primary,
-    /// Auxiliary protected proxy (40004-40005) — CLI may only health-check
-    Auxiliary,
+    /// Warm-standby protected proxy (40004-40005) — CLI may only health-check
+    WarmStandby,
 }
 
 /// Proxy lifecycle management policy.
@@ -49,7 +49,7 @@ pub struct ProxyEntry {
     pub status: ProxyStatus,
     pub port: u16,
     pub container_name: String,
-    /// Proxy role in the two-tier architecture (Primary/Auxiliary).
+    /// Proxy role in the two-tier architecture (Primary/WarmStandby).
     #[allow(dead_code)]
     pub role: ProxyRole,
     /// Proxy lifecycle management policy (Managed/Protected).
@@ -87,17 +87,17 @@ fn container_name(url: &str) -> String {
     }
 }
 
-/// Returns true if the port is a protected auxiliary proxy (40004-40005).
+/// Returns true if the port is a protected warm-standby proxy (40004-40005).
 pub fn is_protected_proxy_port(port: u16) -> bool {
     matches!(port, 40004 | 40005)
 }
 
-/// Ensures a given port is NOT a protected auxiliary proxy.
+/// Ensures a given port is NOT a protected warm-standby proxy.
 /// Returns an error if it is, preventing destructive operations.
 pub fn ensure_not_protected(port: u16) -> Result<(), String> {
     if is_protected_proxy_port(port) {
         Err(format!(
-            "refusing to modify protected auxiliary proxy port {} (40004-40005 are protected)",
+            "refusing to modify protected warm-standby proxy port {} (40004-40005 are protected)",
             port
         ))
     } else {
@@ -110,8 +110,8 @@ pub fn get_primary_ports() -> [u16; 3] {
     [40001, 40002, 40003]
 }
 
-/// Returns the auxiliary protected proxy ports (40004-40005).
-pub fn get_auxiliary_ports() -> [u16; 2] {
+/// Returns the warm-standby protected proxy ports (40004-40005).
+pub fn get_warm_standby_ports() -> [u16; 2] {
     [40004, 40005]
 }
 
@@ -139,7 +139,7 @@ impl ProxyPool {
                         port,
                         container_name: cname,
                         role: if is_protected_proxy_port(port) {
-                            ProxyRole::Auxiliary
+                            ProxyRole::WarmStandby
                         } else {
                             ProxyRole::Primary
                         },

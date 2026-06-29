@@ -40,9 +40,18 @@ impl AppState {
             .map(|permits| Arc::new(Semaphore::new(permits)));
         let search_client = SearchClient::new(http_client.clone(), &config);
 
-        // Create proxy pool with hot-spare model
-        let proxy_pool = if let Some(ref urls) = config.proxies {
-            let pool = ProxyPool::new(urls);
+        // Create proxy pool with 2-tier primary + warm-standby model
+        // Combine primary (managed) and warm-standby (protected) proxy URLs
+        let mut all_urls: Vec<String> = Vec::new();
+        if let Some(ref urls) = config.primary_proxies {
+            all_urls.extend(urls.iter().cloned());
+        }
+        if let Some(ref urls) = config.warm_standby_proxies {
+            all_urls.extend(urls.iter().cloned());
+        }
+
+        let proxy_pool = if !all_urls.is_empty() {
+            let pool = ProxyPool::new(&all_urls);
             // Spawn background tasks for pool management
             if !pool.proxies.is_empty() {
                 let pool_arc = Arc::new(RwLock::new(pool));
@@ -102,7 +111,7 @@ mod tests {
             max_search_loops: 5,
             proxies: None,
             primary_proxies: None,
-            auxiliary_proxies: None,
+            warm_standby_proxies: None,
         };
         let state = AppState::new(config);
         assert_eq!(state.config.bridge_port, 0);

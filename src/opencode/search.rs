@@ -479,7 +479,7 @@ mod tests {
             max_search_loops: 5,
             proxies: None,
             primary_proxies: None,
-            auxiliary_proxies: None,
+            warm_standby_proxies: None,
         }
     }
 
@@ -504,7 +504,7 @@ mod tests {
             max_search_loops: 5,
             proxies: None,
             primary_proxies: None,
-            auxiliary_proxies: None,
+            warm_standby_proxies: None,
         };
         let search_client = SearchClient::new(client, &config);
         assert_eq!(search_client.tavily_key, Some("test-key".to_string()));

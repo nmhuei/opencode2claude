@@ -78,7 +78,7 @@ mod tests {
             max_search_loops: 5,
             proxies: None,
             primary_proxies: None,
-            auxiliary_proxies: None,
+            warm_standby_proxies: None,
         };
         let state = AppState::new(config);
 

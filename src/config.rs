@@ -102,13 +102,13 @@ pub struct BridgeConfig {
     #[allow(dead_code)]
     pub max_search_loops: u32,
     /// Comma-separated list of SOCKS5/HTTP proxies for multi-agent support
+    /// (deprecated, use primary_proxies + warm_standby_proxies instead)
+    #[allow(dead_code)]
     pub proxies: Option<Vec<String>>,
     /// Primary proxy URLs (managed, restartable)
-    #[allow(dead_code)]
     pub primary_proxies: Option<Vec<String>>,
-    /// Auxiliary proxy URLs (protected, never restarted)
-    #[allow(dead_code)]
-    pub auxiliary_proxies: Option<Vec<String>>,
+    /// Warm-standby proxy URLs (protected, never restarted)
+    pub warm_standby_proxies: Option<Vec<String>>,
 }
 
 impl BridgeConfig {
@@ -276,8 +276,8 @@ impl BridgeConfig {
                     .collect::<Vec<String>>()
             });
 
-        // Auxiliary proxies: BRIDGE_AUXILIARY_PROXIES env var > default
-        let auxiliary_proxies = env::var("BRIDGE_AUXILIARY_PROXIES")
+        // Warm-standby proxies: BRIDGE_WARM_STANDBY_PROXIES env var > default
+        let warm_standby_proxies = env::var("BRIDGE_WARM_STANDBY_PROXIES")
             .ok()
             .or_else(|| Some("socks5://127.0.0.1:40004,socks5://127.0.0.1:40005".to_string()))
             .map(|s| {
@@ -305,7 +305,7 @@ impl BridgeConfig {
             max_search_loops,
             proxies,
             primary_proxies,
-            auxiliary_proxies,
+            warm_standby_proxies,
         }
     }
 

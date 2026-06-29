@@ -5,12 +5,12 @@
 | **Phase ID** | `phase-4-proxy-cli` |
 | **Status** | Planned |
 | **Dependencies** | Phase 3 (Security hardening) |
-| **Scope** | Add `proxy` subcommand group with `ps`, `restart`, `logs`, `status`. Implement Docker WARP lifecycle via CLI rather than `start.sh`. `src/docker.rs` manages container create/resume/verify. |
-| **Files to create** | `src/docker.rs` |
-| **Files to modify** | `src/cli.rs` (add proxy subcommand), `src/supervisor.rs` (proxy lifecycle) |
-| **Expected behavior contract** | `opencode2claude proxy ps` lists WARP containers. `opencode2claude proxy restart <name>` restarts a proxy. `opencode2claude proxy logs <name>` shows container logs. `opencode2claude proxy status` reports health. |
-| **Acceptance gates** | cargo gates pass, `proxy --help` works, `proxy ps` lists Docker containers |
+| **Scope** | Implement 2-tier proxy architecture with Primary Managed Pool (40001-40003) and Warm-Standby Protected Pool (40004-40005). Remove 40010. Add proxy CLI commands (ps, status, restart, logs). Add `is_protected_proxy_port` guard. |
+| **Files to create** | `src/docker.rs` (Docker operations for primary only) |
+| **Files to modify** | `src/proxy_pool.rs` (role/lifecycle types, protected guards), `src/cli.rs` (proxy subcommand), `src/config.rs` (`BRIDGE_PRIMARY_PROXIES`, `BRIDGE_WARM_STANDBY_PROXIES` env vars), `src/main.rs` (wire proxy) |
+| **Expected behavior contract** | `proxy ps` lists proxies with roles. `proxy restart` only affects ports 40001-40003. `proxy purge` only affects primary. `is_protected_proxy_port(40004)` returns true. |
+| **Acceptance gates** | Protected ports never stopped. Restart affects only primary. Purge affects only primary. Status shows protection status. No 40010 anywhere. |
 | **Verification command** | `./scripts/verify.sh phase-4 --profile local` |
 | **Review requirements** | code-reviewer (MEDIUM+) |
-| **Out of scope** | Proxy pool bug fixes (Phase 5), health endpoint polish (Phase 6) |
-| **Definition of Done** | 1. All gates pass 2. `proxy ps` lists containers 3. `proxy restart` works 4. No Docker management in `proxy_pool.rs` 5. No CRITICAL/HIGH findings |
+| **Out of scope** | Runtime failover routing (Phase 5), health dashboard (Phase 6) |
+| **Definition of Done** | 1. All gates pass 2. `proxy ps` lists containers with roles 3. `proxy restart` limited to 40001-40003 4. `is_protected_proxy_port(40004)` returns true 5. No 40010 references remain 6. No CRITICAL/HIGH findings |

@@ -108,12 +108,12 @@ async fn cmd_proxy(cmd: cli::ProxyCommand) {
     match cmd {
         PC::Ps | PC::Status => {
             let primary_ports = proxy_pool::get_primary_ports();
-            let aux_ports = proxy_pool::get_auxiliary_ports();
+            let ws_ports = proxy_pool::get_warm_standby_ports();
 
             let containers = docker::list_containers(
                 &primary_ports
                     .iter()
-                    .chain(aux_ports.iter())
+                    .chain(ws_ports.iter())
                     .copied()
                     .collect::<Vec<_>>(),
             )
@@ -132,9 +132,9 @@ async fn cmd_proxy(cmd: cli::ProxyCommand) {
             }
 
             println!();
-            println!("Auxiliary protected proxies:");
+            println!("Warm-standby protected proxies:");
             for (port, name, running) in &containers {
-                if aux_ports.contains(port) {
+                if ws_ports.contains(port) {
                     println!(
                         "  {}  {}  {}  protected",
                         port,
@@ -145,7 +145,7 @@ async fn cmd_proxy(cmd: cli::ProxyCommand) {
             }
 
             println!();
-            println!("Protected auxiliary proxies are never stopped, restarted, purged, or recreated by opencode2claude.");
+            println!("Protected warm-standby proxies (40004-40005) are never stopped, restarted, purged, or recreated by opencode2claude.");
         }
         PC::Restart => {
             println!("Restarting primary managed proxies:");
@@ -158,7 +158,7 @@ async fn cmd_proxy(cmd: cli::ProxyCommand) {
                 }
             }
             println!();
-            println!("Protected auxiliary proxies skipped: 40004, 40005");
+            println!("Protected warm-standby proxies skipped: 40004, 40005 (always protected)");
         }
         PC::Logs => {
             for port in proxy_pool::get_primary_ports() {
@@ -189,7 +189,7 @@ async fn cmd_proxy(cmd: cli::ProxyCommand) {
                 }
             }
             println!();
-            println!("Protected auxiliary proxies skipped: 40004, 40005");
+            println!("Protected warm-standby proxies skipped: 40004, 40005 (always protected)");
         }
     }
 }

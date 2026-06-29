@@ -122,10 +122,20 @@ BRIDGE_NO_PROXY=""
 
 if command -v docker &>/dev/null && docker info &>/dev/null; then
     echo -e "${GREEN}✓ Docker is running. Automating SOCKS5 proxy pool setup for multi-agent support...${NC}"
-    PROXY_POOL_SIZE=${PROXY_POOL_SIZE:-5}
+    PRIMARY_POOL_SIZE=${PRIMARY_POOL_SIZE:-3}
+    STANDBY_POOL_SIZE=${STANDBY_POOL_SIZE:-2}
     PROXY_PORTS=()
-    for ((idx=0; idx<PROXY_POOL_SIZE; idx++)); do
-        PROXY_PORTS+=($((40001 + idx)))
+    PRIMARY_PORTS=()
+    STANDBY_PORTS=()
+    for ((idx=0; idx<PRIMARY_POOL_SIZE; idx++)); do
+        port=$((40001 + idx))
+        PROXY_PORTS+=("$port")
+        PRIMARY_PORTS+=("$port")
+    done
+    for ((idx=0; idx<STANDBY_POOL_SIZE; idx++)); do
+        port=$((40001 + PRIMARY_POOL_SIZE + idx))
+        PROXY_PORTS+=("$port")
+        STANDBY_PORTS+=("$port")
     done
     BRIDGE_PROXIES_LIST=()
     new_container_count=0
@@ -223,11 +233,13 @@ if command -v docker &>/dev/null && docker info &>/dev/null; then
         echo -e "  ${YELLOW}Created ${new_container_count} new container(s) (WARP registration required)${NC}"
     fi
 
-    # Add the always-on external proxy (warp-external) to the pool
-    BRIDGE_PROXIES_LIST+=("socks5://127.0.0.1:40010")
-
-    BRIDGE_PROXIES=$(IFS=,; echo "${BRIDGE_PROXIES_LIST[*]}")
-    export BRIDGE_PROXIES
+    # Export 2-tier proxy pool:
+    #   BRIDGE_PRIMARY_PROXIES — managed proxies 40001-40003
+    #   BRIDGE_WARM_STANDBY_PROXIES — protected proxies 40004-40005
+    BRIDGE_PRIMARY_PROXIES=$(IFS=,; echo "${BRIDGE_PROXIES_LIST[*]:0:3}")
+    BRIDGE_WARM_STANDBY_PROXIES=$(IFS=,; echo "${BRIDGE_PROXIES_LIST[*]:3:2}")
+    export BRIDGE_PRIMARY_PROXIES
+    export BRIDGE_WARM_STANDBY_PROXIES
 
     # ── Phase 2: Verify all proxies in parallel ──
     # verify_proxies [max_attempts] [sleep_interval] [label]

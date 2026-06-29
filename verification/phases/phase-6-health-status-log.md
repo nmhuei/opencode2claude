@@ -8,7 +8,7 @@
 | **Scope** | Add `src/health.rs` — port check + `/health` poll. Create `src/supervisor.rs` `status()` reads PID file + bridge health. `logs` subcommand tails stdout/stderr journal. `/health` endpoint returns structured JSON (no config leak). |
 | **Files to create** | `src/health.rs` |
 | **Files to modify** | `src/supervisor.rs` (status, logs), `src/main.rs` (wire in health module) |
-| **Expected behavior contract** | `opencode2claude status` shows bridge running/stopped, proxy pool health, uptime. `opencode2claude logs` tails recent bridge output. `/health` returns status without exposing config secrets. |
+| **Expected behavior contract** | `opencode2claude status` shows bridge running/stopped, proxy pool health, uptime. `opencode2claude logs` tails recent bridge output. `/health` returns status without exposing config secrets. Health endpoint returns `{ proxy_pool: { primary: { managed: true, ports: [40001,40002,40003] }, warm_standby: { protected: true, ports: [40004,40005] } } }`. |
 | **Acceptance gates** | cargo gates pass, `status` shows bridge state, `logs` returns output, `/health` is clean |
 | **Verification command** | `./scripts/verify.sh phase-6 --profile local` |
 | **Review requirements** | code-reviewer (MEDIUM+) |

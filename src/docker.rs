@@ -1,6 +1,6 @@
 //! Docker WARP container lifecycle management.
 //!
-//! All operations guard against protected auxiliary proxies (40004-40005).
+//! All operations guard against protected warm-standby proxies (40004-40005).
 
 use crate::proxy_pool::is_protected_proxy_port;
 
@@ -38,7 +38,7 @@ fn validate_port(port: u16) -> DockerResult<()> {
     }
     if is_protected_proxy_port(port) {
         return Err(DockerError::Protected(format!(
-            "Port {} is a protected auxiliary proxy (40004-40005). Refusing to modify.",
+            "Port {} is a protected warm-standby proxy (40004-40005). Refusing to modify.",
             port
         )));
     }
