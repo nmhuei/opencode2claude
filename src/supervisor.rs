@@ -94,16 +94,26 @@ impl Supervisor {
         let exe = std::env::current_exe()
             .map_err(|e| SupervisorError::SpawnFailed(format!("Cannot get binary path: {}", e)))?;
 
-        let child = Command::new(&exe)
-            .arg("serve")
-            .arg("--port")
-            .arg(self.port.to_string())
-            .arg("--host")
-            .arg(&self.host)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|e| SupervisorError::SpawnFailed(format!("Cannot spawn serve: {}", e)))?;
+        use std::os::unix::process::CommandExt;
+        let child = unsafe {
+            Command::new(&exe)
+                .arg("serve")
+                .arg("--port")
+                .arg(self.port.to_string())
+                .arg("--host")
+                .arg(&self.host)
+                .pre_exec(|| {
+                    extern "C" {
+                        fn setsid() -> i32;
+                    }
+                    setsid();
+                    Ok(())
+                })
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+        }
+        .map_err(|e| SupervisorError::SpawnFailed(format!("Cannot spawn serve: {}", e)))?;
 
         let pid = child.id();
 
