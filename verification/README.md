@@ -36,6 +36,37 @@
 5. **FINAL VERIFY** — Full verification from gate 1
 6. **COMMIT** — Only if verification passes + no CRITICAL/HIGH findings
 
+## Phase Status Summary
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| 1 — CLI skeleton | ✅ **Enabled** | |
+| 2 — Runtime + PID | ✅ **Enabled** | |
+| 3 — Security hardening | ⏸️ **Intentionally disabled** | 0 — see below |
+| 4 — Proxy CLI / 2-tier lifecycle | ✅ **Enabled** | |
+| 5 — Primary-first routing policy | ✅ **Enabled** | |
+| 6 — Health/status/telemetry | ✅ **Enabled** | |
+| 7 — Docs + migration | ✅ **Enabled** | |
+| 8 — CI + Release | ⏸️ **Intentionally disabled** | 0 — deferred after Phase 3 |
+
+### Phase 3 (Security) — Intentionally Skipped
+
+Phase 3 was originally scoped for security hardening (default shell policy = disabled,
+auth-required-on-public-bind, etc.). It was deferred because Phases 4–7 built on the
+same runtime and proxy code, making it more efficient to iterate on features first.
+
+**Roadmap recommendation:** Implement Phase 3 before Phase 8:
+- Default shell policy = `disabled`
+- Public bind without auth = refuse
+- Unrestricted shell + public bind = hard fail
+- Auth docs + tests
+- /health public vs debug protected
+
+### Phase 8 (CI + Release) — Intentionally Skipped
+
+Phase 8 was deferred until security hardening (Phase 3) is complete, so that the
+release pipeline ships a secure baseline. See Phase 3 for prerequisites.
+
 ## Adding a New Phase
 
 1. Create `verification/phases/phase-N-name.md` with full contract
