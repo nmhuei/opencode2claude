@@ -111,6 +111,31 @@ pub struct BridgeConfig {
     pub warm_standby_proxies: Option<Vec<String>>,
 }
 
+impl Default for BridgeConfig {
+    fn default() -> Self {
+        Self {
+            host: "127.0.0.1".parse().unwrap(),
+            bridge_port: 0,
+            opencode_port: 0,
+            model: None,
+            shell_policy: ShellPolicy::Disabled,
+            auth_tokens: None,
+            max_body_size: DEFAULT_MAX_BODY_SIZE,
+            stream_buffer_size: DEFAULT_STREAM_BUFFER_SIZE,
+            channel_capacity: DEFAULT_CHANNEL_CAPACITY,
+            tavily_api_key: None,
+            exa_api_key: None,
+            serper_api_key: None,
+            searxng_url: None,
+            searxng_api_key: None,
+            max_search_loops: 5,
+            proxies: None,
+            primary_proxies: None,
+            warm_standby_proxies: None,
+        }
+    }
+}
+
 impl BridgeConfig {
     /// Load configuration with priority: CLI args > Env vars > TOML file > Defaults.
     pub fn from_env_and_cli(overrides: CliOverrides) -> Self {
@@ -159,7 +184,7 @@ impl BridgeConfig {
             .shell_policy
             .or_else(|| env::var("BRIDGE_SHELL_POLICY").ok())
             .or_else(|| toml_config.as_ref().and_then(|t| t.shell_policy.clone()))
-            .unwrap_or_else(|| "unrestricted".to_string());
+            .unwrap_or_else(|| "disabled".to_string());
 
         // Shell allowlist: Env > TOML > Default
         let shell_allowlist_str = env::var("BRIDGE_SHELL_ALLOWLIST")
@@ -322,6 +347,49 @@ impl BridgeConfig {
             None => true, // No auth configured = all tokens valid
         }
     }
+
+    /// Validate security-sensitive configuration before binding the HTTP server.
+    ///
+    /// Returns an error with an actionable message if the configuration is unsafe.
+    /// Call this after loading config and before starting the server.
+    ///
+    /// # Checks
+    ///
+    /// 1. **Public bind without auth** — non-loopback addresses must have auth enabled.
+    /// 2. **Public bind + unrestricted shell** — non-loopback with unrestricted shell
+    ///    is denied regardless of auth status.
+    pub fn validate_security(&self) -> Result<(), String> {
+        let is_loopback = self.host.is_loopback();
+
+        if is_loopback {
+            return Ok(());
+        }
+
+        // Non-loopback bind (e.g. 0.0.0.0 or ::) requires auth
+        if !self.auth_enabled() {
+            return Err(
+                "SECURITY VIOLATION: Binding to a non-loopback address without authentication.\n"
+                    .to_string()
+                    + "  Set BRIDGE_AUTH_TOKEN to require authentication before binding publicly.\n"
+                    + "  Or set BRIDGE_HOST=127.0.0.1 to restrict to localhost only.\n"
+                    + "  Current host: " + &self.host.to_string(),
+            );
+        }
+
+        // Non-loopback bind with unrestricted shell is always denied
+        if matches!(self.shell_policy, ShellPolicy::Unrestricted) {
+            return Err(
+                "SECURITY VIOLATION: Binding to a non-loopback address with unrestricted shell policy.\n"
+                    .to_string()
+                    + "  Set BRIDGE_SHELL_POLICY=disabled or configure an allowlist.\n"
+                    + "  Or set BRIDGE_HOST=127.0.0.1 to restrict to localhost only.\n"
+                    + "  Current host: "
+                    + &self.host.to_string(),
+            );
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -350,6 +418,10 @@ mod tests {
         assert!(config.model.is_none());
         assert!(!config.auth_enabled());
         assert_eq!(config.stream_buffer_size, DEFAULT_STREAM_BUFFER_SIZE);
+        assert!(
+            matches!(config.shell_policy, ShellPolicy::Disabled),
+            "default shell policy must be Disabled for security reasons"
+        );
     }
 
     #[test]
@@ -487,5 +559,102 @@ mod tests {
         assert!(config.is_valid_token("secret-123"));
         assert!(config.is_valid_token("secret-456"));
         assert!(!config.is_valid_token("wrong-token"));
+    }
+
+    // ── Security validation tests (Phase 3) ──
+
+    #[test]
+    fn test_security_localhost_without_auth_allowed() {
+        // 127.0.0.1 without auth — OK
+        let config = BridgeConfig {
+            host: "127.0.0.1".parse().unwrap(),
+            shell_policy: ShellPolicy::Unrestricted,
+            auth_tokens: None,
+            ..Default::default()
+        };
+        assert!(
+            config.validate_security().is_ok(),
+            "localhost without auth must be allowed"
+        );
+    }
+
+    #[test]
+    fn test_security_public_bind_without_auth_rejected() {
+        // 0.0.0.0 without auth — rejected
+        let config = BridgeConfig {
+            host: "0.0.0.0".parse().unwrap(),
+            shell_policy: ShellPolicy::Disabled,
+            auth_tokens: None,
+            ..Default::default()
+        };
+        let result = config.validate_security();
+        assert!(result.is_err(), "public bind without auth must be rejected");
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("SECURITY VIOLATION"),
+            "error should mention SECURITY VIOLATION: {}",
+            msg
+        );
+        assert!(
+            msg.contains("BRIDGE_AUTH_TOKEN"),
+            "error should mention BRIDGE_AUTH_TOKEN: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_security_public_bind_with_auth_allowed() {
+        // 0.0.0.0 with auth — OK
+        let config = BridgeConfig {
+            host: "0.0.0.0".parse().unwrap(),
+            shell_policy: ShellPolicy::Disabled,
+            auth_tokens: Some(vec!["sk-valid".to_string()]),
+            ..Default::default()
+        };
+        assert!(
+            config.validate_security().is_ok(),
+            "public bind with auth must be allowed"
+        );
+    }
+
+    #[test]
+    fn test_security_public_bind_with_unrestricted_shell_rejected() {
+        // 0.0.0.0 + unrestricted shell — rejected regardless of auth
+        let config = BridgeConfig {
+            host: "0.0.0.0".parse().unwrap(),
+            shell_policy: ShellPolicy::Unrestricted,
+            auth_tokens: Some(vec!["sk-valid".to_string()]),
+            ..Default::default()
+        };
+        let result = config.validate_security();
+        assert!(
+            result.is_err(),
+            "public bind + unrestricted shell must be rejected even with auth"
+        );
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("SECURITY VIOLATION"),
+            "error should mention SECURITY VIOLATION: {}",
+            msg
+        );
+        assert!(
+            msg.contains("BRIDGE_SHELL_POLICY"),
+            "error should mention BRIDGE_SHELL_POLICY: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_security_default_shell_policy_is_disabled() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        env::remove_var("BRIDGE_SHELL_POLICY");
+        env::remove_var("BRIDGE_HOST");
+        env::remove_var("BRIDGE_AUTH_TOKEN");
+
+        let config = BridgeConfig::from_env_and_cli(CliOverrides::default());
+        assert!(
+            matches!(config.shell_policy, ShellPolicy::Disabled),
+            "default shell policy must be Disabled"
+        );
     }
 }

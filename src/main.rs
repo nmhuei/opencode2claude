@@ -218,6 +218,13 @@ async fn run_server(args: ServeArgs) {
     };
     let config = BridgeConfig::from_env_and_cli(overrides);
     let addr = SocketAddr::from((config.host, config.bridge_port));
+
+    // Validate security configuration before binding
+    if let Err(err) = config.validate_security() {
+        eprintln!("{}", err);
+        std::process::exit(1);
+    }
+
     let max_body = config.max_body_size;
 
     // Print startup banner
