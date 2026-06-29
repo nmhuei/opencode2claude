@@ -7,12 +7,13 @@ source "$ROOT_DIR/scripts/lib/common.sh" 2>/dev/null || true
 pick_free_port() {
   local port
   for port in {49152..65535}; do
-    if ! ss -tln "sport = :$port" 2>/dev/null | grep -q .; then
+    # Use bash's built-in /dev/tcp to check if port is listening
+    if ! (: </dev/tcp/127.0.0.1/$port) 2>/dev/null; then
       echo "$port"
       return 0
     fi
   done
-  error "No free port found"
+  error "No free port found after checking 16384 ports"
   return 1
 }
 
