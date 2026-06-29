@@ -23,6 +23,24 @@ pub enum ProxyStatus {
     Starting,
 }
 
+/// Proxy role in the two-tier architecture.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ProxyRole {
+    /// Primary managed proxy (40001-40003) — CLI may restart/stop/recover
+    Primary,
+    /// Auxiliary protected proxy (40004-40005) — CLI may only health-check
+    Auxiliary,
+}
+
+/// Proxy lifecycle management policy.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ProxyLifecycle {
+    /// Fully managed by CLI — can be restarted, purged, recreated
+    Managed,
+    /// Protected — never stopped, restarted, purged, or recreated by CLI
+    Protected,
+}
+
 /// Một entry trong proxy pool.
 #[derive(Debug)]
 pub struct ProxyEntry {
@@ -31,6 +49,12 @@ pub struct ProxyEntry {
     pub status: ProxyStatus,
     pub port: u16,
     pub container_name: String,
+    /// Proxy role in the two-tier architecture (Primary/Auxiliary).
+    #[allow(dead_code)]
+    pub role: ProxyRole,
+    /// Proxy lifecycle management policy (Managed/Protected).
+    #[allow(dead_code)]
+    pub lifecycle: ProxyLifecycle,
 }
 
 /// Proxy pool với hot-spare model.
@@ -63,6 +87,34 @@ fn container_name(url: &str) -> String {
     }
 }
 
+/// Returns true if the port is a protected auxiliary proxy (40004-40005).
+pub fn is_protected_proxy_port(port: u16) -> bool {
+    matches!(port, 40004 | 40005)
+}
+
+/// Ensures a given port is NOT a protected auxiliary proxy.
+/// Returns an error if it is, preventing destructive operations.
+pub fn ensure_not_protected(port: u16) -> Result<(), String> {
+    if is_protected_proxy_port(port) {
+        Err(format!(
+            "refusing to modify protected auxiliary proxy port {} (40004-40005 are protected)",
+            port
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Returns the primary managed proxy ports (40001-40003).
+pub fn get_primary_ports() -> [u16; 3] {
+    [40001, 40002, 40003]
+}
+
+/// Returns the auxiliary protected proxy ports (40004-40005).
+pub fn get_auxiliary_ports() -> [u16; 2] {
+    [40004, 40005]
+}
+
 // ── Implementation ──
 
 impl ProxyPool {
@@ -86,6 +138,16 @@ impl ProxyPool {
                         status: ProxyStatus::Active,
                         port,
                         container_name: cname,
+                        role: if is_protected_proxy_port(port) {
+                            ProxyRole::Auxiliary
+                        } else {
+                            ProxyRole::Primary
+                        },
+                        lifecycle: if is_protected_proxy_port(port) {
+                            ProxyLifecycle::Protected
+                        } else {
+                            ProxyLifecycle::Managed
+                        },
                     });
                     info!("Added proxy to pool: {}", url);
                 } else {
@@ -468,6 +530,11 @@ async fn restart_container(idx: usize, pool: Arc<TokioRwLock<ProxyPool>>) {
 
     if port == 0 {
         warn!("Cannot restart proxy #{}: unknown port", idx);
+        return;
+    }
+
+    if let Err(msg) = ensure_not_protected(port) {
+        warn!("{}", msg);
         return;
     }
 

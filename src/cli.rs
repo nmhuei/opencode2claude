@@ -27,6 +27,9 @@ pub struct Cli {
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum Command {
+    /// Manage proxy pools
+    #[command(subcommand)]
+    Proxy(ProxyCommand),
     /// Start the API bridge server
     Serve(ServeArgs),
     /// Start the bridge as a background daemon
@@ -104,3 +107,18 @@ pub type StatusArgs = StartArgs;
 
 /// Arguments for the `stop` subcommand.
 pub type StopArgs = StartArgs;
+
+/// Proxy pool management subcommands.
+#[derive(Subcommand)]
+pub enum ProxyCommand {
+    /// List proxy pool status
+    Ps,
+    /// Restart primary managed proxies
+    Restart,
+    /// Show proxy pool (alias for ps)
+    Status,
+    /// View proxy container logs
+    Logs,
+    /// Purge and recreate all primary proxy containers
+    Purge,
+}

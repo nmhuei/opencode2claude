@@ -103,6 +103,12 @@ pub struct BridgeConfig {
     pub max_search_loops: u32,
     /// Comma-separated list of SOCKS5/HTTP proxies for multi-agent support
     pub proxies: Option<Vec<String>>,
+    /// Primary proxy URLs (managed, restartable)
+    #[allow(dead_code)]
+    pub primary_proxies: Option<Vec<String>>,
+    /// Auxiliary proxy URLs (protected, never restarted)
+    #[allow(dead_code)]
+    pub auxiliary_proxies: Option<Vec<String>>,
 }
 
 impl BridgeConfig {
@@ -249,6 +255,38 @@ impl BridgeConfig {
                     .collect::<Vec<String>>()
             });
 
+        // Primary proxies: BRIDGE_PRIMARY_PROXIES env var > derived from TOML proxies > default
+        let primary_proxies = env::var("BRIDGE_PRIMARY_PROXIES")
+            .ok()
+            .or_else(|| {
+                toml_config
+                    .as_ref()
+                    .and_then(|t| t.proxies.as_ref().map(|p| p.join(",")))
+            })
+            .or_else(|| {
+                Some(
+                    "socks5://127.0.0.1:40001,socks5://127.0.0.1:40002,socks5://127.0.0.1:40003"
+                        .to_string(),
+                )
+            })
+            .map(|s| {
+                s.split(',')
+                    .map(|item| item.trim().to_string())
+                    .filter(|item| !item.is_empty())
+                    .collect::<Vec<String>>()
+            });
+
+        // Auxiliary proxies: BRIDGE_AUXILIARY_PROXIES env var > default
+        let auxiliary_proxies = env::var("BRIDGE_AUXILIARY_PROXIES")
+            .ok()
+            .or_else(|| Some("socks5://127.0.0.1:40004,socks5://127.0.0.1:40005".to_string()))
+            .map(|s| {
+                s.split(',')
+                    .map(|item| item.trim().to_string())
+                    .filter(|item| !item.is_empty())
+                    .collect::<Vec<String>>()
+            });
+
         BridgeConfig {
             host,
             bridge_port,
@@ -266,6 +304,8 @@ impl BridgeConfig {
             searxng_api_key,
             max_search_loops,
             proxies,
+            primary_proxies,
+            auxiliary_proxies,
         }
     }
 

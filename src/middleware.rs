@@ -77,6 +77,8 @@ mod tests {
             searxng_api_key: None,
             max_search_loops: 5,
             proxies: None,
+            primary_proxies: None,
+            auxiliary_proxies: None,
         };
         let state = AppState::new(config);
 

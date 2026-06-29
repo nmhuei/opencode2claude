@@ -5,6 +5,7 @@
 
 mod cli;
 mod config;
+mod docker;
 mod error;
 mod handlers;
 mod middleware;
@@ -39,6 +40,7 @@ async fn main() {
         Some(Command::Start(args)) => cmd_start(args),
         Some(Command::Status(args)) => cmd_status(args),
         Some(Command::Stop(args)) => cmd_stop(args),
+        Some(Command::Proxy(cmd)) => cmd_proxy(cmd).await,
         Some(_) => {
             println!("Subcommand not yet implemented (coming in Phase 3+)");
         }
@@ -95,6 +97,99 @@ fn cmd_stop(args: StopArgs) {
         Err(e) => {
             eprintln!("Error: {}", e);
             std::process::exit(1);
+        }
+    }
+}
+
+async fn cmd_proxy(cmd: cli::ProxyCommand) {
+    use cli::ProxyCommand as PC;
+    use docker::DockerError;
+
+    match cmd {
+        PC::Ps | PC::Status => {
+            let primary_ports = proxy_pool::get_primary_ports();
+            let aux_ports = proxy_pool::get_auxiliary_ports();
+
+            let containers = docker::list_containers(
+                &primary_ports
+                    .iter()
+                    .chain(aux_ports.iter())
+                    .copied()
+                    .collect::<Vec<_>>(),
+            )
+            .await;
+
+            println!("Primary managed proxies:");
+            for (port, name, running) in &containers {
+                if primary_ports.contains(port) {
+                    println!(
+                        "  {}  {}  {}",
+                        port,
+                        if *running { "healthy" } else { "stopped" },
+                        name
+                    );
+                }
+            }
+
+            println!();
+            println!("Auxiliary protected proxies:");
+            for (port, name, running) in &containers {
+                if aux_ports.contains(port) {
+                    println!(
+                        "  {}  {}  {}  protected",
+                        port,
+                        if *running { "healthy" } else { "stopped" },
+                        name
+                    );
+                }
+            }
+
+            println!();
+            println!("Protected auxiliary proxies are never stopped, restarted, purged, or recreated by opencode2claude.");
+        }
+        PC::Restart => {
+            println!("Restarting primary managed proxies:");
+            for port in proxy_pool::get_primary_ports() {
+                print!("  {}... ", port);
+                match docker::create_container(port).await {
+                    Ok(()) => println!("OK"),
+                    Err(DockerError::Protected(msg)) => println!("SKIPPED ({})", msg),
+                    Err(e) => println!("ERROR: {}", e),
+                }
+            }
+            println!();
+            println!("Protected auxiliary proxies skipped: 40004, 40005");
+        }
+        PC::Logs => {
+            for port in proxy_pool::get_primary_ports() {
+                match docker::container_logs(port, 50).await {
+                    Ok(logs) => {
+                        println!("=== proxy {} ({}) ===", port, docker::container_name(port));
+                        println!("{}", logs);
+                    }
+                    Err(e) => eprintln!("Error getting logs for port {}: {}", port, e),
+                }
+            }
+        }
+        PC::Purge => {
+            println!("Purging primary managed proxies:");
+            for port in proxy_pool::get_primary_ports() {
+                print!("  {}... ", port);
+                match docker::remove_container(port).await {
+                    Ok(()) => println!("removed"),
+                    Err(DockerError::Protected(msg)) => println!("SKIPPED ({})", msg),
+                    Err(e) => println!("ERROR: {}", e),
+                }
+            }
+            for port in proxy_pool::get_primary_ports() {
+                print!("  {} recreate... ", port);
+                match docker::create_container(port).await {
+                    Ok(()) => println!("OK"),
+                    Err(e) => println!("ERROR: {}", e),
+                }
+            }
+            println!();
+            println!("Protected auxiliary proxies skipped: 40004, 40005");
         }
     }
 }
