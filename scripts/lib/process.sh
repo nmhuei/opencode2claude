@@ -21,14 +21,13 @@ wait_for_http() {
   local url="$1"
   local timeout="${2:-10}"
   local interval="${3:-0.5}"
-  local elapsed=0
-  while [[ "$elapsed" -lt "$timeout" ]]; do
+  local waited=0
+  while [[ "$waited" -lt "$timeout" ]]; do
     if curl -sf "$url" >/dev/null 2>&1; then
       return 0
     fi
     sleep "$interval"
-    elapsed=$(echo "$elapsed + $interval" | bc 2>/dev/null || \
-      awk "BEGIN { print $elapsed + $interval }")
+    waited=$((waited + 1))
   done
   return 1
 }
@@ -44,7 +43,7 @@ wait_for_pid_exit() {
   local timeout="${2:-5}"
   local elapsed=0
   while pid_alive "$pid" && [[ "$elapsed" -lt "$timeout" ]]; do
-    sleep 0.5
+    sleep 1
     elapsed=$((elapsed + 1))
   done
   ! pid_alive "$pid"
