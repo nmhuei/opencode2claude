@@ -253,8 +253,8 @@ if command -v docker &>/dev/null && docker info &>/dev/null; then
         echo -e "${YELLOW}  Waiting 15 seconds for Cloudflare WARP registration (${new_container_count} new)...${NC}"
         sleep 15
     elif [ "$resumed_count" -gt 0 ]; then
-        echo -e "  Waiting 3 seconds for resumed containers to be ready..."
-        sleep 3
+        echo -e "  Waiting 15 seconds for resumed containers (WARP tunnel re-establish)..."
+        sleep 15
     fi
 
     # First verification pass (8 retries × 3s = 24s max per proxy, all parallel)
