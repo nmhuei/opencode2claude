@@ -50,19 +50,20 @@ gate_runtime_dir_created() {
 
   local bin="$ROOT_DIR/target/debug/opencode2claude"
   local log_file="$VERIFY_LOG_DIR/phase-2-start.log"
+  local port; port="$(pick_free_port)"
 
   # Clean any leftover state
   rm -rf "$ROOT_DIR/.runtime" 2>/dev/null || true
   mkdir -p "$VERIFY_LOG_DIR"
 
-  # Start bridge — this spawns serve in background and exits
-  "$bin" start >"$log_file" 2>&1 || {
+  # Start bridge on the free port — this spawns serve in background and exits
+  "$bin" start -p "$port" >"$log_file" 2>&1 || {
     error "start command failed"
     cat "$log_file"
     return 1
   }
 
-  register_cleanup "\"$bin\" stop 2>/dev/null || true"
+  register_cleanup "\"$bin\" stop -p \"$port\" 2>/dev/null || true"
   register_cleanup "rm -rf \"$ROOT_DIR/.runtime\" 2>/dev/null || true"
 
   # Wait for runtime directory and PID file
@@ -101,7 +102,7 @@ gate_pid_file_valid() {
     pass "PID file valid — bridge is running"
   else
     error "status shows unexpected state: $status_output"
-    cat "$pid_file"
+    cat "$pid_file" 2>/dev/null || true
     return 1
   fi
 }
