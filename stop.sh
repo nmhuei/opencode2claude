@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 
 # Stop script for OpenCode2Claude Bridge
+# Usage:
+#   ./stop.sh          — Stop bridge + daemon, pause proxy containers (fast restart)
+#   ./stop.sh --purge  — Stop everything and remove proxy containers entirely
 
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
@@ -9,6 +12,14 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 PID_FILE=".bridge.pids"
+PURGE=false
+
+# Parse flags
+for arg in "$@"; do
+    case $arg in
+        --purge) PURGE=true ;;
+    esac
+done
 
 echo -e "${BLUE}=== Stopping OpenCode2Claude Processes ===${NC}"
 
@@ -40,7 +51,7 @@ if [ -f "$PID_FILE" ]; then
     echo -e "${GREEN}✓ Cleaned up all registered bridge processes.${NC}"
 else
     echo -e "${YELLOW}No active bridge process registration file found (.bridge.pids).${NC}"
-    echo -e "Checking for any running bridge.py or opencode serve processes..."
+    echo -e "Checking for any running opencode2claude or opencode serve processes..."
     
     # Fallback to pkill for clean termination of defaults
     pkill -f "opencode2claude" && echo -e "Terminated running opencode2claude bridge"
@@ -69,22 +80,33 @@ if nc -z 127.0.0.1 "$BRIDGE_PORT" 2>/dev/null; then
     fi
 fi
 
-# Stop and remove Docker Proxy Pool containers if running
-if command -v docker &> /dev/null && docker info &>/dev/null; then
+# Handle Docker Proxy Pool containers
+if command -v docker &>/dev/null && docker info &>/dev/null; then
     containers=$(docker ps -a --format '{{.Names}}' | grep "^opencode-warp-")
     if [ -n "$containers" ]; then
-        echo -e "${BLUE}Stopping and removing multi-agent SOCKS5 proxy pool containers...${NC}"
-        for container_name in $containers; do
-            echo -e "Stopping and removing container: $container_name"
-            docker rm -f "$container_name" >/dev/null &
-        done
-        wait # Wait for all background tasks to finish
-        echo -e "${GREEN}✓ Stopped and removed proxy pool containers.${NC}"
+        if [ "$PURGE" = true ]; then
+            echo -e "${BLUE}Purging proxy pool containers (full removal)...${NC}"
+            for container_name in $containers; do
+                echo -e "  Removing container: $container_name"
+                docker rm -f "$container_name" >/dev/null &
+            done
+            wait
+            echo -e "${GREEN}✓ Proxy pool containers removed. Next start will create fresh containers.${NC}"
+        else
+            echo -e "${BLUE}Pausing proxy pool containers (preserving WARP registration)...${NC}"
+            for container_name in $containers; do
+                echo -e "  Stopping container: $container_name"
+                docker stop -t 5 "$container_name" >/dev/null &
+            done
+            wait
+            echo -e "${GREEN}✓ Proxy containers stopped. They will resume quickly on next start.${NC}"
+            echo -e "  ${YELLOW}Tip: Use './stop.sh --purge' to fully remove containers.${NC}"
+        fi
     fi
 fi
 
 # Inform about WARP CLI status if it is connected
-if command -v warp-cli &> /dev/null; then
+if command -v warp-cli &>/dev/null; then
     warp_status=$(warp-cli status 2>/dev/null)
     if echo "$warp_status" | grep -q "Connected"; then
         echo -e "\n${YELLOW}Note: Cloudflare WARP is still connected on host.${NC}"

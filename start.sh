@@ -114,7 +114,9 @@ else
     done
 fi
 
+# ══════════════════════════════════════════════════════════════════════
 # Auto-detect Cloudflare WARP proxy settings or spin up Docker proxy pool
+# ══════════════════════════════════════════════════════════════════════
 BRIDGE_ALL_PROXY=""
 BRIDGE_NO_PROXY=""
 
@@ -126,9 +128,11 @@ if command -v docker &>/dev/null && docker info &>/dev/null; then
         PROXY_PORTS+=($((40001 + idx)))
     done
     BRIDGE_PROXIES_LIST=()
-    any_new_created=false
+    new_container_count=0
+    resumed_count=0
+    already_running_count=0
 
-    # Create/start all containers in parallel
+    # ── Phase 1: Create/start all containers in parallel ──
     container_pids=()
     for i in "${!PROXY_PORTS[@]}"; do
         port=${PROXY_PORTS[$i]}
@@ -136,94 +140,157 @@ if command -v docker &>/dev/null && docker info &>/dev/null; then
         BRIDGE_PROXIES_LIST+=("socks5://127.0.0.1:$port")
 
         (
-            if docker ps -a --format '{{.Names}}' | grep -q "^${container_name}$"; then
-                if ! docker ps --format '{{.Names}}' | grep -q "^${container_name}$"; then
-                    docker start "$container_name" >/dev/null
-                fi
+            if docker ps --format '{{.Names}}' | grep -q "^${container_name}$"; then
+                # Already running — nothing to do
+                echo "RUNNING" > "/tmp/.opencode_proxy_state_${port}"
+            elif docker ps -a --format '{{.Names}}' | grep -q "^${container_name}$"; then
+                # Exists but stopped — resume (WARP registration preserved)
+                docker start "$container_name" >/dev/null 2>&1
+                echo "RESUMED" > "/tmp/.opencode_proxy_state_${port}"
             else
+                # Brand new — needs WARP registration
                 docker run -d \
                     --name "$container_name" \
                     --restart always \
                     --cap-add=NET_ADMIN \
                     --sysctl net.ipv4.conf.all.src_valid_mark=1 \
                     -p "$port":9091 \
-                    ghcr.io/mon-ius/docker-warp-socks:latest >/dev/null
-                echo "NEW" > "/tmp/.opencode_proxy_new_${port}"
+                    ghcr.io/mon-ius/docker-warp-socks:latest >/dev/null 2>&1
+                echo "NEW" > "/tmp/.opencode_proxy_state_${port}"
             fi
         ) &
         container_pids+=($!)
     done
-    # Wait for all container operations to finish
     for pid in "${container_pids[@]}"; do
         wait "$pid"
     done
 
-    # Check if any new containers were created
+    # Collect container states
     for port in "${PROXY_PORTS[@]}"; do
-        if [ -f "/tmp/.opencode_proxy_new_${port}" ]; then
-            any_new_created=true
-            rm -f "/tmp/.opencode_proxy_new_${port}"
-        fi
+        state=$(cat "/tmp/.opencode_proxy_state_${port}" 2>/dev/null || echo "UNKNOWN")
+        rm -f "/tmp/.opencode_proxy_state_${port}"
+        case "$state" in
+            NEW)      ((new_container_count++)) ;;
+            RESUMED)  ((resumed_count++)) ;;
+            RUNNING)  ((already_running_count++)) ;;
+        esac
     done
+    if [ "$already_running_count" -gt 0 ]; then
+        echo -e "  ${GREEN}${already_running_count} container(s) already running${NC}"
+    fi
+    if [ "$resumed_count" -gt 0 ]; then
+        echo -e "  ${GREEN}Resumed ${resumed_count} stopped container(s) (WARP cached — fast start)${NC}"
+    fi
+    if [ "$new_container_count" -gt 0 ]; then
+        echo -e "  ${YELLOW}Created ${new_container_count} new container(s) (WARP registration required)${NC}"
+    fi
 
     BRIDGE_PROXIES=$(IFS=,; echo "${BRIDGE_PROXIES_LIST[*]}")
     export BRIDGE_PROXIES
 
-    # Verify all proxies in parallel using background processes
+    # ── Phase 2: Verify all proxies in parallel ──
+    # verify_proxies [max_attempts] [sleep_interval] [label]
+    # Sets FAILED_INDICES array with indices of failed proxies from VERIFY_PORTS
+    FAILED_INDICES=()
+    VERIFY_PORTS=("${PROXY_PORTS[@]}")
+
     verify_proxies() {
-        local verify_dir
+        local verify_dir max_attempts sleep_interval label
         verify_dir=$(mktemp -d)
+        max_attempts=${1:-8}
+        sleep_interval=${2:-3}
+        label=${3:-""}
 
-        if [ "$any_new_created" = true ]; then
-            echo -e "${YELLOW}  Waiting 10 seconds for Cloudflare WARP registration...${NC}"
-            sleep 10
-        fi
+        echo -e "  ${BLUE}Verifying ${#VERIFY_PORTS[@]} proxy(ies) in parallel${label}...${NC}"
 
-        echo -e "  ${BLUE}Verifying all ${#PROXY_PORTS[@]} proxies in parallel...${NC}"
-
-        # Spawn one background process per proxy
-        for i in "${!PROXY_PORTS[@]}"; do
+        for i in "${!VERIFY_PORTS[@]}"; do
             (
-                port=${PROXY_PORTS[$i]}
-                container_name="opencode-warp-$((i+1))"
-                for attempt in $(seq 1 12); do
-                    if curl -s -o /dev/null -w '' -x socks5h://127.0.0.1:$port --max-time 5 https://cloudflare.com/cdn-cgi/trace 2>/dev/null; then
-                        echo "OK" > "${verify_dir}/${container_name}"
+                port=${VERIFY_PORTS[$i]}
+                for attempt in $(seq 1 "$max_attempts"); do
+                    if curl -s -o /dev/null -w '' -x "socks5h://127.0.0.1:$port" --max-time 5 https://cloudflare.com/cdn-cgi/trace 2>/dev/null; then
+                        echo "OK" > "${verify_dir}/port_${port}"
                         exit 0
                     fi
-                    sleep 5
+                    sleep "$sleep_interval"
                 done
-                echo "FAIL" > "${verify_dir}/${container_name}"
+                echo "FAIL" > "${verify_dir}/port_${port}"
             ) &
         done
-
-        # Wait for all verification processes to complete
         wait
 
         # Collect results
+        FAILED_INDICES=()
         local all_ok=true
-        for i in "${!PROXY_PORTS[@]}"; do
-            port=${PROXY_PORTS[$i]}
-            container_name="opencode-warp-$((i+1))"
-            result=$(cat "${verify_dir}/${container_name}" 2>/dev/null || echo "FAIL")
+        for i in "${!VERIFY_PORTS[@]}"; do
+            port=${VERIFY_PORTS[$i]}
+            # Find original index in PROXY_PORTS for display
+            local orig_idx=$i
+            for j in "${!PROXY_PORTS[@]}"; do
+                if [ "${PROXY_PORTS[$j]}" = "$port" ]; then
+                    orig_idx=$j
+                    break
+                fi
+            done
+            container_name="opencode-warp-$((orig_idx+1))"
+            result=$(cat "${verify_dir}/port_${port}" 2>/dev/null || echo "FAIL")
             if [ "$result" = "OK" ]; then
                 echo -e "  ${GREEN}✓${NC} ${container_name} (port ${port}) — Online"
             else
                 echo -e "  ${RED}✗${NC} ${container_name} (port ${port}) — Failed"
+                FAILED_INDICES+=("$orig_idx")
                 all_ok=false
             fi
         done
-
         rm -rf "$verify_dir"
 
-        if [ "$all_ok" = false ]; then
-            echo -e "${YELLOW}  ⚠ Some proxies failed verification. They may come online shortly.${NC}"
-        else
+        if [ "$all_ok" = true ]; then
             echo -e "${GREEN}  ✓ All proxies verified and online!${NC}"
         fi
     }
 
-    verify_proxies
+    # Smart wait based on container state
+    if [ "$new_container_count" -gt 0 ]; then
+        echo -e "${YELLOW}  Waiting 15 seconds for Cloudflare WARP registration (${new_container_count} new)...${NC}"
+        sleep 15
+    elif [ "$resumed_count" -gt 0 ]; then
+        echo -e "  Waiting 3 seconds for resumed containers to be ready..."
+        sleep 3
+    fi
+
+    # First verification pass (8 retries × 3s = 24s max per proxy, all parallel)
+    verify_proxies 8 3
+
+    # ── Phase 3: Auto-recover failed proxies ──
+    if [ ${#FAILED_INDICES[@]} -gt 0 ]; then
+        echo -e "\n  ${YELLOW}Recovering ${#FAILED_INDICES[@]} failed proxy(ies) — restarting containers...${NC}"
+
+        # Restart failed containers in parallel
+        for idx in "${FAILED_INDICES[@]}"; do
+            port=${PROXY_PORTS[$idx]}
+            container_name="opencode-warp-$((idx+1))"
+            echo -e "  Restarting ${container_name}..."
+            docker restart "$container_name" >/dev/null 2>&1 &
+        done
+        wait
+
+        echo -e "  Waiting 15 seconds for WARP reconnection..."
+        sleep 15
+
+        # Re-verify only the failed proxies
+        VERIFY_PORTS=()
+        for idx in "${FAILED_INDICES[@]}"; do
+            VERIFY_PORTS+=("${PROXY_PORTS[$idx]}")
+        done
+        verify_proxies 6 5 " (retry)"
+
+        if [ ${#FAILED_INDICES[@]} -gt 0 ]; then
+            echo -e "${YELLOW}  ⚠ ${#FAILED_INDICES[@]} proxy(ies) still offline. Bridge will route around them.${NC}"
+        fi
+
+        # Restore full ports list
+        VERIFY_PORTS=("${PROXY_PORTS[@]}")
+    fi
+
     echo -e "  Proxies in pool: ${YELLOW}$BRIDGE_PROXIES${NC}"
     echo -e "  Requests will be dynamically load-balanced and failovered."
 elif [ -n "$BRIDGE_PROXIES" ]; then
