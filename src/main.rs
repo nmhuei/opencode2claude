@@ -9,13 +9,16 @@ mod error;
 mod handlers;
 mod middleware;
 mod opencode;
+mod pidfile;
 mod proxy_pool;
+mod runtime;
 mod shell;
 mod sse;
 mod state;
+mod supervisor;
 
 use clap::Parser;
-use cli::{Command, ServeArgs};
+use cli::{Command, ServeArgs, StartArgs, StatusArgs, StopArgs};
 use config::BridgeConfig;
 use state::AppState;
 
@@ -33,8 +36,65 @@ async fn main() {
     match cli.command {
         Some(Command::Serve(args)) => run_server(args).await,
         None => run_server(ServeArgs::default()).await,
+        Some(Command::Start(args)) => cmd_start(args),
+        Some(Command::Status(args)) => cmd_status(args),
+        Some(Command::Stop(args)) => cmd_stop(args),
         Some(_) => {
-            println!("Subcommand not yet implemented (coming in Phase 2+)");
+            println!("Subcommand not yet implemented (coming in Phase 3+)");
+        }
+    }
+}
+
+fn resolve_runtime(args: &StartArgs) -> supervisor::Supervisor {
+    let port = args
+        .port
+        .or_else(|| {
+            std::env::var("BRIDGE_PORT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+        })
+        .unwrap_or(config::DEFAULT_BRIDGE_PORT);
+    let host = args
+        .host
+        .clone()
+        .or_else(|| std::env::var("BRIDGE_HOST").ok())
+        .unwrap_or_else(|| config::DEFAULT_HOST.to_string());
+    let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let paths = runtime::RuntimePaths::new(root);
+    supervisor::Supervisor::new(paths, port, host)
+}
+
+fn cmd_start(args: StartArgs) {
+    let sup = resolve_runtime(&args);
+    match sup.start() {
+        Ok(()) => {
+            let status = sup
+                .status()
+                .unwrap_or(supervisor::SupervisorStatus::Stopped);
+            println!("Bridge started. {}", status);
+        }
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_status(args: StatusArgs) {
+    let sup = resolve_runtime(&args);
+    match sup.status() {
+        Ok(status) => println!("Bridge: {}", status),
+        Err(e) => println!("Bridge: Error — {}", e),
+    }
+}
+
+fn cmd_stop(args: StopArgs) {
+    let sup = resolve_runtime(&args);
+    match sup.stop() {
+        Ok(()) => println!("Bridge stopped."),
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
         }
     }
 }

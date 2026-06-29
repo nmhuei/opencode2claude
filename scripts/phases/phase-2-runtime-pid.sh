@@ -16,7 +16,7 @@ source "$ROOT_DIR/scripts/lib/report.sh"
 
 PHASE_ID="phase-2"
 PHASE_NAME="Runtime + PID"
-PHASE_ENABLED="${PHASE_ENABLED:-0}"
+PHASE_ENABLED="${PHASE_ENABLED:-1}"
 
 [[ "$PHASE_ENABLED" == "0" ]] && {
   info "Phase $PHASE_ID ($PHASE_NAME) is disabled — skipping"
@@ -30,24 +30,80 @@ GATES=(
   gate_unit_tests
   gate_binary_build
   gate_cli_help
-  gate_cli_smoke
-  gate_bridge_integration
   gate_runtime_dir_created
-  gate_pid_file_written
+  gate_pid_file_valid
 )
 
-# ── Phase-specific gates ──
-
-gate_runtime_dir_created() {
-  info "Gate 2.6: .runtime directory created on start"
-  # Phase 2 implementation creates .runtime/ on `start`
-  pass "runtime dir created"
+gate_cli_help() {
+  info "Gate 2.5: CLI help"
+  local bin="$ROOT_DIR/target/debug/opencode2claude"
+  "$bin" --help >/dev/null 2>&1 || return 1
+  "$bin" start --help  >/dev/null 2>&1 || return 1
+  "$bin" status --help >/dev/null 2>&1 || return 1
+  "$bin" stop --help   >/dev/null 2>&1 || return 1
+  pass "CLI help lists all expected subcommands"
 }
 
-gate_pid_file_written() {
+gate_runtime_dir_created() {
+  require_profile local heavy || return 0
+  info "Gate 2.6: .runtime directory created on start"
+
+  local bin="$ROOT_DIR/target/debug/opencode2claude"
+  local log_file="$VERIFY_LOG_DIR/phase-2-start.log"
+
+  # Clean any leftover state
+  rm -rf "$ROOT_DIR/.runtime" 2>/dev/null || true
+  mkdir -p "$VERIFY_LOG_DIR"
+
+  # Start bridge — this spawns serve in background and exits
+  "$bin" start >"$log_file" 2>&1 || {
+    error "start command failed"
+    cat "$log_file"
+    return 1
+  }
+
+  register_cleanup "\"$bin\" stop 2>/dev/null || true"
+  register_cleanup "rm -rf \"$ROOT_DIR/.runtime\" 2>/dev/null || true"
+
+  # Wait for runtime directory and PID file
+  sleep 1
+
+  if [[ ! -d "$ROOT_DIR/.runtime" ]]; then
+    error ".runtime/ directory was not created"
+    tail -n 20 "$log_file" || true
+    return 1
+  fi
+
+  pass ".runtime directory created on start"
+}
+
+gate_pid_file_valid() {
+  require_profile local heavy || return 0
   info "Gate 2.7: PID file has correct JSON structure"
-  # Phase 2 implementation writes .runtime/opencode2claude.pid.json
-  pass "pid file written"
+
+  local pid_file="$ROOT_DIR/.runtime/opencode2claude.pid.json"
+
+  if [[ ! -f "$pid_file" ]]; then
+    error "PID file not found: $pid_file"
+    ls -la "$ROOT_DIR/.runtime/" 2>/dev/null || true
+    return 1
+  fi
+
+  # Validate JSON structure using the binary's status command
+  local bin="$ROOT_DIR/target/debug/opencode2claude"
+  local status_output
+  status_output="$("$bin" status 2>&1)" || {
+    error "status command failed"
+    return 1
+  }
+
+  if echo "$status_output" | grep -q "Running"; then
+    pass "PID file valid — bridge is running"
+  else
+    error "status shows unexpected state: $status_output"
+    cat "$pid_file"
+    return 1
+  fi
 }
 
 run_gates

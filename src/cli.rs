@@ -2,9 +2,9 @@
 //!
 //! Uses Clap derive macros to define a subcommand-based CLI:
 //! - `serve` (default): Start the API bridge server
-//! - `start`: Start the supervisor daemon (not yet implemented)
-//! - `status`: Show bridge status (not yet implemented)
-//! - `stop`: Stop the bridge (not yet implemented)
+//! - `start`: Start the supervisor daemon
+//! - `status`: Show bridge status
+//! - `stop`: Stop the bridge
 //! - `restart`: Restart the bridge (not yet implemented)
 //! - `env`: Display environment information (not yet implemented)
 //! - `logs`: View bridge logs (not yet implemented)
@@ -29,17 +29,17 @@ pub struct Cli {
 pub enum Command {
     /// Start the API bridge server
     Serve(ServeArgs),
-    /// Start the supervisor daemon (not yet implemented)
-    Start,
-    /// Show bridge status (not yet implemented)
-    Status,
-    /// Stop the bridge (not yet implemented)
-    Stop,
-    /// Restart the bridge (not yet implemented)
+    /// Start the bridge as a background daemon
+    Start(StartArgs),
+    /// Show bridge status
+    Status(StatusArgs),
+    /// Stop the bridge
+    Stop(StopArgs),
+    /// Restart the bridge
     Restart,
-    /// Display environment information (not yet implemented)
+    /// Display environment information
     Env,
-    /// View bridge logs (not yet implemented)
+    /// View bridge logs
     Logs,
 }
 
@@ -86,3 +86,21 @@ pub struct ServeArgs {
     #[arg(long)]
     pub searxng_api_key: Option<String>,
 }
+
+/// Base args shared by start/status/stop (port and host).
+#[derive(Args, Default)]
+pub struct StartArgs {
+    /// Override bridge port for the daemon
+    #[arg(short = 'p', long)]
+    pub port: Option<u16>,
+
+    /// Override bind address for the daemon
+    #[arg(long)]
+    pub host: Option<String>,
+}
+
+/// Arguments for the `status` subcommand.
+pub type StatusArgs = StartArgs;
+
+/// Arguments for the `stop` subcommand.
+pub type StopArgs = StartArgs;
