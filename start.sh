@@ -124,6 +124,18 @@ if command -v docker &>/dev/null && docker info &>/dev/null; then
     echo -e "${GREEN}✓ Docker is running. Automating SOCKS5 proxy pool setup for multi-agent support...${NC}"
     PRIMARY_POOL_SIZE=${PRIMARY_POOL_SIZE:-3}
     STANDBY_POOL_SIZE=${STANDBY_POOL_SIZE:-2}
+    # Guard: total ports must stay within 40001-40005 range.
+    # Port 40010 is deprecated and must never be generated.
+    total_pool=$((PRIMARY_POOL_SIZE + STANDBY_POOL_SIZE))
+    if [ "$total_pool" -gt 5 ]; then
+      echo -e "${RED}Error: total pool size ($total_pool) exceeds allowed maximum of 5 (40001-40005). Port 40010 is deprecated.${NC}"
+      echo -e "Set PRIMARY_POOL_SIZE=3 and STANDBY_POOL_SIZE=2 for the standard 2-tier configuration."
+      if [ "$is_sourced" = true ]; then return 1; else exit 1; fi
+    fi
+    if [ "$PRIMARY_POOL_SIZE" -lt 1 ] || [ "$STANDBY_POOL_SIZE" -lt 0 ]; then
+      echo -e "${RED}Error: pool sizes must be positive (primary >= 1, standby >= 0).${NC}"
+      if [ "$is_sourced" = true ]; then return 1; else exit 1; fi
+    fi
     PROXY_PORTS=()
     PRIMARY_PORTS=()
     STANDBY_PORTS=()
@@ -236,8 +248,8 @@ if command -v docker &>/dev/null && docker info &>/dev/null; then
     # Export 2-tier proxy pool:
     #   BRIDGE_PRIMARY_PROXIES — managed proxies 40001-40003
     #   BRIDGE_WARM_STANDBY_PROXIES — protected proxies 40004-40005
-    BRIDGE_PRIMARY_PROXIES=$(IFS=,; echo "${BRIDGE_PROXIES_LIST[*]:0:3}")
-    BRIDGE_WARM_STANDBY_PROXIES=$(IFS=,; echo "${BRIDGE_PROXIES_LIST[*]:3:2}")
+    BRIDGE_PRIMARY_PROXIES=$(IFS=,; echo "${BRIDGE_PROXIES_LIST[*]:0:PRIMARY_POOL_SIZE}")
+    BRIDGE_WARM_STANDBY_PROXIES=$(IFS=,; echo "${BRIDGE_PROXIES_LIST[*]:PRIMARY_POOL_SIZE:STANDBY_POOL_SIZE}")
     export BRIDGE_PRIMARY_PROXIES
     export BRIDGE_WARM_STANDBY_PROXIES
 

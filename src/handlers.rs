@@ -264,6 +264,8 @@ pub async fn handle_models(State(state): State<AppState>) -> impl IntoResponse {
 pub async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
     let daemon_ok = opencode::check_daemon(&state.http_client, state.config.opencode_port).await;
 
+    let proxy_pool_stats = state.proxy_pool.read().await.snapshot();
+
     Json(json!({
         "status": "healthy",
         "version": env!("CARGO_PKG_VERSION"),
@@ -276,7 +278,8 @@ pub async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
             "shell_policy": state.config.shell_policy.description(),
             "auth_enabled": state.config.auth_enabled(),
             "bridge_port": state.config.bridge_port
-        }
+        },
+        "proxy_pool": proxy_pool_stats
     }))
 }
 

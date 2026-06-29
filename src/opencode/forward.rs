@@ -240,6 +240,11 @@ async fn execute_with_warp_retry(
                     }
                 } else {
                     // Success or other status — return as-is
+                    // Record success on proxy since transport worked (even for 4xx)
+                    if let Some(idx) = idx {
+                        let mut pool = state.proxy_pool.write().await;
+                        pool.record_success(idx);
+                    }
                     return Ok(response);
                 }
             }
@@ -252,7 +257,12 @@ async fn execute_with_warp_retry(
                             idx, url, e, retry_count, max_retries
                         );
                         let mut pool = state.proxy_pool.write().await;
-                        pool.mark_rate_limited(idx, std::time::Duration::from_secs(60));
+                        // Network transport error = proxy failure
+                        pool.record_failure(idx);
+                        info!(
+                            "Recorded transport failure for proxy #{} ({}) after {}/{} retries.",
+                            idx, url, retry_count, max_retries
+                        );
                         last_failed_idx = Some(idx);
                     } else {
                         warn!(
@@ -364,11 +374,12 @@ pub async fn forward_to_llm_sync(
                 }
             }
             if let Some(content) = &choice.message.content {
-                if !content.is_empty() {
+                let cleaned = strip_system_tags(content);
+                if !cleaned.is_empty() {
                     assistant_content.push(
                         serde_json::from_value(serde_json::json!({
                             "type": "text",
-                            "text": content
+                            "text": cleaned
                         }))
                         .unwrap(),
                     );
@@ -421,10 +432,11 @@ pub async fn forward_to_llm_sync(
 
         // 2. Text block
         if let Some(text) = &choice.message.content {
-            if !text.is_empty() {
+            let cleaned = strip_system_tags(text);
+            if !cleaned.is_empty() {
                 content_blocks.push(serde_json::json!({
                     "type": "text",
-                    "text": text
+                    "text": cleaned
                 }));
             }
         }
@@ -651,8 +663,9 @@ pub async fn forward_to_llm_stream(
 
                                 // 2. Process content (text delta)
                                 if let Some(content) = &choice.delta.content {
-                                    if !content.is_empty() {
-                                        accumulated_text.push_str(content);
+                                    let cleaned = strip_system_tags(content);
+                                    if !cleaned.is_empty() {
+                                        accumulated_text.push_str(&cleaned);
                                         if !intercepting_search {
                                             // Close thinking block if open
                                             if let Some(idx) = thinking_block_index {
@@ -693,7 +706,7 @@ pub async fn forward_to_llm_stream(
                                                 .json_data(serde_json::json!({
                                                     "type": "content_block_delta",
                                                     "index": idx,
-                                                    "delta": {"type": "text_delta", "text": content}
+                                                    "delta": {"type": "text_delta", "text": cleaned}
                                                 }))
                                                 .unwrap_or_else(|_| Event::default().data("{}"));
                                             let _ = tx.send(delta_ev).await;
@@ -941,4 +954,48 @@ pub async fn forward_to_llm_stream(
     });
 
     Ok(ReceiverStream::new(rx).map(Ok))
+}
+
+/// Helper function to strip system leakage tags (like </think>, </parameter>, etc.) from LLM outputs.
+fn strip_system_tags(text: &str) -> String {
+    let mut cleaned = text.to_string();
+    let tags = [
+        "</think>",
+        "<think>",
+        "</parameter>",
+        "<parameter>",
+        "</｜DSML｜parameter>",
+        "<｜DSML｜parameter>",
+        "&lt;/think&gt;",
+        "&lt;think&gt;",
+    ];
+    for tag in &tags {
+        if cleaned.contains(tag) {
+            cleaned = cleaned.replace(tag, "");
+        }
+    }
+    // Trim leading newlines and whitespace if we stripped tags from the beginning
+    if cleaned.trim_start() != text.trim_start() {
+        cleaned = cleaned.trim_start().to_string();
+    }
+    cleaned
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_strip_system_tags() {
+        assert_eq!(strip_system_tags("</think>Hello"), "Hello");
+        assert_eq!(strip_system_tags("</think>\n\nHello"), "Hello");
+        assert_eq!(strip_system_tags("Hello</think>"), "Hello");
+        assert_eq!(strip_system_tags("Hello</parameter>World"), "HelloWorld");
+        assert_eq!(strip_system_tags("</｜DSML｜parameter>\nHello"), "Hello");
+        assert_eq!(
+            strip_system_tags("<think>Some thinking</think>Response"),
+            "Some thinkingResponse"
+        );
+        assert_eq!(strip_system_tags("Normal text"), "Normal text");
+    }
 }
