@@ -78,7 +78,7 @@ gate_bridge_integration() {
   require_profile local heavy || return 0
   info "Gate 1.7: Bridge integration tests"
   cd "$ROOT_DIR"
-  cargo test --test integration -- --ignored || {
+  cargo test --locked --test integration -- --ignored || {
     error "Integration tests failed"
     return 1
   }
