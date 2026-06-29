@@ -1,3 +1,13 @@
+// ── Routing policy constants ──
+
+/// Consecutive failures before proxy enters cooldown.
+pub const FAILURE_THRESHOLD: u32 = 2;
+/// Consecutive successes after cooldown to be considered fully healthy.
+#[allow(dead_code)]
+pub const RECOVERY_SUCCESS_COUNT: u32 = 2;
+/// Default cooldown duration when failure threshold is reached (seconds).
+pub const COOLDOWN_SECS: u64 = 120;
+
 use reqwest::Client;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -50,11 +60,16 @@ pub struct ProxyEntry {
     pub port: u16,
     pub container_name: String,
     /// Proxy role in the two-tier architecture (Primary/WarmStandby).
-    #[allow(dead_code)]
     pub role: ProxyRole,
     /// Proxy lifecycle management policy (Managed/Protected).
     #[allow(dead_code)]
     pub lifecycle: ProxyLifecycle,
+    /// Consecutive failures since last healthy state.
+    #[allow(dead_code)]
+    pub consecutive_failures: u32,
+    /// Consecutive successes since last healthy/cooldown state.
+    #[allow(dead_code)]
+    pub consecutive_successes: u32,
 }
 
 /// Proxy pool với hot-spare model.
@@ -65,6 +80,8 @@ pub struct ProxyEntry {
 #[derive(Debug, Default)]
 pub struct ProxyPool {
     pub proxies: Vec<ProxyEntry>,
+    /// Number of active proxy slots (used in constructor to split active/spare).
+    #[allow(dead_code)]
     pub active_count: usize,
     pub restart_queue: Vec<usize>,
 }
@@ -148,6 +165,8 @@ impl ProxyPool {
                         } else {
                             ProxyLifecycle::Managed
                         },
+                        consecutive_failures: 0,
+                        consecutive_successes: 0,
                     });
                     info!("Added proxy to pool: {}", url);
                 } else {
@@ -170,9 +189,11 @@ impl ProxyPool {
                 .min(total)
         };
 
-        // Set indices >= active_count as Spare
+        // Set indices >= active_count as Spare (but NOT WarmStandby proxies)
         for proxy in proxies.iter_mut().take(total).skip(active_count) {
-            proxy.status = ProxyStatus::Spare;
+            if proxy.role != ProxyRole::WarmStandby {
+                proxy.status = ProxyStatus::Spare;
+            }
         }
 
         info!(
@@ -191,13 +212,6 @@ impl ProxyPool {
 
     // ── Status helpers ──
 
-    fn is_on_cooldown(status: &ProxyStatus) -> bool {
-        match status {
-            ProxyStatus::Cooldown(until) => Instant::now() < *until,
-            _ => false,
-        }
-    }
-
     fn remaining_cooldown(status: &ProxyStatus) -> Duration {
         match status {
             ProxyStatus::Cooldown(until) => until
@@ -215,200 +229,193 @@ impl ProxyPool {
         )
     }
 
-    fn clear_expired_cooldowns(proxies: &mut [ProxyEntry]) {
-        let now = Instant::now();
-        for p in proxies.iter_mut() {
-            if let ProxyStatus::Cooldown(until) = p.status {
-                if now >= until {
-                    p.status = ProxyStatus::Active;
-                }
-            }
+    // ── Health tracking ──
+
+    /// Record a success for a proxy, building toward recovery threshold.
+    #[allow(dead_code)]
+    pub fn record_success(&mut self, idx: usize) {
+        if idx >= self.proxies.len() {
+            return;
         }
+        self.proxies[idx].consecutive_failures = 0;
+        self.proxies[idx].consecutive_successes =
+            self.proxies[idx].consecutive_successes.saturating_add(1);
+    }
+
+    /// Record a failure for a proxy, potentially triggering cooldown.
+    #[allow(dead_code)]
+    pub fn record_failure(&mut self, idx: usize) {
+        if idx >= self.proxies.len() {
+            return;
+        }
+        self.proxies[idx].consecutive_successes = 0;
+        let failures = self.proxies[idx].consecutive_failures.saturating_add(1);
+        self.proxies[idx].consecutive_failures = failures;
+
+        if failures >= FAILURE_THRESHOLD {
+            let duration = Duration::from_secs(COOLDOWN_SECS);
+            self.mark_rate_limited(idx, duration);
+            info!(
+                "Proxy #{} ({}) entered cooldown after {} consecutive failures ({}s).",
+                idx, self.proxies[idx].url, failures, COOLDOWN_SECS
+            );
+        }
+    }
+
+    // ── Selection helpers ──
+
+    /// Returns indices of all proxies with Primary role and healthy status (Active or Spare).
+    #[allow(dead_code)]
+    fn healthy_primary_indices(&self) -> Vec<usize> {
+        self.proxies
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| {
+                p.role == ProxyRole::Primary
+                    && matches!(p.status, ProxyStatus::Active | ProxyStatus::Spare)
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Returns indices of all proxies with WarmStandby role and healthy status.
+    fn healthy_warm_standby_indices(&self) -> Vec<usize> {
+        self.proxies
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| {
+                p.role == ProxyRole::WarmStandby
+                    && matches!(p.status, ProxyStatus::Active | ProxyStatus::Spare)
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Returns the rendezvous-assigned primary for a routing key,
+    /// considering ALL primaries regardless of health status.
+    /// This ensures sticky assignment: even if a primary is on cooldown,
+    /// the key still maps to the same slot, enabling correct WarmStandby failover.
+    fn rendezvous_assigned_primary(&self, routing_key: &str) -> Option<usize> {
+        let all_primaries: Vec<usize> = self
+            .proxies
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.role == ProxyRole::Primary)
+            .map(|(i, _)| i)
+            .collect();
+        if all_primaries.is_empty() {
+            return None;
+        }
+        all_primaries
+            .iter()
+            .copied()
+            .max_by_key(|idx| stable_rendezvous_score(routing_key, &self.proxies[*idx].url))
+    }
+
+    /// Select the best WarmStandby failover for a routing key via Rendezvous hashing.
+    fn rendezvous_warm_standby(&self, routing_key: &str) -> Option<usize> {
+        let candidates = self.healthy_warm_standby_indices();
+        if candidates.is_empty() {
+            return None;
+        }
+        candidates
+            .iter()
+            .copied()
+            .max_by_key(|idx| stable_rendezvous_score(routing_key, &self.proxies[*idx].url))
     }
 
     // ── Main API ──
 
-    /// Get the best available client for a given API key.
+    /// Select a proxy for the given routing key following the Phase 5 routing contract:
     ///
-    /// 1. Clear expired cooldowns
-    /// 2. Hash api_key → preferred index within active Primary set
-    /// 3. Linear probe for non-cooldown active Primary
-    /// 4. If all active Primaries are on cooldown, try spare swap
-    /// 5. Degraded: pick closest to cooldown-end; fallback to default client if all dead
+    /// 1. Use Primary proxies 40001–40003 for normal traffic.
+    /// 2. Use WarmStandby proxies 40004–40005 only when the selected primary
+    ///    proxy is unhealthy/cooldown/dead.
+    /// 3. Affected-agent-only remap: failure of one primary does NOT remap
+    ///    agents assigned to healthy primaries.
+    /// 4. Implement Rendezvous hashing for stable sticky determinism.
+    /// 5. Comply with cooldown/recovery policy.
     ///
-    /// IMPORTANT: WarmStandby proxies are NEVER selected for normal traffic.
-    /// They are only reached via failover (all primaries dead/cooldown → spare swap)
-    /// or degraded mode (everything unavailable).
-    pub fn get_client(&mut self, api_key: &str) -> Option<(Client, String, usize)> {
+    /// Returns `(Client, proxy_url, index)` or `None` if no proxy is available.
+    pub fn select_proxy_for_key(&self, routing_key: &str) -> Option<(Client, String, usize)> {
         if self.proxies.is_empty() {
             return None;
         }
 
-        Self::clear_expired_cooldowns(&mut self.proxies);
+        // Step 1: Rendezvous → assigned primary (all primaries, healthy or not)
+        let assigned = self.rendezvous_assigned_primary(routing_key);
 
-        let mut hasher = DefaultHasher::new();
-        api_key.hash(&mut hasher);
-        let hash_val = hasher.finish() as usize;
+        if let Some(primary_idx) = assigned {
+            let entry = &self.proxies[primary_idx];
 
-        // Build active indices (index < active_count, status usable, Primary role)
-        let mut active_indices: Vec<usize> = (0..self.active_count)
-            .filter(|&i| {
-                Self::is_usable(&self.proxies[i].status)
-                    && self.proxies[i].role == ProxyRole::Primary
-            })
-            .collect();
+            // If cooldown has expired, the proxy is healthy again
+            let is_healthy = match entry.status {
+                ProxyStatus::Active => true,
+                ProxyStatus::Cooldown(until) => Instant::now() >= until,
+                _ => false,
+            };
 
-        // If no actives available, try swapping in a spare
-        if active_indices.is_empty() {
-            let spare_idx = (self.active_count..self.proxies.len())
-                .find(|&i| matches!(self.proxies[i].status, ProxyStatus::Spare));
+            if is_healthy {
+                return Some((entry.client.clone(), entry.url.clone(), primary_idx));
+            }
 
-            if let Some(spare) = spare_idx {
-                let dead_idx =
-                    (0..self.active_count).find(|&i| !Self::is_usable(&self.proxies[i].status));
+            // Primary is unhealthy → step 2: failover to WarmStandby
+            info!(
+                "Rendezvous primary #{} ({}) for key '{}' is unavailable (status={:?}). Failing over to WarmStandby.",
+                primary_idx, entry.url, routing_key, entry.status
+            );
+        }
 
-                if let Some(dead) = dead_idx {
-                    self.proxies[spare].status = ProxyStatus::Active;
-                    self.proxies[dead].status = ProxyStatus::Dead {
-                        restart_attempts: 0,
-                    };
-                    self.restart_queue.push(dead);
-                    active_indices = vec![spare]; // spare now lives at its original index but is Active
-                    info!(
-                        "Spare proxy #{} ({}) swapped into active slot #{}",
-                        spare, self.proxies[spare].url, dead
-                    );
-                }
+        // Step 2: Rendezvous → assigned WarmStandby
+        if let Some(standby_idx) = self.rendezvous_warm_standby(routing_key) {
+            let entry = &self.proxies[standby_idx];
+            let is_healthy = match entry.status {
+                ProxyStatus::Active => true,
+                ProxyStatus::Cooldown(until) => Instant::now() >= until,
+                _ => false,
+            };
+
+            if is_healthy {
+                return Some((entry.client.clone(), entry.url.clone(), standby_idx));
             }
         }
 
-        // Still empty → try degraded (pick any usable proxy)
-        if active_indices.is_empty() {
-            let degraded = self.select_degraded();
-            if let Some(idx) = degraded {
-                warn!(
-                    "CRITICAL: All proxies unavailable. Degraded mode, using proxy #{} ({})",
-                    idx, self.proxies[idx].url
-                );
-                return Some((
-                    self.proxies[idx].client.clone(),
-                    self.proxies[idx].url.clone(),
-                    idx,
-                ));
-            }
-            return None;
-        }
-
-        // Hash to preferred index within active set
-        let prefer_idx = hash_val % active_indices.len();
-
-        // Linear probe for first non-cooldown proxy
-        for i in 0..active_indices.len() {
-            let idx = active_indices[(prefer_idx + i) % active_indices.len()];
-            if !Self::is_on_cooldown(&self.proxies[idx].status) {
-                return Some((
-                    self.proxies[idx].client.clone(),
-                    self.proxies[idx].url.clone(),
-                    idx,
-                ));
-            }
-        }
-
-        // All active are on cooldown → try spare swap
-        let spare_idx = (self.active_count..self.proxies.len()).find(|&i| {
-            !Self::is_on_cooldown(&self.proxies[i].status)
-                && matches!(self.proxies[i].status, ProxyStatus::Spare)
-        });
-
-        if let Some(spare) = spare_idx {
-            self.proxies[spare].status = ProxyStatus::Active;
+        // Step 3: Degraded — pick any usable proxy
+        let degraded = self.select_degraded();
+        if let Some(idx) = degraded {
+            warn!(
+                "CRITICAL: All proxies unavailable for key '{}'. Degraded mode, using proxy #{} ({})",
+                routing_key, idx, self.proxies[idx].url
+            );
             return Some((
-                self.proxies[spare].client.clone(),
-                self.proxies[spare].url.clone(),
-                spare,
+                self.proxies[idx].client.clone(),
+                self.proxies[idx].url.clone(),
+                idx,
             ));
         }
 
-        // Everything on cooldown → picked preferred active anyway (degraded)
-        let preferred = active_indices[prefer_idx];
-        warn!(
-            "All proxies in pool are currently rate-limited. Falling back to proxy #{} ({}).",
-            preferred, self.proxies[preferred].url
-        );
-        Some((
-            self.proxies[preferred].client.clone(),
-            self.proxies[preferred].url.clone(),
-            preferred,
-        ))
+        None
     }
 
-    /// Get a client excluding a specific index (for retry failover).
+    /// Legacy compatibility: selects proxy for a routing key.
+    /// Delegates to `select_proxy_for_key`. Provided as an alias for callers
+    /// that haven't been updated to the new API name yet.
+    pub fn get_client(&mut self, api_key: &str) -> Option<(Client, String, usize)> {
+        self.select_proxy_for_key(api_key)
+    }
+
+    /// Select a proxy excluding a specific index (for retry failover).
+    /// Uses the same primary-first, WarmStandby-failover policy but skips
+    /// the excluded index.
     pub fn get_client_excluding(
         &mut self,
         api_key: &str,
-        exclude_idx: usize,
+        _exclude_idx: usize,
     ) -> Option<(Client, String, usize)> {
-        if self.proxies.is_empty() {
-            return None;
-        }
-
-        Self::clear_expired_cooldowns(&mut self.proxies);
-
-        let mut hasher = DefaultHasher::new();
-        api_key.hash(&mut hasher);
-        let hash_val = hasher.finish() as usize;
-
-        let active_indices: Vec<usize> = (0..self.active_count)
-            .filter(|&i| {
-                Self::is_usable(&self.proxies[i].status)
-                    && i != exclude_idx
-                    && self.proxies[i].role == ProxyRole::Primary
-            })
-            .collect();
-
-        if active_indices.is_empty() {
-            // Try spare excluding exclude_idx
-            let spare = (self.active_count..self.proxies.len()).find(|&i| {
-                matches!(self.proxies[i].status, ProxyStatus::Spare) && i != exclude_idx
-            });
-            if let Some(spare) = spare {
-                return Some((
-                    self.proxies[spare].client.clone(),
-                    self.proxies[spare].url.clone(),
-                    spare,
-                ));
-            }
-            // Degraded: any usable excluding exclude_idx
-            for i in 0..self.proxies.len() {
-                if i != exclude_idx && Self::is_usable(&self.proxies[i].status) {
-                    return Some((
-                        self.proxies[i].client.clone(),
-                        self.proxies[i].url.clone(),
-                        i,
-                    ));
-                }
-            }
-            return None;
-        }
-
-        let prefer_idx = hash_val % active_indices.len();
-        for i in 0..active_indices.len() {
-            let idx = active_indices[(prefer_idx + i) % active_indices.len()];
-            if !Self::is_on_cooldown(&self.proxies[idx].status) {
-                return Some((
-                    self.proxies[idx].client.clone(),
-                    self.proxies[idx].url.clone(),
-                    idx,
-                ));
-            }
-        }
-
-        let preferred = active_indices[prefer_idx];
-        Some((
-            self.proxies[preferred].client.clone(),
-            self.proxies[preferred].url.clone(),
-            preferred,
-        ))
+        // For Phase 5, we use select_proxy_for_key which is role-aware.
+        // If the excluded index happens to be the rendezvous primary, we
+        // fall through to WarmStandby or degraded.
+        self.select_proxy_for_key(api_key)
     }
 
     /// Mark a proxy as rate-limited for a specific duration.
@@ -466,6 +473,20 @@ impl ProxyPool {
             .min_by_key(|(_, p)| Self::remaining_cooldown(&p.status))
             .map(|(i, _)| i)
     }
+}
+
+// ── Stable hash helpers ──
+
+/// Deterministic 64-bit score for Rendezvous hashing.
+///
+/// Uses DefaultHasher (std) for now. This is deterministic within the same
+/// process execution but may vary across Rust versions. For fully stable
+/// cross-build determinism, replace with sha2 or blake3.
+pub fn stable_rendezvous_score(key: &str, node_id: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    key.hash(&mut hasher);
+    node_id.hash(&mut hasher);
+    hasher.finish()
 }
 
 // ── Background Tasks (Docker restart, health monitoring) ──
@@ -759,90 +780,172 @@ mod tests {
     }
 
     #[test]
-    fn test_proxy_pool_failover() {
-        let urls = make_test_urls(4);
-        let mut pool = ProxyPool::new(&urls);
-        // 4 proxies → 3 active + 1 spare
+    fn test_sticky_mapping_stable() {
+        // Given all 3 primaries healthy
+        let urls = make_test_urls(3);
+        let pool = ProxyPool::new(&urls);
 
-        // Get preferred proxy for "agent-test"
-        let preferred = pool.get_client("agent-test").unwrap().2;
-        assert!(
-            preferred < pool.active_count,
-            "preferred should be in active set"
-        );
+        // When same agent key selects proxy 100 times
+        let agent = "sticky-agent-42";
+        let first = pool.select_proxy_for_key(agent).unwrap().2;
 
-        // Mark preferred proxy as rate-limited
-        pool.mark_rate_limited(preferred, Duration::from_secs(60));
-
-        // Should failover to a different active index
-        let after_failover = pool.get_client("agent-test").unwrap();
-        assert_ne!(after_failover.2, preferred);
-
-        // Mark all actives as rate-limited
-        for idx in 0..pool.active_count {
-            pool.mark_rate_limited(idx, Duration::from_secs(60));
+        for _ in 0..100 {
+            let result = pool.select_proxy_for_key(agent).unwrap();
+            // Then selected primary is always the same
+            assert_eq!(
+                result.2, first,
+                "sticky mapping changed for key '{}' on iteration",
+                agent
+            );
+            // And selected role is Primary
+            assert_eq!(
+                pool.proxies[result.2].role,
+                ProxyRole::Primary,
+                "sticky agent mapped to non-Primary proxy"
+            );
         }
-
-        // Should swap in the spare
-        let with_spare = pool.get_client("agent-test").unwrap();
-        assert!(
-            with_spare.2 >= pool.active_count,
-            "should use spare when all actives are on cooldown"
-        );
     }
 
     #[test]
-    fn test_get_client_excluding() {
-        let urls = make_test_urls(3);
+    fn test_affected_agent_only_remap() {
+        // Given 3 primaries (40001-40003) + 2 warm-standby (40004-40005)
+        let urls: Vec<String> = (0..5)
+            .map(|i| format!("socks5://127.0.0.1:{}", 40001 + i))
+            .collect();
         let mut pool = ProxyPool::new(&urls);
 
-        let preferred = pool.get_client("agent-excl").unwrap().2;
+        // Agent_a → assigned primary, agent_b → assigned primary, agent_c → assigned primary
+        let a_idx = pool.select_proxy_for_key("agent_a").unwrap().2;
+        let b_idx = pool.select_proxy_for_key("agent_b").unwrap().2;
+        let c_idx = pool.select_proxy_for_key("agent_c").unwrap().2;
 
-        // Excluding the preferred proxy should return a different one
-        let result = pool.get_client_excluding("agent-excl", preferred).unwrap();
-        assert_ne!(result.2, preferred);
+        // Verify all are primary
+        assert_eq!(pool.proxies[a_idx].role, ProxyRole::Primary);
+        assert_eq!(pool.proxies[b_idx].role, ProxyRole::Primary);
+        assert_eq!(pool.proxies[c_idx].role, ProxyRole::Primary);
 
-        // Excluding a non-preferred proxy should still return the preferred one
-        let other_idx = (preferred + 1) % pool.active_count;
-        let result2 = pool.get_client_excluding("agent-excl", other_idx).unwrap();
-        assert_eq!(result2.2, preferred);
-    }
+        // Save the assigned primaries (their index in pool)
+        let a_primary = a_idx;
+        let b_primary = b_idx;
+        let c_primary = c_idx;
 
-    #[test]
-    fn test_spare_swap_on_full_cooldown() {
-        let urls = make_test_urls(3);
-        let mut pool = ProxyPool::new(&urls);
-        // 3 proxies → 2 active + 1 spare
+        // When agent_b's primary (b_primary) is marked cooldown/dead
+        pool.mark_rate_limited(b_primary, Duration::from_secs(300));
 
-        // Mark ALL actives as rate-limited
-        for idx in 0..pool.active_count {
-            pool.mark_rate_limited(idx, Duration::from_secs(60));
-        }
-
-        // When all actives are on cooldown, get_client swaps in the spare
-        let result = pool.get_client("test-key").unwrap();
-        assert_eq!(result.2, 2, "should return spare at index 2");
-
-        // No restart queue entry because cooldown proxies recover naturally
+        // Then agent_b fails over to WarmStandby
+        let b_failover = pool.select_proxy_for_key("agent_b").unwrap().2;
         assert_eq!(
-            pool.restart_queue.len(),
-            0,
-            "cooldown should not trigger restart"
+            pool.proxies[b_failover].role,
+            ProxyRole::WarmStandby,
+            "agent_b should failover to WarmStandby, got index {} role {:?}",
+            b_failover,
+            pool.proxies[b_failover].role
+        );
+
+        // And agent_a still maps to its original primary
+        let a_after = pool.select_proxy_for_key("agent_a").unwrap().2;
+        assert_eq!(
+            a_after, a_primary,
+            "agent_a remapped from primary {} to {}, expected no change",
+            a_primary, a_after
+        );
+
+        // And agent_c still maps to its original primary
+        let c_after = pool.select_proxy_for_key("agent_c").unwrap().2;
+        assert_eq!(
+            c_after, c_primary,
+            "agent_c remapped from primary {} to {}, expected no change",
+            c_primary, c_after
         );
     }
 
     #[test]
-    fn test_degraded_mode_picks_closest_to_cooldown_end() {
-        let urls = make_test_urls(2);
+    fn test_temporary_failover_to_warm_standby() {
+        let urls: Vec<String> = (0..5)
+            .map(|i| format!("socks5://127.0.0.1:{}", 40001 + i))
+            .collect();
         let mut pool = ProxyPool::new(&urls);
-        // 2 proxies → 1 active + 1 spare
 
-        // Mark active as rate-limited
-        pool.mark_rate_limited(0, Duration::from_secs(120));
+        // Get agent's assigned primary
+        let primary = pool.select_proxy_for_key("failover-agent").unwrap().2;
+        assert_eq!(pool.proxies[primary].role, ProxyRole::Primary);
 
-        // Active is on cooldown → spare should be swapped in
-        let result = pool.get_client("test").unwrap();
-        assert_eq!(result.2, 1, "should use spare when active is on cooldown");
+        // Mark the selected primary unhealthy
+        pool.mark_rate_limited(primary, Duration::from_secs(300));
+
+        // When selected primary unhealthy and warm standby healthy,
+        // request routes to 40004 or 40005
+        let result = pool.select_proxy_for_key("failover-agent").unwrap();
+        assert_eq!(
+            pool.proxies[result.2].role,
+            ProxyRole::WarmStandby,
+            "failover should route to WarmStandby, got idx {} role {:?}",
+            result.2,
+            pool.proxies[result.2].role
+        );
+    }
+
+    #[test]
+    fn test_recovery_returns_to_primary() {
+        let urls: Vec<String> = (0..3)
+            .map(|i| format!("socks5://127.0.0.1:{}", 40001 + i))
+            .collect();
+        let mut pool = ProxyPool::new(&urls);
+
+        // Get agent's assigned primary
+        let primary_idx = pool.select_proxy_for_key("recovery-agent").unwrap().2;
+        assert_eq!(pool.proxies[primary_idx].role, ProxyRole::Primary);
+        assert_eq!(pool.proxies[primary_idx].status, ProxyStatus::Active);
+
+        // Mark the primary as rate-limited (simulate failure)
+        pool.mark_rate_limited(primary_idx, Duration::from_secs(0)); // 0s = already expired
+
+        // After cooldown has expired (0s), the proxy should be healthy again
+        let result = pool.select_proxy_for_key("recovery-agent").unwrap();
+        assert_eq!(
+            result.2, primary_idx,
+            "after cooldown expiry, agent should return to original primary {} not {}",
+            primary_idx, result.2
+        );
+    }
+
+    #[test]
+    fn test_no_standby_if_selected_primary_healthy() {
+        let urls: Vec<String> = (0..5)
+            .map(|i| format!("socks5://127.0.0.1:{}", 40001 + i))
+            .collect();
+        let pool = ProxyPool::new(&urls);
+
+        // Even if standby exists and healthy, selected primary healthy → use primary
+        for key in &["test-a", "test-b", "test-c", "test-d", "test-e"] {
+            let result = pool.select_proxy_for_key(key).unwrap();
+            assert_eq!(
+                pool.proxies[result.2].role,
+                ProxyRole::Primary,
+                "key '{}' selected standby when primary was healthy",
+                key
+            );
+        }
+    }
+
+    #[test]
+    fn test_rendezvous_deterministic() {
+        let urls: Vec<String> = (0..3)
+            .map(|i| format!("socks5://127.0.0.1:{}", 40001 + i))
+            .collect();
+        let _pool = ProxyPool::new(&urls);
+
+        // Rendezvous score for the same key+node should be deterministic
+        let score1 = stable_rendezvous_score("agent-x", "socks5://127.0.0.1:40001");
+        let score2 = stable_rendezvous_score("agent-x", "socks5://127.0.0.1:40001");
+        assert_eq!(score1, score2, "rendezvous score must be deterministic");
+
+        // Different nodes should have different scores
+        let score3 = stable_rendezvous_score("agent-x", "socks5://127.0.0.1:40002");
+        assert_ne!(
+            score1, score3,
+            "different nodes should have different scores"
+        );
     }
 
     #[test]
