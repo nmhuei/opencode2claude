@@ -39,9 +39,16 @@ GATES=(
 gate_cli_help() {
   info "Gate 1.5: CLI help"
   local bin="$ROOT_DIR/target/debug/opencode2claude"
+  # Top-level help (entry-point showing all subcommands)
   "$bin" --help >/dev/null 2>&1 || return 1
-  "$bin" --version >/dev/null 2>&1 || return 1
-  pass "CLI --help and --version work"
+  # Each subcommand should have valid --help (will fail until Phase 1 Rust code)
+  "$bin" serve --help  >/dev/null 2>&1 || return 1
+  "$bin" start --help  >/dev/null 2>&1 || return 1
+  "$bin" status --help >/dev/null 2>&1 || return 1
+  "$bin" stop --help   >/dev/null 2>&1 || return 1
+  "$bin" restart --help >/dev/null 2>&1 || return 1
+  "$bin" env --help    >/dev/null 2>&1 || return 1
+  pass "CLI help lists all expected subcommands"
 }
 
 gate_cli_smoke() {
