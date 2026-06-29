@@ -135,9 +135,7 @@ async fn execute_with_warp_retry(
             Ok(response) => {
                 let status = response.status();
 
-                if status == reqwest::StatusCode::TOO_MANY_REQUESTS
-                    || status.is_server_error()
-                {
+                if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
                     // 429 and 5xx are rate-limit / server errors
                     if (retry_count as usize) < max_retries {
                         retry_count += 1;
