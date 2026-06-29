@@ -16,7 +16,7 @@ source "$ROOT_DIR/scripts/lib/report.sh"
 
 PHASE_ID="phase-4"
 PHASE_NAME="Proxy CLI manager"
-PHASE_ENABLED="${PHASE_ENABLED:-0}"
+PHASE_ENABLED="${PHASE_ENABLED:-1}"
 
 [[ "$PHASE_ENABLED" == "0" ]] && {
   info "Phase $PHASE_ID ($PHASE_NAME) is disabled — skipping"
@@ -34,19 +34,45 @@ GATES=(
   gate_bridge_integration
   gate_proxy_help
   gate_proxy_ps
+  gate_protected_ports_guarded
+  gate_no_40010_reference
 )
 
 gate_proxy_help() {
   info "Gate 4.6: opencode2claude proxy --help works"
-  "$ROOT_DIR/target/debug/opencode2claude" proxy --help >/dev/null || return 1
+  "$ROOT_DIR/target/debug/opencode2claude" proxy --help >/dev/null 2>&1 || return 1
   pass "proxy --help"
 }
 
 gate_proxy_ps() {
   require_profile local heavy || return 0
   info "Gate 4.7: opencode2claude proxy ps lists proxies"
-  "$ROOT_DIR/target/debug/opencode2claude" proxy ps >/dev/null 2>&1 || true
-  pass "proxy ps"
+  local output
+  output="$("$ROOT_DIR/target/debug/opencode2claude" proxy ps 2>&1)" || {
+    error "proxy ps failed"
+    return 1
+  }
+  echo "$output" | grep -q "Primary managed proxies" || return 1
+  echo "$output" | grep -q "Auxiliary protected proxies" || return 1
+  pass "proxy ps shows primary and auxiliary pools"
+}
+
+gate_protected_ports_guarded() {
+  info "Gate 4.8: protected port guard rejects port 40004"
+  # Check that is_protected_proxy_port is implemented in the binary
+  # For now, verify the source code has the guard
+  grep -q "is_protected_proxy_port" "$ROOT_DIR/src/proxy_pool.rs" || return 1
+  grep -q "ensure_not_protected" "$ROOT_DIR/src/proxy_pool.rs" || return 1
+  pass "protected port guards exist in source"
+}
+
+gate_no_40010_reference() {
+  info "Gate 4.9: no reference to deprecated port 40010 in code"
+  if grep -rn "40010" "$ROOT_DIR/src/" "$ROOT_DIR/scripts/" 2>/dev/null; then
+    error "Found reference to deprecated port 40010"
+    return 1
+  fi
+  pass "no 40010 references in code"
 }
 
 run_gates
