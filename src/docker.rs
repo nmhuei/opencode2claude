@@ -31,8 +31,8 @@ pub fn container_name(port: u16) -> String {
     }
 }
 
-/// Ensure the port is valid and not protected.
-fn validate_port(port: u16) -> DockerResult<()> {
+/// Ensure the port is valid for destructive operations (create/remove/restart).
+fn validate_destructive_port(port: u16) -> DockerResult<()> {
     if !(40001..=40005).contains(&port) {
         return Err(DockerError::InvalidPort(port));
     }
@@ -45,9 +45,18 @@ fn validate_port(port: u16) -> DockerResult<()> {
     Ok(())
 }
 
+/// Ensure the port is valid for read-only operations (logs/status/health-check).
+/// Allows all known proxy ports including warm-standby.
+fn validate_read_only_port(port: u16) -> DockerResult<()> {
+    if !(40001..=40005).contains(&port) {
+        return Err(DockerError::InvalidPort(port));
+    }
+    Ok(())
+}
+
 /// Create or recreate a Docker WARP container.
 pub async fn create_container(port: u16) -> DockerResult<()> {
-    validate_port(port)?;
+    validate_destructive_port(port)?;
     let name = container_name(port);
 
     // docker rm -f (ignore error if not exists)
@@ -89,7 +98,7 @@ pub async fn create_container(port: u16) -> DockerResult<()> {
 
 /// Remove a Docker WARP container (primary only).
 pub async fn remove_container(port: u16) -> DockerResult<()> {
-    validate_port(port)?;
+    validate_destructive_port(port)?;
     let name = container_name(port);
 
     let output = tokio::process::Command::new("docker")
@@ -138,7 +147,7 @@ pub async fn list_containers(ports: &[u16]) -> Vec<(u16, String, bool)> {
 
 /// Get logs from a Docker WARP container (primary only).
 pub async fn container_logs(port: u16, tail: usize) -> DockerResult<String> {
-    validate_port(port)?;
+    validate_read_only_port(port)?;
     let name = container_name(port);
 
     let output = tokio::process::Command::new("docker")

@@ -231,10 +231,14 @@ impl ProxyPool {
     /// Get the best available client for a given API key.
     ///
     /// 1. Clear expired cooldowns
-    /// 2. Hash api_key → preferred index within active set
-    /// 3. Linear probe for non-cooldown active
-    /// 4. If all active are on cooldown, try spare swap
+    /// 2. Hash api_key → preferred index within active Primary set
+    /// 3. Linear probe for non-cooldown active Primary
+    /// 4. If all active Primaries are on cooldown, try spare swap
     /// 5. Degraded: pick closest to cooldown-end; fallback to default client if all dead
+    ///
+    /// IMPORTANT: WarmStandby proxies are NEVER selected for normal traffic.
+    /// They are only reached via failover (all primaries dead/cooldown → spare swap)
+    /// or degraded mode (everything unavailable).
     pub fn get_client(&mut self, api_key: &str) -> Option<(Client, String, usize)> {
         if self.proxies.is_empty() {
             return None;
@@ -246,9 +250,12 @@ impl ProxyPool {
         api_key.hash(&mut hasher);
         let hash_val = hasher.finish() as usize;
 
-        // Build active indices (index < active_count, status usable)
+        // Build active indices (index < active_count, status usable, Primary role)
         let mut active_indices: Vec<usize> = (0..self.active_count)
-            .filter(|&i| Self::is_usable(&self.proxies[i].status))
+            .filter(|&i| {
+                Self::is_usable(&self.proxies[i].status)
+                    && self.proxies[i].role == ProxyRole::Primary
+            })
             .collect();
 
         // If no actives available, try swapping in a spare
@@ -352,7 +359,11 @@ impl ProxyPool {
         let hash_val = hasher.finish() as usize;
 
         let active_indices: Vec<usize> = (0..self.active_count)
-            .filter(|&i| Self::is_usable(&self.proxies[i].status) && i != exclude_idx)
+            .filter(|&i| {
+                Self::is_usable(&self.proxies[i].status)
+                    && i != exclude_idx
+                    && self.proxies[i].role == ProxyRole::Primary
+            })
             .collect();
 
         if active_indices.is_empty() {
@@ -832,6 +843,52 @@ mod tests {
         // Active is on cooldown → spare should be swapped in
         let result = pool.get_client("test").unwrap();
         assert_eq!(result.2, 1, "should use spare when active is on cooldown");
+    }
+
+    #[test]
+    fn test_warm_standby_excluded_from_normal_routing() {
+        // Build 5 proxies: 40001-40003 primary, 40004-40005 warm-standby
+        let urls: Vec<String> = (0..5)
+            .map(|i| format!("socks5://127.0.0.1:{}", 40001 + i))
+            .collect();
+        let mut pool = ProxyPool::new(&urls);
+
+        assert_eq!(pool.proxies.len(), 5);
+        // Verify roles assigned correctly
+        assert_eq!(pool.proxies[0].role, ProxyRole::Primary);
+        assert_eq!(pool.proxies[1].role, ProxyRole::Primary);
+        assert_eq!(pool.proxies[2].role, ProxyRole::Primary);
+        assert_eq!(pool.proxies[3].role, ProxyRole::WarmStandby);
+        assert_eq!(pool.proxies[4].role, ProxyRole::WarmStandby);
+
+        // Normal traffic should NEVER select a WarmStandby proxy when
+        // any Primary proxy is available. Run many keys to be sure.
+        for key in &["alpha", "beta", "gamma", "delta", "epsilon"] {
+            let (_, url, idx) = pool.get_client(key).unwrap();
+            assert!(
+                pool.proxies[idx].role == ProxyRole::Primary,
+                "get_client('{}') returned WarmStandby {} (idx {}), expected Primary",
+                key,
+                url,
+                idx
+            );
+        }
+
+        // Mark all three primaries as rate-limited
+        for i in 0..3 {
+            pool.mark_rate_limited(i, Duration::from_secs(300));
+        }
+
+        // Now all primaries are on cooldown → spare swap should trigger.
+        // The spare at index 3 or 4 is WarmStandby → it should be used as failover.
+        let (_, url, idx) = pool.get_client("failover-test").unwrap();
+        assert!(
+            pool.proxies[idx].role == ProxyRole::WarmStandby,
+            "expected WarmStandby in failover, got role={:?} at idx={} url={}",
+            pool.proxies[idx].role,
+            idx,
+            url
+        );
     }
 
     #[test]
