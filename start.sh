@@ -131,31 +131,65 @@ if command -v docker &>/dev/null && docker info &>/dev/null; then
     new_container_count=0
     resumed_count=0
     already_running_count=0
+    migrated_count=0
+
+    # Fast entrypoint: skip WARP registration if config is already cached in volume
+    FAST_ENTRYPOINT='if [ -f /etc/sing-box/config.json ]; then exec sing-box -c /etc/sing-box/config.json run; else exec /run/entrypoint.sh rws-cli-v6; fi'
 
     # ── Phase 1: Create/start all containers in parallel ──
+    #   Uses Docker named volumes to persist WARP config across restarts.
+    #   On first run: entrypoint registers with WARP (~20s), writes config to volume.
+    #   On subsequent starts: cached config found → sing-box starts instantly (~1s).
     container_pids=()
     for i in "${!PROXY_PORTS[@]}"; do
         port=${PROXY_PORTS[$i]}
         container_name="opencode-warp-$((i+1))"
+        volume_name="opencode-warp-config-$((i+1))"
         BRIDGE_PROXIES_LIST+=("socks5://127.0.0.1:$port")
 
         (
-            if docker ps --format '{{.Names}}' | grep -q "^${container_name}$"; then
-                # Already running — nothing to do
-                echo "RUNNING" > "/tmp/.opencode_proxy_state_${port}"
-            elif docker ps -a --format '{{.Names}}' | grep -q "^${container_name}$"; then
-                # Exists but stopped — resume (WARP registration preserved)
-                docker start "$container_name" >/dev/null 2>&1
-                echo "RESUMED" > "/tmp/.opencode_proxy_state_${port}"
-            else
-                # Brand new — needs WARP registration
+            _create_container() {
                 docker run -d \
                     --name "$container_name" \
                     --restart always \
                     --cap-add=NET_ADMIN \
                     --sysctl net.ipv4.conf.all.src_valid_mark=1 \
+                    -v "${volume_name}:/etc/sing-box" \
                     -p "$port":9091 \
-                    ghcr.io/mon-ius/docker-warp-socks:latest >/dev/null 2>&1
+                    --entrypoint /bin/sh \
+                    ghcr.io/mon-ius/docker-warp-socks:latest \
+                    -c "$FAST_ENTRYPOINT" >/dev/null 2>&1
+            }
+
+            _has_volume() {
+                docker inspect --format '{{range .Mounts}}{{.Name}} {{end}}' "$container_name" 2>/dev/null | grep -q "$volume_name"
+            }
+
+            if docker ps --format '{{.Names}}' | grep -q "^${container_name}$"; then
+                if _has_volume; then
+                    # Already running with volume — nothing to do
+                    echo "RUNNING" > "/tmp/.opencode_proxy_state_${port}"
+                else
+                    # Old container without volume — migrate
+                    docker stop "$container_name" >/dev/null 2>&1
+                    docker rm "$container_name" >/dev/null 2>&1
+                    _create_container
+                    echo "MIGRATED" > "/tmp/.opencode_proxy_state_${port}"
+                fi
+            elif docker ps -a --format '{{.Names}}' | grep -q "^${container_name}$"; then
+                if _has_volume; then
+                    # Stopped with cached config — fast resume!
+                    docker start "$container_name" >/dev/null 2>&1
+                    echo "RESUMED" > "/tmp/.opencode_proxy_state_${port}"
+                else
+                    # Old container without volume — migrate
+                    docker rm "$container_name" >/dev/null 2>&1
+                    _create_container
+                    echo "MIGRATED" > "/tmp/.opencode_proxy_state_${port}"
+                fi
+            else
+                # Brand new
+                _create_container
                 echo "NEW" > "/tmp/.opencode_proxy_state_${port}"
             fi
         ) &
@@ -170,16 +204,20 @@ if command -v docker &>/dev/null && docker info &>/dev/null; then
         state=$(cat "/tmp/.opencode_proxy_state_${port}" 2>/dev/null || echo "UNKNOWN")
         rm -f "/tmp/.opencode_proxy_state_${port}"
         case "$state" in
-            NEW)      ((new_container_count++)) ;;
-            RESUMED)  ((resumed_count++)) ;;
-            RUNNING)  ((already_running_count++)) ;;
+            NEW)       ((new_container_count++)) ;;
+            MIGRATED)  ((migrated_count++)) ;;
+            RESUMED)   ((resumed_count++)) ;;
+            RUNNING)   ((already_running_count++)) ;;
         esac
     done
     if [ "$already_running_count" -gt 0 ]; then
         echo -e "  ${GREEN}${already_running_count} container(s) already running${NC}"
     fi
     if [ "$resumed_count" -gt 0 ]; then
-        echo -e "  ${GREEN}Resumed ${resumed_count} stopped container(s) (WARP cached — fast start)${NC}"
+        echo -e "  ${GREEN}Resumed ${resumed_count} stopped container(s) (WARP cached — instant start)${NC}"
+    fi
+    if [ "$migrated_count" -gt 0 ]; then
+        echo -e "  ${YELLOW}Migrated ${migrated_count} container(s) to volume-cached mode (one-time WARP registration)${NC}"
     fi
     if [ "$new_container_count" -gt 0 ]; then
         echo -e "  ${YELLOW}Created ${new_container_count} new container(s) (WARP registration required)${NC}"
@@ -249,16 +287,18 @@ if command -v docker &>/dev/null && docker info &>/dev/null; then
     }
 
     # Smart wait based on container state
-    if [ "$new_container_count" -gt 0 ]; then
-        echo -e "${YELLOW}  Waiting 15 seconds for Cloudflare WARP registration (${new_container_count} new)...${NC}"
-        sleep 15
+    needs_registration=$(( new_container_count + migrated_count ))
+    if [ "$needs_registration" -gt 0 ]; then
+        echo -e "${YELLOW}  Waiting 20 seconds for Cloudflare WARP registration (${needs_registration} new/migrated)...${NC}"
+        sleep 20
     elif [ "$resumed_count" -gt 0 ]; then
-        echo -e "  Waiting 15 seconds for resumed containers (WARP tunnel re-establish)..."
-        sleep 15
+        # Cached config → sing-box starts in ~1s, no fixed sleep needed
+        echo -e "  Cached WARP config detected — skipping wait..."
     fi
 
-    # First verification pass (8 retries × 3s = 24s max per proxy, all parallel)
-    verify_proxies 8 3
+    # First verification pass (15 retries × 2s = 30s max per proxy, all parallel)
+    # With cached config, proxies typically pass on 1st-2nd retry (~2-4s)
+    verify_proxies 15 2
 
     # ── Phase 3: Auto-recover failed proxies ──
     if [ ${#FAILED_INDICES[@]} -gt 0 ]; then
@@ -281,7 +321,7 @@ if command -v docker &>/dev/null && docker info &>/dev/null; then
         for idx in "${FAILED_INDICES[@]}"; do
             VERIFY_PORTS+=("${PROXY_PORTS[$idx]}")
         done
-        verify_proxies 6 5 " (retry)"
+        verify_proxies 10 3 " (retry)"
 
         if [ ${#FAILED_INDICES[@]} -gt 0 ]; then
             echo -e "${YELLOW}  ⚠ ${#FAILED_INDICES[@]} proxy(ies) still offline. Bridge will route around them.${NC}"

@@ -136,14 +136,14 @@ async fn execute_with_warp_retry(
                 let status = response.status();
 
                 if status == reqwest::StatusCode::TOO_MANY_REQUESTS
-                    || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+                    || status.is_server_error()
                 {
-                    // 429 and 503 are always rate-limit / overload
+                    // 429 and 5xx are rate-limit / server errors
                     if (retry_count as usize) < max_retries {
                         retry_count += 1;
                         if let (Some(idx), Some(ref url)) = (idx, &proxy_url) {
                             warn!(
-                                "Upstream rate limit hit (status {}) on proxy #{} ({}). Putting proxy on cool-down (attempt {}/{})...",
+                                "Upstream error (status {}) on proxy #{} ({}). Putting proxy on cool-down (attempt {}/{})...",
                                 status, idx, url, retry_count, max_retries
                             );
                             let mut pool = state.proxy_pool.write().await;
@@ -163,7 +163,7 @@ async fn execute_with_warp_retry(
                             last_failed_idx = Some(idx);
                         } else {
                             warn!(
-                                "Upstream rate limit hit (status {}). Attempting to rotate WARP IP (attempt {}/{})...",
+                                "Upstream error (status {}). Attempting to rotate WARP IP (attempt {}/{})...",
                                 status, retry_count, max_retries
                             );
                             rotate_warp_ip().await;
@@ -174,7 +174,7 @@ async fn execute_with_warp_retry(
                         continue;
                     }
                     return Err(BridgeError::UpstreamError(format!(
-                        "Rate limited after {} retries (status {})",
+                        "Upstream error after {} retries (status {})",
                         retry_count, status
                     )));
                 } else if status == reqwest::StatusCode::BAD_REQUEST {
@@ -210,13 +210,33 @@ async fn execute_with_warp_retry(
                             retry_count, body_text
                         )));
                     } else {
-                        // Genuine 400 error — don't retry, propagate immediately
+                        // Genuine 400 error — upstream provider failure, retry up to 10x
+                        if retry_count < 10 {
+                            retry_count += 1;
+                            warn!(
+                                "Upstream returned 400 (provider error, attempt {}/10): {}",
+                                retry_count,
+                                body_text.chars().take(200).collect::<String>()
+                            );
+                            if let (Some(idx), Some(ref _url)) = (idx, &proxy_url) {
+                                let mut pool = state.proxy_pool.write().await;
+                                pool.mark_rate_limited(idx, Duration::from_secs(5));
+                                last_failed_idx = Some(idx);
+                            } else {
+                                rotate_warp_ip().await;
+                            }
+                            let backoff =
+                                std::time::Duration::from_secs(2u64.pow(retry_count.min(4)));
+                            info!("Backing off for {:?} before retry...", backoff);
+                            tokio::time::sleep(backoff).await;
+                            continue;
+                        }
                         warn!(
-                            "Upstream returned genuine 400 error: {}",
+                            "Upstream returned 400 (failed after 10 retries): {}",
                             body_text.chars().take(300).collect::<String>()
                         );
                         return Err(BridgeError::UpstreamError(format!(
-                            "Upstream returned 400: {}",
+                            "Upstream returned 400 after 10 retries: {}",
                             body_text
                         )));
                     }

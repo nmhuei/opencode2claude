@@ -95,7 +95,7 @@ impl TestBridge {
 
 impl Drop for TestBridge {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        std::mem::drop(self.child.kill());
     }
 }
 
