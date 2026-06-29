@@ -18,3 +18,5 @@ RELEASE_GUIDE.md
 /test
 /test.*
 
+# Verification runtime artifacts
+.runtime/
