@@ -223,6 +223,9 @@ if command -v docker &>/dev/null && docker info &>/dev/null; then
         echo -e "  ${YELLOW}Created ${new_container_count} new container(s) (WARP registration required)${NC}"
     fi
 
+    # Add the always-on external proxy (warp-external) to the pool
+    BRIDGE_PROXIES_LIST+=("socks5://127.0.0.1:40010")
+
     BRIDGE_PROXIES=$(IFS=,; echo "${BRIDGE_PROXIES_LIST[*]}")
     export BRIDGE_PROXIES
 
