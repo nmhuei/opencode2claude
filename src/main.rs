@@ -3,6 +3,7 @@
 //! This binary provides a local HTTP server that translates Anthropic API requests
 //! into OpenCode CLI commands, enabling Claude Code to use any LLM provider.
 
+mod cli;
 mod config;
 mod error;
 mod handlers;
@@ -14,6 +15,7 @@ mod sse;
 mod state;
 
 use clap::Parser;
+use cli::{Command, ServeArgs};
 use config::BridgeConfig;
 use state::AppState;
 
@@ -24,69 +26,20 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-/// Command-line arguments for the OpenCode2Claude bridge.
-#[derive(Parser)]
-#[command(
-    name = "opencode2claude",
-    about = "A blazing-fast API bridge connecting Claude Code to OpenCode CLI and any LLM"
-)]
-struct Cli {
-    /// Override bridge port
-    #[arg(short = 'p', long)]
-    port: Option<u16>,
-
-    /// Override bind address
-    #[arg(long)]
-    host: Option<String>,
-
-    /// Path to custom TOML config file (default: opencode2claude.toml)
-    #[arg(short = 'c', long)]
-    config: Option<String>,
-
-    /// Override model
-    #[arg(short = 'm', long)]
-    model: Option<String>,
-
-    /// Override shell policy (disabled, allowlist, unrestricted)
-    #[arg(long = "shell-policy")]
-    shell_policy: Option<String>,
-
-    /// Print version and exit
-    #[arg(short = 'v', long = "version")]
-    version: bool,
-
-    /// Tavily search API key override
-    #[arg(long)]
-    tavily_api_key: Option<String>,
-
-    /// Exa search API key override
-    #[arg(long)]
-    exa_api_key: Option<String>,
-
-    /// Serper.dev search API key override
-    #[arg(long)]
-    serper_api_key: Option<String>,
-
-    /// SearXNG instance URL override
-    #[arg(long)]
-    searxng_url: Option<String>,
-
-    /// SearXNG API key override
-    #[arg(long)]
-    searxng_api_key: Option<String>,
-}
-
 #[tokio::main]
 async fn main() {
-    // Parse CLI arguments (before logging, so version flag works cleanly)
-    let cli = Cli::parse();
+    let cli = cli::Cli::parse();
 
-    // Handle version flag
-    if cli.version {
-        println!("opencode2claude v{}", env!("CARGO_PKG_VERSION"));
-        return;
+    match cli.command {
+        Some(Command::Serve(args)) => run_server(args).await,
+        None => run_server(ServeArgs::default()).await,
+        Some(_) => {
+            println!("Subcommand not yet implemented (coming in Phase 2+)");
+        }
     }
+}
 
+async fn run_server(args: ServeArgs) {
     // Initialize structured logging
     tracing_subscriber::registry()
         .with(
@@ -97,16 +50,16 @@ async fn main() {
 
     // Load configuration with priority: CLI > Env > TOML > Defaults
     let overrides = config::CliOverrides {
-        bridge_port: cli.port,
-        host: cli.host,
-        model: cli.model,
-        shell_policy: cli.shell_policy,
-        config_path: cli.config,
-        tavily_api_key: cli.tavily_api_key,
-        exa_api_key: cli.exa_api_key,
-        serper_api_key: cli.serper_api_key,
-        searxng_url: cli.searxng_url,
-        searxng_api_key: cli.searxng_api_key,
+        bridge_port: args.port,
+        host: args.host,
+        model: args.model,
+        shell_policy: args.shell_policy,
+        config_path: args.config,
+        tavily_api_key: args.tavily_api_key,
+        exa_api_key: args.exa_api_key,
+        serper_api_key: args.serper_api_key,
+        searxng_url: args.searxng_url,
+        searxng_api_key: args.searxng_api_key,
     };
     let config = BridgeConfig::from_env_and_cli(overrides);
     let addr = SocketAddr::from((config.host, config.bridge_port));
