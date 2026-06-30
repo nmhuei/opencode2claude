@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 # Build
 cargo build
-cargo build --release    # LTO, single codegen unit, strip
+cargo build --release     # LTO, single codegen unit, strip
 
 # Run (foreground)
 cargo run
@@ -18,32 +18,33 @@ cargo build && ./target/debug/opencode2claude start
 ./target/debug/opencode2claude status
 ./target/debug/opencode2claude stop
 
-# Quick start with Docker proxy pool
-# Quick start with Docker proxy pool
-cargo build && source start.sh   # build + Docker proxies + env export (legacy wrapper)
-./stop.sh                        # cleanup
+# Quick start with Docker proxy pool (legacy wrapper)
+cargo build && source start.sh
+./stop.sh
 
-# Test (unit)
+# Test (unit + fast integration)
 cargo test
+cargo test --locked       # respect Cargo.lock
 
-# Test (integration — spawns bridge on a free port, requires release build first)
+# Test (full integration — requires release build first)
 cargo build --release && cargo test --test integration -- --ignored
 
 # Run a single test
 cargo test test_name
 cargo test --test integration test_shell_command_non_streaming -- --ignored
+cargo test --test fast test_health_endpoint_fast
 
 # Lint & format
 cargo fmt --check
 cargo clippy -- -D warnings
 
-# Verification
-./scripts/verify.sh phase-6 --profile ci   # Single phase
+# Verification (8 phases, 90+ gates)
+./scripts/verify.sh phase-3 --profile ci   # Single phase
 ./scripts/verify.sh all --profile ci        # All enabled phases
+```
 
-CI runs on push/PR: `cargo fmt --check` → `cargo clippy` → `cargo test` → `cargo build --release` (`.github/workflows/ci.yml`).
-
-Release workflow (`.github/workflows/release.yml`): builds linux + macOS (amd64/arm64) binaries, publishes to crates.io, builds/pushes Docker image to ghcr.io.
+**CI** (`.github/workflows/ci.yml`): fmt → clippy → test → build-release + shellcheck.
+**Release** (`.github/workflows/release.yml`): 4-target binary build (linux amd64/arm64, macOS amd64/arm64) → GitHub Releases → crates.io publish → ghcr.io Docker image.
 
 ## Project Overview
 
@@ -61,30 +62,42 @@ Unlike earlier versions, the bridge now communicates **directly with the upstrea
 
 ## Architecture
 
-### Modules
+### Modules (~10k LOC)
 
 ```
 src/
 ├── main.rs               # Router, startup, graceful shutdown
+├── lib.rs                # Library entry point (in-process embedding)
 ├── cli.rs                # CLI argument parsing via Clap subcommands
 ├── config.rs             # Config chain: CLI args > Env vars > TOML > Defaults
 ├── handlers.rs           # Parse Anthropic requests, route to shell/upstream
 ├── state.rs              # AppState: shared config, HTTP/search clients, proxy pool, rate limiter
 ├── error.rs              # BridgeError enum → HTTP error responses
 ├── middleware.rs         # Bearer token auth (skips /health)
-├── proxy_pool.rs        # 2-tier proxy pool: primary-first Rendezvous routing with WarmStandby failover, cooldown/recovery, health telemetry
 ├── shell.rs              # !command execution via sh -c with ShellPolicy
 ├── sse.rs                # SseEventBuilder — Anthropic SSE protocol
-├── supervisor.rs         # Bridge supervisor: start/stop/status daemon lifecycle
-├── docker.rs             # Docker proxy container management (create/list/remove/logs)
-├── pidfile.rs            # PID file read/write for supervisor
+├── supervisor.rs         # Bridge daemon lifecycle (start/stop/status)
+├── docker.rs             # Docker proxy container management
+├── pidfile.rs            # PID file read/write
 ├── runtime.rs            # Runtime path resolution (.runtime/ dir)
-└── opencode/             # Direct upstream API gateway (no subprocess)
-    ├── mod.rs            # Re-exports
-    ├── forward.rs        # HTTP forwarding, WARP retry, search interception, proxy telemetry (record_success/record_failure)
-    ├── mapper.rs         # Anthropic Messages → OpenAI Chat Completions format
-    ├── search.rs         # Web search with 5-provider fallback chain
-    └── types.rs          # OpenAI API request/response types
+├── opencode/             # Direct upstream API gateway
+│   ├── mod.rs            # Re-exports
+│   ├── forward.rs        # HTTP forwarding, WARP retry, search interception
+│   ├── mapper.rs         # Anthropic Messages → OpenAI Chat Completions
+│   ├── search.rs         # Web search with 5-provider fallback chain
+│   ├── retry.rs          # Retry loop with adaptive cooldown
+│   ├── sanitize.rs       # DSML tag stripping and tool-call parsing
+│   └── types.rs          # OpenAI API request/response types
+└── proxy_pool/           # 2-tier proxy pool (split module)
+    ├── mod.rs            # Pool lifecycle, health telemetry, cooldown/recovery
+    ├── routing.rs        # Primary-first Rendezvous routing + WarmStandby failover
+    ├── maintenance.rs    # Docker container restart/purge queue
+    └── types.rs          # ProxyNode, ProxyTier, ProxyStatus enums
+
+tests/
+├── common/mod.rs         # TestBridge harness (auto-assigns free ports, env overrides)
+├── fast.rs               # 5 fast smoke tests (no release build needed)
+└── integration.rs        # 18 full integration tests (ignored, require --release)
 ```
 
 ### Router (defined in `main.rs`)
@@ -103,7 +116,7 @@ src/
 | **forward** | `opencode/forward.rs` | Core: sends OpenAI-compatible POST to `opencode.ai/zen/v1/chat/completions`, handles sync/streaming, **WARP IP rotation** on rate-limit, **search tool interception** (detects web search, loops back with results, max 5 loops) |
 | **mapper** | `opencode/mapper.rs` | Converts Anthropic request format → OpenAI format: system prompts, tool results, tool choice mapping, model name normalization (e.g. `deepseek-v4-flash` → `deepseek-v4-flash-free`) |
 | **search** | `opencode/search.rs` | `SearchClient` with 5-provider fallback: Tavily → Exa → Serper → SearXNG → DuckDuckGo. Shipped with `DEFAULT_MODEL` (`claude-3-5-sonnet`) as requested. DuckDuckGo works without any API key. |
-| **proxy_pool** | `proxy_pool.rs` | 2-tier proxy pool: Primary (40001–40003) + WarmStandby (40004–40005). Primary-first Rendezvous routing with affected-agent-only failover, adaptive cooldown, auto-recovery after RECOVERY_SUCCESS_COUNT successes, /health snapshot telemetry |
+| **proxy_pool** | `proxy_pool/mod.rs`, `routing.rs`, `maintenance.rs`, `types.rs` | 2-tier proxy pool: Primary (40001–40003) + WarmStandby (40004–40005). Primary-first Rendezvous routing with affected-agent-only failover, adaptive cooldown, auto-recovery after RECOVERY_SUCCESS_COUNT successes, /health snapshot telemetry |
 | **shell** | `shell.rs` | `ShellPolicy` enum (Disabled/AllowList/Unrestricted), sync and streaming (`tokio::mpsc` + SSE) command execution |
 | **sse** | `sse.rs` | `SseEventBuilder` — unified builder for Anthropic SSE events (message_start, content_block_start/delta/stop, message_delta, message_stop), used by both shell and upstream paths |
 | **state** | `state.rs` | `AppState` holding `Arc<BridgeConfig>`, shared reqwest client, `SearchClient`, optional `Arc<Semaphore>` rate limiter, `Arc<RwLock<ProxyPool>>` |
@@ -209,19 +222,24 @@ max_search_loops = 5
 
 ## Testing
 
-**Unit tests** are colocated in `#[cfg(test)]` modules within each source file:
-- `config.rs` — env var priority, TOML parsing, auth validation
-- `handlers.rs` — prompt extraction from various content formats
-- `mapper.rs` — Anthropic → OpenAI conversion, model name mapping, search tool detection
-- `proxy_pool.rs` — Rendezvous deterministic hashing, sticky mapping, primary-first routing, WarmStandby exclusion, affected-agent-only remap, cooldown/recovery, telemetry snapshot, 400 no-op proxy health
-- `search.rs` — URL encoding/decoding, HTML stripping
-- `shell.rs` — ShellPolicy checks, base command extraction
-- `sse.rs` — Event construction, non-streaming response format
+**Unit tests** are colocated in `#[cfg(test)]` modules within each source file.
+
+**Test tiers** (3 files in `tests/`):
+
+| File | Type | Count | Run with |
+|------|------|-------|----------|
+| `tests/fast.rs` | Smoke (no release build) | 5 | `cargo test --test fast` |
+| `tests/integration.rs` | Full (spawns real bridge) | 18 | `cargo build --release && cargo test --test integration -- --ignored` |
+| `tests/common/mod.rs` | Shared `TestBridge` harness | — | imported by both fast and integration |
+
+Key test modules in source:
+- `config.rs` — env var priority, TOML parsing, auth validation, **security validation** (public-bind guards, default shell policy)
+- `proxy_pool/` — Rendezvous hashing, routing, cooldown/recovery, telemetry snapshot
+- `shell.rs` — ShellPolicy checks, metacharacter detection
+- `opencode/` — mapper conversion, search URL encoding, DSML sanitization, SSE events
+- `middleware.rs` — Bearer auth, health-skip
 - `state.rs` — AppState client creation
 
-**Integration tests** (`tests/`):
-- `cargo build --release && cargo test --test integration -- --ignored`
-- Spawn a real bridge binary, test HTTP endpoints, streaming SSE, auth flow, shell policies, concurrent requests, rate limiting, multi-token auth, proxy failover
-- Test harness in `tests/common/mod.rs`: `TestBridge` struct auto-assigns free ports, supports env overrides
+**Verification**: 8 phase scripts in `scripts/phases/`, each with 7–17 gates. Invoked via `./scripts/verify.sh all --profile ci`. Phase gates are bash functions that return 0 (pass) or 1 (fail).
 
 Route admin — if changing endpoints, update the router in `main.rs` and the auth middleware's `/health` path check in `middleware.rs`.

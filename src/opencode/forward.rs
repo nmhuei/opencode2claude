@@ -247,10 +247,11 @@ pub async fn forward_to_llm_sync(
                     .as_millis(),
                 i
             );
+            let cased_name = get_correct_tool_name(&call.name, &payload);
             content_blocks.push(serde_json::json!({
                 "type": "tool_use",
                 "id": tool_id,
-                "name": call.name,
+                "name": cased_name,
                 "input": call.arguments
             }));
         }
@@ -543,7 +544,7 @@ pub async fn forward_to_llm_stream(
                                                         "content_block": {
                                                             "type": "tool_use",
                                                             "id": tool_id,
-                                                            "name": call.name,
+                                                            "name": get_correct_tool_name(&call.name, &current_payload),
                                                             "input": {}
                                                         }
                                                     }))
@@ -756,7 +757,14 @@ pub async fn forward_to_llm_stream(
                                                         next_content_block_index += 1;
                                                         tool_block_indices.insert(
                                                             call_idx,
-                                                            (idx, id.clone(), name.clone()),
+                                                            (
+                                                                idx,
+                                                                id.clone(),
+                                                                get_correct_tool_name(
+                                                                    &name,
+                                                                    &current_payload,
+                                                                ),
+                                                            ),
                                                         );
 
                                                         let start_ev = Event::default()
@@ -767,7 +775,7 @@ pub async fn forward_to_llm_stream(
                                                                 "content_block": {
                                                                     "type": "tool_use",
                                                                     "id": id,
-                                                                    "name": name,
+                                                                    "name": get_correct_tool_name(&name, &current_payload),
                                                                     "input": {}
                                                                 }
                                                             }))
@@ -987,7 +995,7 @@ pub async fn forward_to_llm_stream(
                             "content_block": {
                                 "type": "tool_use",
                                 "id": tool_id,
-                                "name": call.name,
+                                "name": get_correct_tool_name(&call.name, &current_payload),
                                 "input": {}
                             }
                         }))
@@ -1099,9 +1107,22 @@ fn split_pending_text(text: &str) -> (String, String) {
     (text.to_string(), String::new())
 }
 
+fn get_correct_tool_name(name: &str, payload: &MessagesRequest) -> String {
+    if let Some(ref tools) = payload.tools {
+        let name_lower = name.to_lowercase();
+        for t in tools {
+            if t.name.to_lowercase() == name_lower {
+                return t.name.clone();
+            }
+        }
+    }
+    name.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::handlers::AnthropicTool;
 
     #[test]
     fn test_split_pending_text() {
@@ -1121,5 +1142,26 @@ mod tests {
             split_pending_text("hello"),
             ("hello".to_string(), "".to_string())
         );
+    }
+
+    #[test]
+    fn test_get_correct_tool_name() {
+        let req = MessagesRequest {
+            model: Some("model".to_string()),
+            messages: vec![],
+            system: None,
+            tools: Some(vec![AnthropicTool {
+                name: "Skill".to_string(),
+                description: "Skill tool".to_string(),
+                input_schema: serde_json::json!({}),
+            }]),
+            tool_choice: None,
+            stream: false,
+            temperature: None,
+            max_tokens: Some(100),
+        };
+        assert_eq!(get_correct_tool_name("skill", &req), "Skill");
+        assert_eq!(get_correct_tool_name("Skill", &req), "Skill");
+        assert_eq!(get_correct_tool_name("other", &req), "other");
     }
 }
