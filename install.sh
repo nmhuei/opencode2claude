@@ -119,9 +119,12 @@ find_download_tool() {
 # ══════════════════════════════════════════════════════════════════════
 fetch_latest_version() {
     # May fail due to rate-limiting or network — caller handles empty return.
-    curl -fsS "$API_URL" 2>/dev/null |
-        grep '"tag_name"' |
+    local tmpfile
+    tmpfile="$(mktemp 2>/dev/null || echo "/tmp/opencode2claude-version.$$")"
+    dl "$API_URL" "$tmpfile" 2>/dev/null || true
+    grep '"tag_name"' "$tmpfile" 2>/dev/null |
         sed 's/.*"tag_name": *"\([^"]*\)".*/\1/' || true
+    rm -f "$tmpfile" 2>/dev/null || true
 }
 
 get_installed_version() {

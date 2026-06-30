@@ -22,12 +22,9 @@ opencode2claude uses a two-tier proxy pool:
 ```
 BRIDGE_PRIMARY_PROXIES=socks5://127.0.0.1:40001,socks5://127.0.0.1:40002,socks5://127.0.0.1:40003
 BRIDGE_WARM_STANDBY_PROXIES=socks5://127.0.0.1:40004,socks5://127.0.0.1:40005
-BRIDGE_PROXY_POLICY=primary-with-warm-standby
 ```
 
-- `PRIMARY_POOL_SIZE` env var (default: `3`) controls primary port count (starting at 40001)
-- `STANDBY_POOL_SIZE` env var (default: `2`) controls standby port count (starting after primary)
-- Total pool size must not exceed 5 ports (guard enforced in `start.sh`)
+The proxy pool is fixed at **3 primary** ports (40001–40003) and **2 warm-standby** ports (40004–40005). These sizes are hardcoded in `proxy_pool.rs` and are not user-configurable. The routing policy (`primary-with-warm-standby`) is also hardcoded.
 
 ## Routing Policy
 
@@ -99,8 +96,8 @@ After cooldown, a proxy recovers via:
 When Docker is available, `start.sh` automatically provisions WARP SOCKS5 proxy containers:
 
 ```bash
-# Standard configuration (3 primary + 2 warm-standby)
-PRIMARY_POOL_SIZE=3 STANDBY_POOL_SIZE=2 source start.sh
+# Shell wrapper auto-provisions the proxies
+source start.sh
 ```
 
 - Uses `ghcr.io/mon-ius/docker-warp-socks` images

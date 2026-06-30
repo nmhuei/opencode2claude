@@ -36,10 +36,19 @@ gate_compile_check() {
 gate_unit_tests() {
   info "Gate: cargo test --locked"
   cd "$ROOT_DIR"
-  cargo test --locked || {
-    error "Unit tests failed"
-    return 1
-  }
+  if [[ "${PROFILE:-local}" == "heavy" ]]; then
+    # Heavy profile: include ignored tests (live network, slow integration)
+    cargo test --locked -- --include-ignored || {
+      error "Unit tests (all, including ignored) failed"
+      return 1
+    }
+  else
+    # CI/local profile: skip #[ignore] tests (fast, no network)
+    cargo test --locked || {
+      error "Unit tests failed"
+      return 1
+    }
+  fi
   pass "cargo test --locked"
 }
 

@@ -537,6 +537,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "live network call (60s+) — run with --include-ignored or PROFILE=heavy"]
     async fn test_duckduckgo_search_via_client() {
         let client = Client::new();
         let config = make_test_config();

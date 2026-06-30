@@ -47,11 +47,7 @@
 | 5 — Primary-first routing policy | ✅ **Enabled** | |
 | 6 — Health/status/telemetry | ✅ **Enabled** | |
 | 7 — Docs + migration | ✅ **Enabled** | |
-| 8 — CI + Release | ⏸️ **Intentionally disabled** | Deferred after Phase 3 |
-
-### Phase 8 (CI + Release) — Intentionally Skipped
-
-Phase 8 is deferred until the full feature set is stable. See Phase 3 for prerequisites.
+| 8 — CI + Release | ✅ **Enabled** | |
 
 ## Adding a New Phase
 
