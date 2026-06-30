@@ -864,11 +864,19 @@ async fn requeue_or_giveup(idx: usize, pool: &Arc<TokioRwLock<ProxyPool>>, reaso
 
 /// Verify SOCKS5 proxy connectivity via cloudflare CDN trace.
 async fn verify_proxy_socks(port: u16) -> bool {
+    let proxy_url = format!("socks5h://127.0.0.1:{}", port);
+    let proxy = match reqwest::Proxy::all(&proxy_url) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(
+                "Invalid proxy URL '{}' in verify_proxy_socks: {}",
+                proxy_url, e
+            );
+            return false;
+        }
+    };
     let client = match reqwest::Client::builder()
-        .proxy(
-            reqwest::Proxy::all(format!("socks5h://127.0.0.1:{}", port))
-                .expect("Invalid proxy URL"),
-        )
+        .proxy(proxy)
         .timeout(Duration::from_secs(5))
         .build()
     {

@@ -181,7 +181,7 @@ async fn execute_with_warp_retry(
                     let body_text = String::from_utf8_lossy(&body_bytes);
                     if is_rate_limit_body(&body_text) {
                         warn!(
-                            "Upstream returned 400 with rate-limit body: {}",
+                            "Upstream returned 400 with rate-limit body (truncated): {}",
                             body_text.chars().take(200).collect::<String>()
                         );
                         if (retry_count as usize) < max_retries {
@@ -204,15 +204,15 @@ async fn execute_with_warp_retry(
                             continue;
                         }
                         return Err(BridgeError::UpstreamError(format!(
-                            "Rate limited (400) after {} retries: {}",
-                            retry_count, body_text
+                            "Rate limited (400) after {} retries",
+                            retry_count
                         )));
                     } else {
                         // Genuine 400 error — upstream provider failure, retry up to 10x
                         if retry_count < 10 {
                             retry_count += 1;
                             warn!(
-                                "Upstream returned 400 (provider error, attempt {}/10): {}",
+                                "Upstream returned 400 (provider error, attempt {}/10, truncated): {}",
                                 retry_count,
                                 body_text.chars().take(200).collect::<String>()
                             );
@@ -230,13 +230,12 @@ async fn execute_with_warp_retry(
                             continue;
                         }
                         warn!(
-                            "Upstream returned 400 (failed after 10 retries): {}",
+                            "Upstream returned 400 (failed after 10 retries, truncated): {}",
                             body_text.chars().take(300).collect::<String>()
                         );
-                        return Err(BridgeError::UpstreamError(format!(
-                            "Upstream returned 400 after 10 retries: {}",
-                            body_text
-                        )));
+                        return Err(BridgeError::UpstreamError(
+                            "Upstream returned 400 after 10 retries".to_string(),
+                        ));
                     }
                 } else {
                     // Success or other status — return as-is
@@ -314,10 +313,14 @@ pub async fn forward_to_llm_sync(
         if !res.status().is_success() {
             let status = res.status();
             let body = res.text().await.unwrap_or_default();
-            error!("Upstream API returned status {}: {}", status, body);
+            error!(
+                "Upstream API returned status {}: {} (truncated)",
+                status,
+                body.chars().take(300).collect::<String>()
+            );
             return Err(BridgeError::UpstreamError(format!(
-                "Upstream returned status {}: {}",
-                status, body
+                "Upstream returned status {}",
+                status
             )));
         }
 
@@ -500,7 +503,7 @@ pub async fn forward_to_llm_stream(
         "msg_opencode_{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_millis()
     );
     let builder = SseEventBuilder::new(msg_id, model.clone());
@@ -550,15 +553,19 @@ pub async fn forward_to_llm_stream(
             if !res.status().is_success() {
                 let status = res.status();
                 let body = res.text().await.unwrap_or_default();
-                error!("Upstream API returned status {}: {}", status, body);
-                // Send error SSE event with the actual error details
+                error!(
+                    "Upstream API returned status {}: {} (truncated)",
+                    status,
+                    body.chars().take(300).collect::<String>()
+                );
+                // Send error SSE event with status only (no body leak to client)
                 let error_ev = Event::default()
                     .event("error")
                     .json_data(serde_json::json!({
                         "type": "error",
                         "error": {
                             "type": "api_error",
-                            "message": format!("Upstream returned {}: {}", status, body.chars().take(500).collect::<String>())
+                            "message": format!("Upstream returned {}", status)
                         }
                     }))
                     .unwrap_or_else(|_| Event::default().data("{}"));

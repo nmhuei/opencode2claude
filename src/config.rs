@@ -202,7 +202,14 @@ impl BridgeConfig {
                     .collect();
                 ShellPolicy::AllowList(allowed)
             }
-            _ => ShellPolicy::Unrestricted,
+            "unrestricted" => ShellPolicy::Unrestricted,
+            _ => {
+                warn!(
+                    "Unknown shell policy '{}' — defaulting to Disabled for security. Valid values: 'disabled', 'allowlist', 'unrestricted'",
+                    raw_shell_policy
+                );
+                ShellPolicy::Disabled
+            }
         };
 
         // Auth tokens: Env > TOML
@@ -656,5 +663,53 @@ mod tests {
             matches!(config.shell_policy, ShellPolicy::Disabled),
             "default shell policy must be Disabled"
         );
+    }
+
+    #[test]
+    fn test_unknown_shell_policy_defaults_to_disabled() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        env::remove_var("BRIDGE_HOST");
+        env::remove_var("BRIDGE_AUTH_TOKEN");
+        env::set_var("BRIDGE_SHELL_POLICY", "typo_all");
+
+        let config = BridgeConfig::from_env_and_cli(CliOverrides::default());
+        assert!(
+            matches!(config.shell_policy, ShellPolicy::Disabled),
+            "unknown policy 'typo_all' must fall back to Disabled, not Unrestricted"
+        );
+
+        env::remove_var("BRIDGE_SHELL_POLICY");
+
+        // Test case-insensitive unknown value
+        env::set_var("BRIDGE_SHELL_POLICY", "ALL");
+        let config = BridgeConfig::from_env_and_cli(CliOverrides::default());
+        assert!(
+            matches!(config.shell_policy, ShellPolicy::Disabled),
+            "unknown policy 'ALL' must fall back to Disabled"
+        );
+
+        env::remove_var("BRIDGE_SHELL_POLICY");
+    }
+
+    #[test]
+    fn test_known_shell_policies_still_work() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        env::remove_var("BRIDGE_HOST");
+        env::remove_var("BRIDGE_AUTH_TOKEN");
+
+        env::set_var("BRIDGE_SHELL_POLICY", "disabled");
+        let config = BridgeConfig::from_env_and_cli(CliOverrides::default());
+        assert!(matches!(config.shell_policy, ShellPolicy::Disabled));
+        env::remove_var("BRIDGE_SHELL_POLICY");
+
+        env::set_var("BRIDGE_SHELL_POLICY", "allowlist");
+        let config = BridgeConfig::from_env_and_cli(CliOverrides::default());
+        assert!(matches!(config.shell_policy, ShellPolicy::AllowList(_)));
+        env::remove_var("BRIDGE_SHELL_POLICY");
+
+        env::set_var("BRIDGE_SHELL_POLICY", "unrestricted");
+        let config = BridgeConfig::from_env_and_cli(CliOverrides::default());
+        assert!(matches!(config.shell_policy, ShellPolicy::Unrestricted));
+        env::remove_var("BRIDGE_SHELL_POLICY");
     }
 }
