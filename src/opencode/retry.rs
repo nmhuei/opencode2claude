@@ -76,7 +76,7 @@ fn is_rate_limit_body(body: &str) -> bool {
 }
 
 /// Maximum retries for 400 provider errors (distinct from rate-limit retries).
-const MAX_PROVIDER_RETRIES: u32 = 10;
+const MAX_PROVIDER_RETRIES: u32 = 1;
 
 /// Execute a request with exponential-backoff retry, proxy cooldown, and WARP IP rotation.
 ///
