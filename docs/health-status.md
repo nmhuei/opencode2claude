@@ -15,7 +15,7 @@ No authentication required (always public for monitoring tools).
 ```json
 {
   "status": "healthy",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "daemon": {
     "status": "connected",
     "port": 4096

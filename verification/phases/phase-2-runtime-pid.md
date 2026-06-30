@@ -3,7 +3,7 @@
 | Field | Value |
 |-------|-------|
 | **Phase ID** | `phase-2-runtime-pid` |
-| **Status** | Planned |
+| **Status** | Implementation Complete |
 | **Dependencies** | Phase 1 (CLI skeleton) |
 | **Scope** | Add `src/runtime.rs` (`.runtime/` paths), `src/pidfile.rs` (JSON PID read/write). `supervisor.rs` creates `.runtime/` on `start`, writes PID file, cleans up on `stop`. |
 | **Files to create** | `src/runtime.rs`, `src/pidfile.rs` |

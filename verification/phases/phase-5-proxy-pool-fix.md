@@ -3,7 +3,7 @@
 | Field | Value |
 |-------|-------|
 | **Phase ID** | `phase-5-proxy-pool-fix` |
-| **Status** | Planned |
+| **Status** | Implementation Complete |
 | **Dependencies** | Phase 4 (Proxy CLI manager, Docker containment in `docker.rs`) |
 | **Scope** | Implement primary-first deterministic hashing with warm-standby fallback. `get_client()` selects from the primary tier (ports 40001-40003, indices 0-2) first via `hash(api_key) mod PRIMARY_COUNT`. If the selected primary is unavailable (cooldown/dead/starting), fall back to a warm-standby proxy (ports 40004-40005, indices 3-4). Warm-standby nodes are **never marked as managed**, **never restarted by runtime recovery**. Sticky mapping to the same primary proxy persists while the primary remains healthy. |
 | **Files to modify** | `src/proxy_pool.rs` (2-tier `get_client`, `get_client_excluding`, `health_monitor` skip standby, `process_restart_queue` skip standby), `src/opencode/forward.rs` (retry routing to attempt other primaries before warm-standby fallback) |
