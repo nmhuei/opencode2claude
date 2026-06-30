@@ -64,8 +64,8 @@ gate_protected_ports_guarded() {
   info "Gate 4.8: protected port guard rejects port 40004"
   # Check that is_protected_proxy_port is implemented in the binary
   # For now, verify the source code has the guard
-  grep -q "is_protected_proxy_port" "$ROOT_DIR/src/proxy_pool.rs" || return 1
-  grep -q "ensure_not_protected" "$ROOT_DIR/src/proxy_pool.rs" || return 1
+  grep -q "is_protected_proxy_port" "$ROOT_DIR/src/proxy_pool/types.rs" || return 1
+  grep -q "ensure_not_protected" "$ROOT_DIR/src/proxy_pool/types.rs" || return 1
   pass "protected port guards exist in source"
 }
 
