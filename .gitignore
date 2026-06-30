@@ -1,22 +1,18 @@
-# Logs
-*.log
-
-# Runtime files
-.bridge.pids
-
-# OS files
-.DS_Store
 
 # Added by cargo
-/target
-
+.bridge.pids
 .claude/
 client_tools.json
+dist/
+.DS_Store
+*.log
+# Logs
+# OS files
 RELEASE_GUIDE.md
-
+.runtime/
+# Runtime files
+/target
 # Temporary test files (excluding tests/ directory)
 /test
 /test.*
-
 # Verification runtime artifacts
-.runtime/
