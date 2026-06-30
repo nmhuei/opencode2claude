@@ -2,6 +2,26 @@
 
 All notable changes to opencode2claude will be documented in this file.
 
+## [0.3.2] — 2026-06-30
+
+### Added
+- Fast integration test coverage (health, models, shell-disabled-default, empty-messages, 404).
+- Docker hygiene gates (`.dockerignore`, `apk add --no-cache`, `--locked` enforcement).
+- `cargo audit` + `cargo deny` dependency security checks in CI.
+- 17 Phase 8 CI + Release verification gates.
+
+### Changed
+- Proxy pool split into `proxy_pool/` module (routing, maintenance, types subtypes).
+- Forwarding module split into upstream, retry, and sanitize submodules.
+- CI hardened with strict ShellCheck (SC2034, SC2086, SC2059, SC2116 resolved).
+- `start.sh` removed dead `BRIDGE_ALL_PROXY`/`BRIDGE_NO_PROXY` vars.
+
+### Fixed
+- `clippy::useless_format` in sanitizer attribute extraction.
+- `cargo fmt` consistency across handlers, forward, sanitize.
+- Test format: shell delegation returns `tool_use` responses (200) instead of `403`.
+- Proxy failover integration test: proper accept loop, dual 429, `BRIDGE_PRIMARY_PROXIES` env.
+
 ## [0.3.1] — 2026-06-30
 
 ### Security (High Blocker Fixes)

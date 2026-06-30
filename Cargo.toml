@@ -1,6 +1,6 @@
 [package]
 name = "opencode2claude"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 description = "Use Claude Code with any LLM (DeepSeek, GPT-4o, Gemini, Llama, etc.) — for free"
 license = "MIT"
