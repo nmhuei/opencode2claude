@@ -2,6 +2,26 @@
 
 All notable changes to opencode2claude will be documented in this file.
 
+## [0.3.0] — 2026-06-30
+
+### Added
+- Phase 8: CI + Release pipeline finalization — 14 verification gates for CI/release workflow existence, `--locked` builds, CHANGELOG consistency, version alignment, no active 40010 references.
+- Profile-aware test runner: `#[ignore]` live-network tests skip in `ci`/`local` profiles, run all under `heavy` (DDG test previously cost 60s+).
+- CHANGELOG.md with full release history.
+
+### Changed
+- Version: 0.2.1 → 0.3.0 (all 8 phases complete).
+- Release workflow: linux-arm64 target, `--locked` on all builds, `cargo publish --locked`.
+- Dockerfile: `cargo build --release --locked` for reproducible builds.
+
+### Fixed
+- Docs/code drift: README shell policy default `unrestricted` → `disabled` (Phase 3 sync).
+- Docs: README data flow diagram reflects direct API gateway (no OpenCode CLI intermediary).
+- Docs: proxy-pool.md removes non-existent `BRIDGE_PROXY_POLICY`, `PRIMARY_POOL_SIZE`, `STANDBY_POOL_SIZE` env vars.
+- Docs: health-status.md daemon schema `running: bool` → `status: string`.
+- install.sh: `fetch_latest_version()` uses `dl()` helper instead of hardcoded `curl`.
+- verification: removed `gate_all_enabled_phases_pass` recursion.
+
 ## [0.2.1] — 2026-06-30
 
 ### Added
