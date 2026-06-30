@@ -6,6 +6,8 @@
 
 pub mod forward;
 pub mod mapper;
+pub mod retry;
+pub mod sanitize;
 pub mod search;
 pub mod types;
 
