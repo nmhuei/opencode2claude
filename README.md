@@ -16,7 +16,7 @@
 curl -fsSL https://raw.githubusercontent.com/nmhuei/opencode2claude/main/install.sh | sh
 ```
 
-**Claude Code** → `opencode2claude` → **OpenCode CLI** → **Any LLM**
+**Claude Code** → `opencode2claude` → **opencode.ai/zen/v1/chat/completions** → **Any LLM**
 
 ```
 opencode2claude start  # Start the bridge daemon (background)
@@ -100,8 +100,8 @@ Priority: **CLI args > Env vars > TOML file > Defaults**
 |----------|---------|-------------|
 | `BRIDGE_PORT` | `4000` | Bridge listen port |
 | `BRIDGE_HOST` | `127.0.0.1` | Bind address |
-| `OPENCODE_MODEL` | `deepseek-v4-flash-free` | Target model |
-| `BRIDGE_SHELL_POLICY` | `unrestricted` | `disabled` \| `allowlist` \| `unrestricted` |
+| `OPENCODE_MODEL` | (none, pass-through) | Target model (upstream decides when unset) |
+| `BRIDGE_SHELL_POLICY` | `disabled` | `disabled` \| `allowlist` \| `unrestricted` |
 | `BRIDGE_AUTH_TOKEN` | (none) | Comma-separated Bearer tokens |
 | `BRIDGE_RATE_LIMIT` | (none) | Max concurrent requests (unset = unlimited) |
 | `BRIDGE_MAX_SEARCH_LOOPS` | `5` | Search interception retries |

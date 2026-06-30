@@ -17,12 +17,12 @@ No authentication required (always public for monitoring tools).
   "status": "healthy",
   "version": "0.2.1",
   "daemon": {
-    "running": true,
+    "status": "connected",
     "port": 4096
   },
   "config": {
-    "model": "opencode/deepseek-v4-flash-free",
-    "shell_policy": "unrestricted",
+    "model": "(default)",
+    "shell_policy": "disabled",
     "auth_enabled": false,
     "bridge_port": 4000
   },

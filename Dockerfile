@@ -5,7 +5,7 @@ RUN apk add musl-dev openssl-dev openssl-libs-static
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src/ ./src/
-RUN cargo build --release
+RUN cargo build --release --locked
 
 FROM alpine:3.20
 
