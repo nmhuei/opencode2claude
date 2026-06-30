@@ -5,9 +5,9 @@
 //! - `start`: Start the supervisor daemon
 //! - `status`: Show bridge status
 //! - `stop`: Stop the bridge
-//! - `restart`: Restart the bridge (not yet implemented)
-//! - `env`: Display environment information (not yet implemented)
-//! - `logs`: View bridge logs (not yet implemented)
+//! - `restart`: Restart the bridge
+//! - `env`: Display environment variables for use with Claude Code
+//! - `logs`: View bridge daemon logs
 
 use clap::{Args, Parser, Subcommand};
 

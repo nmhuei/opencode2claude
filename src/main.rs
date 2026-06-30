@@ -1,7 +1,7 @@
 //! OpenCode2Claude — A blazing-fast API bridge connecting Claude Code to any LLM.
 //!
 //! This binary provides a local HTTP server that translates Anthropic API requests
-//! into OpenCode CLI commands, enabling Claude Code to use any LLM provider.
+//! into OpenAI-compatible API calls forwarded to opencode.ai/zen/v1/chat/completions.
 
 mod cli;
 mod config;
@@ -40,10 +40,10 @@ async fn main() {
         Some(Command::Start(args)) => cmd_start(args),
         Some(Command::Status(args)) => cmd_status(args),
         Some(Command::Stop(args)) => cmd_stop(args),
+        Some(Command::Restart) => cmd_restart(),
+        Some(Command::Env) => cmd_env(),
+        Some(Command::Logs) => cmd_logs(),
         Some(Command::Proxy(cmd)) => cmd_proxy(cmd).await,
-        Some(_) => {
-            println!("Subcommand not yet implemented (coming in Phase 3+)");
-        }
     }
 }
 
@@ -96,6 +96,88 @@ fn cmd_stop(args: StopArgs) {
         Ok(()) => println!("Bridge stopped."),
         Err(e) => {
             eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn resolve_runtime_for_port(port: Option<u16>, host: Option<String>) -> supervisor::Supervisor {
+    let p = port
+        .or_else(|| {
+            std::env::var("BRIDGE_PORT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+        })
+        .unwrap_or(config::DEFAULT_BRIDGE_PORT);
+    let h = host
+        .or_else(|| std::env::var("BRIDGE_HOST").ok())
+        .unwrap_or_else(|| config::DEFAULT_HOST.to_string());
+    let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let paths = runtime::RuntimePaths::new(root);
+    supervisor::Supervisor::new(paths, p, h)
+}
+
+fn cmd_restart() {
+    let sup = resolve_runtime_for_port(None, None);
+    // Stop first (ignore errors — may not be running)
+    let _ = sup.stop();
+    // Then start
+    match sup.start() {
+        Ok(()) => {
+            let status = sup
+                .status()
+                .unwrap_or(supervisor::SupervisorStatus::Stopped);
+            println!("Bridge restarted. {}", status);
+        }
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_env() {
+    let port = std::env::var("BRIDGE_PORT")
+        .ok()
+        .and_then(|v| v.parse::<u16>().ok())
+        .unwrap_or(config::DEFAULT_BRIDGE_PORT);
+    let model = std::env::var("OPENCODE_MODEL").ok();
+
+    println!("export ANTHROPIC_API_KEY=\"opencode-bridge\"");
+    println!("export ANTHROPIC_BASE_URL=\"http://127.0.0.1:{}/v1\"", port);
+    if let Some(m) = model {
+        println!("export OPENCODE_MODEL=\"{}\"", m);
+    }
+    println!();
+    println!("# Copy-paste the lines above or run:");
+    println!("# eval \"$(opencode2claude env)\"");
+}
+
+fn cmd_logs() {
+    let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let paths = runtime::RuntimePaths::new(root);
+    let log_path = paths.bridge_log();
+
+    if !log_path.exists() {
+        eprintln!("No log file found. Start the daemon first.");
+        std::process::exit(1);
+    }
+
+    match std::fs::read_to_string(&log_path) {
+        Ok(content) => {
+            // Show last 100 lines
+            let lines: Vec<&str> = content.lines().collect();
+            let tail = if lines.len() > 100 {
+                &lines[lines.len() - 100..]
+            } else {
+                &lines
+            };
+            for line in tail {
+                println!("{}", line);
+            }
+        }
+        Err(e) => {
+            eprintln!("Error reading log file: {}", e);
             std::process::exit(1);
         }
     }

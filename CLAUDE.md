@@ -19,8 +19,9 @@ cargo build && ./target/debug/opencode2claude start
 ./target/debug/opencode2claude stop
 
 # Quick start with Docker proxy pool
-source start.sh                     # build + daemon + bridge + env export
-./stop.sh                           # graceful shutdown + Docker cleanup
+# Quick start with Docker proxy pool
+cargo build && source start.sh   # build + Docker proxies + env export (legacy wrapper)
+./stop.sh                        # cleanup
 
 # Test (unit)
 cargo test

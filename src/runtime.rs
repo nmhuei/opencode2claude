@@ -11,6 +11,9 @@ pub const RUNTIME_DIR_NAME: &str = ".runtime";
 /// PID file name.
 pub const PID_FILE_NAME: &str = "opencode2claude.pid.json";
 
+/// Log file name.
+pub const LOG_FILE_NAME: &str = "opencode2claude.log";
+
 /// Manages paths for runtime artifacts.
 pub struct RuntimePaths {
     root: PathBuf,
@@ -30,6 +33,11 @@ impl RuntimePaths {
     /// Path to the PID file: `.runtime/opencode2claude.pid.json`.
     pub fn pid_file(&self) -> PathBuf {
         self.runtime_dir().join(PID_FILE_NAME)
+    }
+
+    /// Path to the bridge log file: `.runtime/opencode2claude.log`.
+    pub fn bridge_log(&self) -> PathBuf {
+        self.runtime_dir().join(LOG_FILE_NAME)
     }
 
     /// Ensure `.runtime/` directory and all subdirectories exist.

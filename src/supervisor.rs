@@ -1,11 +1,13 @@
 //! Bridge supervisor — start, stop, and status commands.
 //!
-//! `start` spawns `serve` as a background child process, writes its PID.
+//! `start` spawns `serve` as a background child process, writes its PID,
+//! and redirects stdout/stderr to `.runtime/opencode2claude.log`.
 //! `stop` reads the PID, kills the process, cleans up the PID file.
 //! `status` checks if the PID file exists and the process is alive.
 
 use crate::pidfile::{PidFile, PidFileError};
 use crate::runtime::RuntimePaths;
+use std::fs::OpenOptions;
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
@@ -90,6 +92,14 @@ impl Supervisor {
         // Ensure runtime directories exist
         self.paths.ensure_dirs()?;
 
+        // Open log file for stdout/stderr (append mode)
+        let log_path = self.paths.bridge_log();
+        let log_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .map_err(|e| SupervisorError::SpawnFailed(format!("Cannot open log file: {}", e)))?;
+
         // Spawn bridge serve as child process (detached)
         let exe = std::env::current_exe()
             .map_err(|e| SupervisorError::SpawnFailed(format!("Cannot get binary path: {}", e)))?;
@@ -109,8 +119,10 @@ impl Supervisor {
                     setsid();
                     Ok(())
                 })
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
+                .stdout(log_file.try_clone().map_err(|e| {
+                    SupervisorError::SpawnFailed(format!("Cannot clone log fd: {}", e))
+                })?)
+                .stderr(log_file)
                 .spawn()
         }
         .map_err(|e| SupervisorError::SpawnFailed(format!("Cannot spawn serve: {}", e)))?;
