@@ -1,7 +1,23 @@
 #!/usr/bin/env bash
 
-# Robust startup script for Rust version of OpenCode2Claude Bridge
-# Designed to be sourced: source start.sh
+# Legacy compatibility wrapper for OpenCode2Claude Bridge
+#
+# DEPRECATED: This script is a compatibility wrapper. Prefer the CLI supervisor:
+#   opencode2claude start   → Start bridge daemon
+#   opencode2claude status  → Check status
+#   opencode2claude stop    → Stop bridge
+#   opencode2claude proxy status  → Proxy pool status
+#
+# This wrapper provides:
+#   1. Docker proxy pool bootstrap (if Docker available)
+#   2. Bridge daemon start via supervisor CLI
+#   3. Environment variable export (when sourced)
+#
+# Does NOT:
+#   - Require OpenCode CLI
+#   - Start opencode serve daemon
+#   - Compile the binary
+#   - Manage .bridge.pids directly
 
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
@@ -11,9 +27,7 @@ NC='\033[0m' # No Color
 
 # Configurations (Overridable via environment variables)
 BRIDGE_PORT=${BRIDGE_PORT:-4000}
-OPENCODE_PORT=${OPENCODE_PORT:-4096}
-OPENCODE_MODEL=${OPENCODE_MODEL:-"opencode/deepseek-v4-flash-free"}
-PID_FILE=".bridge.pids"
+OPENCODE_MODEL=${OPENCODE_MODEL:-""}
 
 # Determine if script is being sourced or run directly
 if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
@@ -22,96 +36,23 @@ else
     is_sourced=false
 fi
 
-echo -e "${BLUE}=== Starting OpenCode2Claude Setup ===${NC}"
+echo -e "${YELLOW}start.sh is a legacy compatibility wrapper. Prefer 'opencode2claude start'.${NC}"
+echo -e ""
 
-# Check for opencode CLI
-if ! command -v opencode &> /dev/null; then
-    echo -e "${RED}Error: 'opencode' CLI command not found in PATH.${NC}"
-    echo -e "Please install OpenCode first or make sure it is in your PATH."
-    if [ "$is_sourced" = true ]; then return 1; else exit 1; fi
-fi
-
-# Clean up stale pid file if it exists
-if [ -f "$PID_FILE" ]; then
-    echo -e "${YELLOW}Stale process file found. Cleaning up old processes...${NC}"
-    while read -r pid; do
-        if kill -0 "$pid" 2>/dev/null; then
-            echo -e "Terminating process: $pid"
-            kill "$pid" 2>/dev/null
-            sleep 0.3
-            # Force kill if still active
-            if kill -0 "$pid" 2>/dev/null; then
-                echo -e "Force killing process: $pid"
-                kill -9 "$pid" 2>/dev/null
-            fi
-        fi
-    done < "$PID_FILE"
-    rm -f "$PID_FILE"
-fi
-
-# Kill any rogue opencode2claude process holding the bridge port (not tracked in PID file)
-if nc -z 127.0.0.1 "$BRIDGE_PORT" 2>/dev/null; then
-    rogue_pid=$(lsof -ti :"$BRIDGE_PORT" 2>/dev/null)
-    if [ -n "$rogue_pid" ]; then
-        echo -e "${YELLOW}Found untracked process ($rogue_pid) on port ${BRIDGE_PORT}. Killing it...${NC}"
-        kill "$rogue_pid" 2>/dev/null
-        sleep 0.5
-        if kill -0 "$rogue_pid" 2>/dev/null; then
-            kill -9 "$rogue_pid" 2>/dev/null
-        fi
+# Check binary exists
+BINARY="./target/release/opencode2claude"
+if [ ! -f "$BINARY" ]; then
+    # Check if it's on PATH
+    if command -v opencode2claude &>/dev/null; then
+        BINARY="opencode2claude"
+    else
+        echo -e "${YELLOW}Binary not found at target/release/opencode2claude or in PATH.${NC}"
+        echo -e "Building..."
+        cargo build --release --locked || {
+            echo -e "${RED}Build failed.${NC}"
+            if [ "$is_sourced" = true ]; then return 1; else exit 1; fi
+        }
     fi
-
-    # Wait for port to be freed (up to 5 seconds)
-    echo -n "Waiting for port ${BRIDGE_PORT} to be freed..."
-    for i in {1..10}; do
-        if ! nc -z 127.0.0.1 "$BRIDGE_PORT" 2>/dev/null; then
-            echo -e " ${GREEN}OK${NC}"
-            break
-        fi
-        echo -n "."
-        sleep 0.5
-    done
-
-    # Final check — abort if port is still busy
-    if nc -z 127.0.0.1 "$BRIDGE_PORT" 2>/dev/null; then
-        echo -e "\n${RED}Error: Port ${BRIDGE_PORT} is still in use after cleanup. Cannot start.${NC}"
-        echo -e "Try manually: lsof -i :${BRIDGE_PORT} | kill"
-        if [ "$is_sourced" = true ]; then return 1; else exit 1; fi
-    fi
-fi
-
-# Compile Rust binary if missing or code is updated
-if [ ! -f "target/release/opencode2claude" ]; then
-    echo -e "${BLUE}Compiling Rust bridge in release mode... (first build may take a minute)${NC}"
-    cargo build --release
-    if [ $? -ne 0 ]; then
-        echo -e "${RED}Compilation failed.${NC}"
-        if [ "$is_sourced" = true ]; then return 1; else exit 1; fi
-    fi
-    echo -e "${GREEN}✓ Compilation completed successfully.${NC}"
-fi
-
-# Start opencode serve daemon if not already running
-if curl -s "http://127.0.0.1:${OPENCODE_PORT}/doc" > /dev/null; then
-    echo -e "${GREEN}✓ OpenCode Daemon is already listening on port ${OPENCODE_PORT}.${NC}"
-else
-    echo -e "${BLUE}Starting OpenCode serve daemon in background (port ${OPENCODE_PORT})...${NC}"
-    opencode serve --port "$OPENCODE_PORT" --hostname 127.0.0.1 > opencode_serve.log 2>&1 &
-    DAEMON_PID=$!
-    disown "$DAEMON_PID" 2>/dev/null
-    echo "$DAEMON_PID" >> "$PID_FILE"
-    echo -e "${GREEN}✓ Started OpenCode serve daemon (PID: $DAEMON_PID). Logs routed to opencode_serve.log${NC}"
-    
-    # Wait for startup
-    echo -n "Waiting for daemon to boot..."
-    for i in {1..10}; do
-        if curl -s "http://127.0.0.1:${OPENCODE_PORT}/doc" > /dev/null; then
-            echo -e " ${GREEN}Ready!${NC}"
-            break
-        fi
-        echo -n "."
-        sleep 0.5
-    done
 fi
 
 # ══════════════════════════════════════════════════════════════════════
@@ -358,12 +299,8 @@ if command -v docker &>/dev/null && docker info &>/dev/null; then
         VERIFY_PORTS=("${PROXY_PORTS[@]}")
     fi
 
-    echo -e "  Proxies in pool: ${YELLOW}$BRIDGE_PROXIES${NC}"
-    echo -e "  Requests will be dynamically load-balanced and failovered."
-elif [ -n "$BRIDGE_PROXIES" ]; then
-    echo -e "${GREEN}✓ Proxy Pool configuration detected via BRIDGE_PROXIES env var.${NC}"
-    echo -e "  Proxies in pool: ${YELLOW}$BRIDGE_PROXIES${NC}"
-    echo -e "  Requests will be balanced/failovered dynamically based on client API keys."
+    echo -e "  Proxies in pool (primary): ${YELLOW}$BRIDGE_PRIMARY_PROXIES${NC}"
+    echo -e "  Proxies in pool (standby): ${YELLOW}$BRIDGE_WARM_STANDBY_PROXIES${NC}"
 else
     if command -v warp-cli &> /dev/null; then
         warp_settings=$(warp-cli settings list 2>/dev/null || warp-cli settings 2>/dev/null)
@@ -376,23 +313,16 @@ else
     fi
 fi
 
-# Start the Rust bridge in the background
+# Start the Rust bridge via CLI supervisor
 echo -e "${BLUE}Starting Rust API Bridge on port ${BRIDGE_PORT} in background...${NC}"
-export BRIDGE_PORT
-export OPENCODE_PORT
-export OPENCODE_MODEL
-export BRIDGE_PROXIES
-
-nohup env ALL_PROXY="$BRIDGE_ALL_PROXY" NO_PROXY="$BRIDGE_NO_PROXY" ./target/release/opencode2claude > bridge.log 2>&1 &
+$BINARY start --port "$BRIDGE_PORT" ${OPENCODE_MODEL:+-m "$OPENCODE_MODEL"} > /dev/null 2>&1
 BRIDGE_PID=$!
-disown "$BRIDGE_PID" 2>/dev/null
-echo "$BRIDGE_PID" >> "$PID_FILE"
-echo -e "${GREEN}✓ Started Rust API Bridge (PID: $BRIDGE_PID). Logs routed to bridge.log${NC}"
+echo -e "${GREEN}✓ Started Rust API Bridge (PID: $BRIDGE_PID). Use 'opencode2claude status' to check.${NC}"
 
 # Export the variables so they are active in the sourced terminal
 export ANTHROPIC_API_KEY="opencode-bridge"
 export ANTHROPIC_BASE_URL="http://127.0.0.1:${BRIDGE_PORT}/v1"
-export OPENCODE_MODEL
+[ -n "$OPENCODE_MODEL" ] && export OPENCODE_MODEL
 
 echo -e "\n${GREEN}✓ Setup completed successfully!${NC}"
 if [ "$is_sourced" = true ]; then
@@ -407,11 +337,10 @@ else
     echo -e "export ANTHROPIC_BASE_URL=\"$ANTHROPIC_BASE_URL\""
     echo -e "export OPENCODE_MODEL=\"$OPENCODE_MODEL\"\n"
 fi
-echo -e "To stop the bridge and daemon later, run: ${YELLOW}./stop.sh${NC}"
+echo -e "To stop the bridge later, run: ${YELLOW}./stop.sh${NC} or ${YELLOW}opencode2claude stop${NC}"
 
 if [ "$is_sourced" = false ]; then
-    # If not sourced, wait to keep the foreground process alive
-    echo -e "\n${BLUE}Press Ctrl+C to terminate the bridge and the background daemon.${NC}"
-    trap 'echo -e "\n${YELLOW}Shutting down processes...${NC}"; kill $(cat '"$PID_FILE"') 2>/dev/null; rm -f '"$PID_FILE"'; exit 0' SIGINT SIGTERM
-    wait "$BRIDGE_PID"
+    echo -e "\n${BLUE}Press Ctrl+C to stop the bridge.${NC}"
+    trap 'echo -e "\n${YELLOW}Stopping bridge...${NC}"; '"$BINARY"' stop > /dev/null 2>&1; exit 0' SIGINT SIGTERM
+    wait
 fi
