@@ -19,8 +19,7 @@ jobs:
         run: ./scripts/verify.sh all --profile ci
 
       - name: Shellcheck
-        run: shellcheck scripts/verify.sh scripts/lib/*.sh scripts/phases/*.sh
-        continue-on-error: true
+        run: shellcheck scripts/verify.sh scripts/lib/*.sh scripts/phases/*.sh start.sh stop.sh install.sh
 
   release-build:
     runs-on: ubuntu-latest
