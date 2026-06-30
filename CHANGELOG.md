@@ -2,6 +2,20 @@
 
 All notable changes to opencode2claude will be documented in this file.
 
+## [0.3.1] — 2026-06-30
+
+### Security (High Blocker Fixes)
+
+- **Shell allowlist metacharacter bypass (C4)** — `has_shell_metacharacters()` rejects `; & | \` $ () > < \n` in `AllowList` mode. Commands like `git status; rm -rf /` now blocked with 15 new tests.
+- **Unknown shell policy grants Unrestricted (C3)** — `_` wildcard match now logs a warning and falls back to `ShellPolicy::Disabled` instead of silently enabling `Unrestricted`.
+- **Upstream error body leak (B7)** — All 5 client-facing paths sanitized to return status only. Full error body logged server-side.
+- `SystemTime::now().unwrap()` panic — replaced with `unwrap_or_default()` in msg_id generation.
+- `reqwest::Proxy::all().expect()` panic — replaced with match-based error handling.
+
+### Build
+
+- **ARM64 cross-compilation fix** — Switched reqwest from `native-tls` (OpenSSL) to `rustls-tls`. No OpenSSL sysroot needed for cross-compilation.
+
 ## [0.3.0] — 2026-06-30
 
 ### Added

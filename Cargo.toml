@@ -1,6 +1,6 @@
 [package]
 name = "opencode2claude"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 description = "Use Claude Code with any LLM (DeepSeek, GPT-4o, Gemini, Llama, etc.) — for free"
 license = "MIT"
@@ -17,7 +17,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio-stream = { version = "0.1", features = ["net"] }
 futures-util = "0.3"
-reqwest = { version = "0.11", features = ["json", "stream", "socks"] }
+reqwest = { version = "0.11", default-features = false, features = ["json", "stream", "socks", "rustls-tls"] }
 tower = { version = "0.4", features = ["limit", "buffer", "util"] }
 tower-http = { version = "0.5", features = ["trace", "limit"] }
 tracing = "0.1"
@@ -27,7 +27,7 @@ toml = "0.8"
 clap = { version = "4.4", features = ["derive"] }
 
 [dev-dependencies]
-reqwest = { version = "0.11", features = ["json", "stream", "socks"] }
+reqwest = { version = "0.11", default-features = false, features = ["json", "stream", "socks", "rustls-tls"] }
 tokio-test = "0.4"
 
 [profile.release]
