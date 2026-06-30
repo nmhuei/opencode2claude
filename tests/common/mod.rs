@@ -21,8 +21,8 @@ impl TestBridge {
         let mut cmd = tokio::process::Command::new("./target/release/opencode2claude");
         cmd.env("BRIDGE_PORT", port.to_string())
             .env("BRIDGE_HOST", "127.0.0.1")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit());
 
         // Apply defaults
         cmd.env_remove("BRIDGE_AUTH_TOKEN");

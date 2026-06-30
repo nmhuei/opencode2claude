@@ -8,7 +8,7 @@ use crate::state::AppState;
 use futures_util::StreamExt;
 
 use axum::extract::State;
-use axum::response::sse::{KeepAlive, Sse, Event};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
@@ -177,10 +177,13 @@ pub async fn handle_messages(
         if last_msg.role == "user" {
             if let ContentVal::Multiple(blocks) = &last_msg.content {
                 for block in blocks {
-                    if block.content_type == "tool_result" && block.tool_use_id.as_deref() == Some("toolu_local_shell") {
+                    if block.content_type == "tool_result"
+                        && block.tool_use_id.as_deref() == Some("toolu_local_shell")
+                    {
                         is_shell_result = true;
                         if let Some(ref content_val) = block.content {
-                            shell_result_text = opencode::mapper::tool_result_content_to_string(content_val);
+                            shell_result_text =
+                                opencode::mapper::tool_result_content_to_string(content_val);
                         }
                         break;
                     }
@@ -190,7 +193,10 @@ pub async fn handle_messages(
     }
 
     if is_shell_result {
-        info!("Received local shell execution result from client (length: {})", shell_result_text.len());
+        info!(
+            "Received local shell execution result from client (length: {})",
+            shell_result_text.len()
+        );
         if payload.stream {
             let (tx, rx) = tokio::sync::mpsc::channel(10);
             let builder = SseEventBuilder::new("msg_local_shell_result".to_string(), req_model);
@@ -203,9 +209,12 @@ pub async fn handle_messages(
                 let _ = tx.send(builder.message_delta()).await;
                 let _ = tx.send(builder.message_stop()).await;
             });
-            let response = Sse::new(tokio_stream::wrappers::ReceiverStream::new(rx).map(Ok::<_, std::convert::Infallible>))
-                .keep_alive(KeepAlive::default())
-                .into_response();
+            let response = Sse::new(
+                tokio_stream::wrappers::ReceiverStream::new(rx)
+                    .map(Ok::<_, std::convert::Infallible>),
+            )
+            .keep_alive(KeepAlive::default())
+            .into_response();
             let mut res = response;
             res.headers_mut().insert(
                 axum::http::header::HeaderName::from_static("x-accel-buffering"),
@@ -218,17 +227,27 @@ pub async fn handle_messages(
         }
     } else if !prompt.is_empty() && prompt.starts_with('!') {
         let shell_cmd = prompt.strip_prefix('!').unwrap().trim().to_string();
-        info!("Intercepted local shell command for delegation: '{}'", shell_cmd);
+        info!(
+            "Intercepted local shell command for delegation: '{}'",
+            shell_cmd
+        );
 
         let mut shell_tool_name = "bash".to_string();
         let mut param_name = "command".to_string();
-        
+
         if let Some(ref tools) = payload.tools {
             for tool in tools {
                 let name_lower = tool.name.to_lowercase();
-                if name_lower == "bash" || name_lower == "execute_command" || name_lower == "run_command" {
+                if name_lower == "bash"
+                    || name_lower == "execute_command"
+                    || name_lower == "run_command"
+                {
                     shell_tool_name = tool.name.clone();
-                    if let Some(properties) = tool.input_schema.get("properties").and_then(|p| p.as_object()) {
+                    if let Some(properties) = tool
+                        .input_schema
+                        .get("properties")
+                        .and_then(|p| p.as_object())
+                    {
                         if properties.contains_key("command") {
                             param_name = "command".to_string();
                         } else if properties.contains_key("cmd") {
@@ -251,10 +270,10 @@ pub async fn handle_messages(
             let p_name = param_name;
             let cmd = shell_cmd;
             let t_id = tool_use_id;
-            
+
             tokio::spawn(async move {
                 let _ = tx.send(builder.message_start()).await;
-                
+
                 let start_ev = Event::default()
                     .event("content_block_start")
                     .json_data(serde_json::json!({
@@ -315,9 +334,12 @@ pub async fn handle_messages(
                 let _ = tx.send(stop_ev).await;
             });
 
-            let response = Sse::new(tokio_stream::wrappers::ReceiverStream::new(rx).map(Ok::<_, std::convert::Infallible>))
-                .keep_alive(KeepAlive::default())
-                .into_response();
+            let response = Sse::new(
+                tokio_stream::wrappers::ReceiverStream::new(rx)
+                    .map(Ok::<_, std::convert::Infallible>),
+            )
+            .keep_alive(KeepAlive::default())
+            .into_response();
             let mut res = response;
             res.headers_mut().insert(
                 axum::http::header::HeaderName::from_static("x-accel-buffering"),

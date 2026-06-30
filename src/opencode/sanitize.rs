@@ -43,7 +43,7 @@ pub struct ParsedDsmlCall {
 }
 
 fn extract_attribute(tag_content: &str, attr_name: &str) -> String {
-    let pattern = format!("{}", attr_name);
+    let pattern = attr_name.to_string();
     let mut pos = 0;
     while let Some(match_pos) = tag_content[pos..].find(&pattern) {
         let abs_match_pos = pos + match_pos;
@@ -79,7 +79,9 @@ fn extract_attribute(tag_content: &str, attr_name: &str) -> String {
                     return rem_val[..end].to_string();
                 }
             } else {
-                let end = rem_val.find(|c: char| c.is_whitespace() || c == '>').unwrap_or(rem_val.len());
+                let end = rem_val
+                    .find(|c: char| c.is_whitespace() || c == '>')
+                    .unwrap_or(rem_val.len());
                 return rem_val[..end].to_string();
             }
         }
@@ -99,14 +101,14 @@ pub fn parse_dsml_tool_calls(text: &str) -> Vec<ParsedDsmlCall> {
             break;
         };
         let tag_open_content = &remaining[..tag_open_end];
-        
+
         let name = extract_attribute(tag_open_content, "name");
 
         let Some(invoke_end) = remaining.find("</｜DSML｜invoke>") else {
             break;
         };
         let invoke_body = &remaining[tag_open_end + 1..invoke_end];
-        
+
         let mut params = serde_json::Map::new();
         let mut p_pos = 0;
         while let Some(p_start) = invoke_body[p_pos..].find("<｜DSML｜parameter") {
@@ -116,20 +118,33 @@ pub fn parse_dsml_tool_calls(text: &str) -> Vec<ParsedDsmlCall> {
                 break;
             };
             let p_open_content = &p_rem[..p_open_end];
-            
+
             let p_name = extract_attribute(p_open_content, "name");
 
             let Some(p_close) = p_rem.find("</｜DSML｜parameter>") else {
                 break;
             };
             let p_val_str = p_rem[p_open_end + 1..p_close].trim();
-            
-            let val = if (p_val_str.starts_with('{') && p_val_str.ends_with('}'))
-                || (p_val_str.starts_with('[') && p_val_str.ends_with(']'))
+            let mut clean_val = p_val_str.to_string();
+            if clean_val.starts_with("```") {
+                if let Some(newline_pos) = clean_val.find('\n') {
+                    clean_val = clean_val[newline_pos + 1..].to_string();
+                } else {
+                    clean_val = clean_val[3..].to_string();
+                }
+                if clean_val.ends_with("```") {
+                    clean_val = clean_val[..clean_val.len() - 3].to_string();
+                }
+                clean_val = clean_val.trim().to_string();
+            }
+
+            let val = if (clean_val.starts_with('{') && clean_val.ends_with('}'))
+                || (clean_val.starts_with('[') && clean_val.ends_with(']'))
             {
-                serde_json::from_str(p_val_str).unwrap_or_else(|_| serde_json::Value::String(p_val_str.to_string()))
+                serde_json::from_str(&clean_val)
+                    .unwrap_or_else(|_| serde_json::Value::String(clean_val.clone()))
             } else {
-                serde_json::Value::String(p_val_str.to_string())
+                serde_json::Value::String(clean_val)
             };
 
             if !p_name.is_empty() {
@@ -159,11 +174,11 @@ pub fn extract_and_clean_dsml(text: &str) -> (String, Vec<ParsedDsmlCall>) {
     let mut cleaned_text = String::new();
     let mut calls = Vec::new();
     let mut last_pos = 0;
-    
+
     while let Some(start_pos) = text[last_pos..].find("<｜DSML｜tool_calls>") {
         let abs_start = last_pos + start_pos;
         cleaned_text.push_str(&text[last_pos..abs_start]);
-        
+
         let rem = &text[abs_start..];
         if let Some(end_pos) = rem.find("</｜DSML｜tool_calls>") {
             let abs_end = abs_start + end_pos + "</｜DSML｜tool_calls>".len();
@@ -179,7 +194,7 @@ pub fn extract_and_clean_dsml(text: &str) -> (String, Vec<ParsedDsmlCall>) {
         }
     }
     cleaned_text.push_str(&text[last_pos..]);
-    
+
     let final_cleaned = strip_system_tags(&cleaned_text);
     (final_cleaned, calls)
 }
@@ -210,22 +225,35 @@ mod tests {
         assert_eq!(extract_attribute(r#"name='bash'"#, "name"), "bash");
         assert_eq!(extract_attribute(r#"name = "bash""#, "name"), "bash");
         assert_eq!(extract_attribute(r#"name  =  'bash'"#, "name"), "bash");
-        assert_eq!(extract_attribute(r#"other="val" name="bash""#, "name"), "bash");
+        assert_eq!(
+            extract_attribute(r#"other="val" name="bash""#, "name"),
+            "bash"
+        );
     }
 
     #[test]
     fn test_parse_dsml_tool_calls() {
         let sample = r#"
             <｜DSML｜tool_calls>
-              <｜DSML｜invoke name="bash">
-                <｜DSML｜parameter name="command">git status</｜DSML｜parameter>
+              <｜DSML｜invoke name="Edit">
+                <｜DSML｜parameter name="path">scripts/lib/process.sh</｜DSML｜parameter>
+                <｜DSML｜parameter name="edits">
+```json
+[
+  {"oldText": "foo", "newText": "bar"}
+]
+```
+                </｜DSML｜parameter>
               </｜DSML｜invoke>
             </｜DSML｜tool_calls>
         "#;
         let res = parse_dsml_tool_calls(sample);
         assert_eq!(res.len(), 1);
-        assert_eq!(res[0].name, "bash");
-        assert_eq!(res[0].arguments["command"], "git status");
+        assert_eq!(res[0].name, "Edit");
+        assert_eq!(res[0].arguments["path"], "scripts/lib/process.sh");
+        assert_eq!(res[0].arguments["file"], "scripts/lib/process.sh");
+        assert_eq!(res[0].arguments["edits"][0]["oldText"], "foo");
+        assert_eq!(res[0].arguments["edits"][0]["newText"], "bar");
     }
 
     #[test]

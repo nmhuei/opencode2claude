@@ -7,7 +7,7 @@ use crate::error::BridgeError;
 use crate::handlers::{ContentVal, MessagesRequest};
 use crate::opencode::mapper::{extract_search_query, is_web_search_tool, map_anthropic_to_openai};
 use crate::opencode::retry::execute_with_warp_retry;
-use crate::opencode::sanitize::{strip_system_tags, parse_dsml_tool_calls, extract_and_clean_dsml};
+use crate::opencode::sanitize::{extract_and_clean_dsml, parse_dsml_tool_calls, strip_system_tags};
 use crate::opencode::search::SearchClient;
 use crate::opencode::types::*;
 use crate::sse::SseEventBuilder;
@@ -256,10 +256,22 @@ pub async fn forward_to_llm_sync(
         }
 
         let stop_reason = match choice.finish_reason.as_deref() {
-            Some("stop") => if has_tool_calls { "tool_use" } else { "end_turn" },
+            Some("stop") => {
+                if has_tool_calls {
+                    "tool_use"
+                } else {
+                    "end_turn"
+                }
+            }
             Some("tool_calls") => "tool_use",
             Some("length") => "max_tokens",
-            _ => if has_tool_calls { "tool_use" } else { "end_turn" },
+            _ => {
+                if has_tool_calls {
+                    "tool_use"
+                } else {
+                    "end_turn"
+                }
+            }
         };
 
         let usage = openai_resp.usage.unwrap_or(OpenAiUsage {
@@ -473,11 +485,14 @@ pub async fn forward_to_llm_stream(
                                 if let Some(content) = &choice.delta.content {
                                     if dsml_mode {
                                         dsml_stream_buffer.push_str(content);
-                                        if let Some(end_pos) = dsml_stream_buffer.find("</｜DSML｜tool_calls>") {
+                                        if let Some(end_pos) =
+                                            dsml_stream_buffer.find("</｜DSML｜tool_calls>")
+                                        {
                                             let end_idx = end_pos + "</｜DSML｜tool_calls>".len();
                                             let dsml_block = &dsml_stream_buffer[..end_idx];
-                                            let remaining = dsml_stream_buffer[end_idx..].to_string();
-                                            
+                                            let remaining =
+                                                dsml_stream_buffer[end_idx..].to_string();
+
                                             let calls = parse_dsml_tool_calls(dsml_block);
                                             for call in calls {
                                                 has_emitted_tool_use = true;
@@ -489,7 +504,7 @@ pub async fn forward_to_llm_stream(
                                                         .as_millis(),
                                                     next_content_block_index
                                                 );
-                                                
+
                                                 if let Some(idx) = thinking_block_index {
                                                     let stop_ev = Event::default()
                                                         .event("content_block_stop")
@@ -497,7 +512,9 @@ pub async fn forward_to_llm_stream(
                                                             "type": "content_block_stop",
                                                             "index": idx
                                                         }))
-                                                        .unwrap_or_else(|_| Event::default().data("{}"));
+                                                        .unwrap_or_else(|_| {
+                                                            Event::default().data("{}")
+                                                        });
                                                     let _ = tx.send(stop_ev).await;
                                                     thinking_block_index = None;
                                                 }
@@ -508,7 +525,9 @@ pub async fn forward_to_llm_stream(
                                                             "type": "content_block_stop",
                                                             "index": idx
                                                         }))
-                                                        .unwrap_or_else(|_| Event::default().data("{}"));
+                                                        .unwrap_or_else(|_| {
+                                                            Event::default().data("{}")
+                                                        });
                                                     let _ = tx.send(stop_ev).await;
                                                     text_block_index = None;
                                                 }
@@ -528,10 +547,14 @@ pub async fn forward_to_llm_stream(
                                                             "input": {}
                                                         }
                                                     }))
-                                                    .unwrap_or_else(|_| Event::default().data("{}"));
+                                                    .unwrap_or_else(|_| {
+                                                        Event::default().data("{}")
+                                                    });
                                                 let _ = tx.send(start_ev).await;
 
-                                                let args_str = serde_json::to_string(&call.arguments).unwrap_or_default();
+                                                let args_str =
+                                                    serde_json::to_string(&call.arguments)
+                                                        .unwrap_or_default();
                                                 let delta_ev = Event::default()
                                                     .event("content_block_delta")
                                                     .json_data(serde_json::json!({
@@ -542,7 +565,9 @@ pub async fn forward_to_llm_stream(
                                                             "partial_json": args_str
                                                         }
                                                     }))
-                                                    .unwrap_or_else(|_| Event::default().data("{}"));
+                                                    .unwrap_or_else(|_| {
+                                                        Event::default().data("{}")
+                                                    });
                                                 let _ = tx.send(delta_ev).await;
 
                                                 let stop_ev = Event::default()
@@ -551,13 +576,15 @@ pub async fn forward_to_llm_stream(
                                                         "type": "content_block_stop",
                                                         "index": call_idx
                                                     }))
-                                                    .unwrap_or_else(|_| Event::default().data("{}"));
+                                                    .unwrap_or_else(|_| {
+                                                        Event::default().data("{}")
+                                                    });
                                                 let _ = tx.send(stop_ev).await;
                                             }
-                                            
+
                                             dsml_stream_buffer = String::new();
                                             dsml_mode = false;
-                                            
+
                                             if !remaining.is_empty() {
                                                 text_stream_buffer.push_str(&remaining);
                                             }
@@ -565,12 +592,14 @@ pub async fn forward_to_llm_stream(
                                     } else {
                                         text_stream_buffer.push_str(content);
                                     }
-                                    
+
                                     if !dsml_mode {
-                                        if let Some(start_pos) = text_stream_buffer.find("<｜DSML｜tool_calls>") {
+                                        if let Some(start_pos) =
+                                            text_stream_buffer.find("<｜DSML｜tool_calls>")
+                                        {
                                             let text_to_yield = &text_stream_buffer[..start_pos];
                                             let remainder = &text_stream_buffer[start_pos..];
-                                            
+
                                             let cleaned = strip_system_tags(text_to_yield);
                                             if !cleaned.is_empty() {
                                                 accumulated_text.push_str(&cleaned);
@@ -582,11 +611,13 @@ pub async fn forward_to_llm_stream(
                                                                 "type": "content_block_stop",
                                                                 "index": idx
                                                             }))
-                                                            .unwrap_or_else(|_| Event::default().data("{}"));
+                                                            .unwrap_or_else(|_| {
+                                                                Event::default().data("{}")
+                                                            });
                                                         let _ = tx.send(stop_ev).await;
                                                         thinking_block_index = None;
                                                     }
-                                                    
+
                                                     let idx = match text_block_index {
                                                         Some(i) => i,
                                                         None => {
@@ -605,7 +636,7 @@ pub async fn forward_to_llm_stream(
                                                             i
                                                         }
                                                     };
-                                                    
+
                                                     let delta_ev = Event::default()
                                                         .event("content_block_delta")
                                                         .json_data(serde_json::json!({
@@ -617,12 +648,13 @@ pub async fn forward_to_llm_stream(
                                                     let _ = tx.send(delta_ev).await;
                                                 }
                                             }
-                                            
+
                                             dsml_mode = true;
                                             dsml_stream_buffer = remainder.to_string();
                                             text_stream_buffer = String::new();
                                         } else {
-                                            let (to_yield, pending) = split_pending_text(&text_stream_buffer);
+                                            let (to_yield, pending) =
+                                                split_pending_text(&text_stream_buffer);
                                             let cleaned = strip_system_tags(&to_yield);
                                             if !cleaned.is_empty() {
                                                 accumulated_text.push_str(&cleaned);
@@ -634,11 +666,13 @@ pub async fn forward_to_llm_stream(
                                                                 "type": "content_block_stop",
                                                                 "index": idx
                                                             }))
-                                                            .unwrap_or_else(|_| Event::default().data("{}"));
+                                                            .unwrap_or_else(|_| {
+                                                                Event::default().data("{}")
+                                                            });
                                                         let _ = tx.send(stop_ev).await;
                                                         thinking_block_index = None;
                                                     }
-                                                    
+
                                                     let idx = match text_block_index {
                                                         Some(i) => i,
                                                         None => {
@@ -657,7 +691,7 @@ pub async fn forward_to_llm_stream(
                                                             i
                                                         }
                                                     };
-                                                    
+
                                                     let delta_ev = Event::default()
                                                         .event("content_block_delta")
                                                         .json_data(serde_json::json!({
@@ -873,7 +907,7 @@ pub async fn forward_to_llm_stream(
                         let _ = tx.send(stop_ev).await;
                         thinking_block_index = None;
                     }
-                    
+
                     let idx = match text_block_index {
                         Some(i) => i,
                         None => {
@@ -892,7 +926,7 @@ pub async fn forward_to_llm_stream(
                             i
                         }
                     };
-                    
+
                     let delta_ev = Event::default()
                         .event("content_block_delta")
                         .json_data(serde_json::json!({
@@ -918,7 +952,7 @@ pub async fn forward_to_llm_stream(
                             .as_millis(),
                         next_content_block_index
                     );
-                    
+
                     if let Some(idx) = thinking_block_index {
                         let stop_ev = Event::default()
                             .event("content_block_stop")
@@ -1071,9 +1105,21 @@ mod tests {
 
     #[test]
     fn test_split_pending_text() {
-        assert_eq!(split_pending_text("hello<"), ("hello".to_string(), "<".to_string()));
-        assert_eq!(split_pending_text("hello<｜"), ("hello".to_string(), "<｜".to_string()));
-        assert_eq!(split_pending_text("hello<｜DSML｜tool_calls>"), ("hello".to_string(), "<｜DSML｜tool_calls>".to_string()));
-        assert_eq!(split_pending_text("hello"), ("hello".to_string(), "".to_string()));
+        assert_eq!(
+            split_pending_text("hello<"),
+            ("hello".to_string(), "<".to_string())
+        );
+        assert_eq!(
+            split_pending_text("hello<｜"),
+            ("hello".to_string(), "<｜".to_string())
+        );
+        assert_eq!(
+            split_pending_text("hello<｜DSML｜tool_calls>"),
+            ("hello".to_string(), "<｜DSML｜tool_calls>".to_string())
+        );
+        assert_eq!(
+            split_pending_text("hello"),
+            ("hello".to_string(), "".to_string())
+        );
     }
 }

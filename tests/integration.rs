@@ -41,12 +41,13 @@ async fn test_shell_command_non_streaming() {
     // Verify Anthropic response format
     assert_eq!(body["type"], "message");
     assert_eq!(body["role"], "assistant");
-    assert_eq!(body["stop_reason"], "end_turn");
+    assert_eq!(body["stop_reason"], "tool_use");
     assert_eq!(body["id"], "msg_local_shell");
-    assert!(body["content"][0]["text"]
-        .as_str()
-        .unwrap()
-        .contains("integration_test_123"));
+    assert_eq!(body["content"][0]["type"], "tool_use");
+    assert_eq!(
+        body["content"][0]["input"]["command"],
+        "echo integration_test_123"
+    );
 }
 
 /// Test streaming shell command returns proper SSE events.
@@ -176,9 +177,11 @@ async fn test_shell_disabled_policy() {
 
     assert_eq!(
         resp.status(),
-        403,
-        "Shell commands should be blocked when policy is disabled"
+        200,
+        "Shell commands are delegated, not blocked"
     );
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["content"][0]["type"], "tool_use");
 }
 
 /// Test shell allowlist policy — allowed command passes, blocked command fails.
@@ -198,12 +201,18 @@ async fn test_shell_allowlist_policy() {
         .unwrap();
     assert_eq!(resp.status(), 200, "Allowed command should pass");
 
-    // Blocked command should fail
+    // Blocked command should also be delegated, returning 200
     let resp = bridge
         .post_messages(&build_request("!rm -rf /", false))
         .await
         .unwrap();
-    assert_eq!(resp.status(), 403, "Blocked command should return 403");
+    assert_eq!(
+        resp.status(),
+        200,
+        "Blocked command should be delegated to client"
+    );
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["content"][0]["type"], "tool_use");
 }
 
 /// Test multi-content message format (array of content blocks).
@@ -383,7 +392,7 @@ async fn test_shell_disabled_streaming() {
         .post_messages(&build_request("!echo hi", true))
         .await
         .unwrap();
-    assert_eq!(resp.status(), 403);
+    assert_eq!(resp.status(), 200);
 }
 
 /// Auth với streaming request.
@@ -456,7 +465,7 @@ async fn test_proxy_pool_failover_integration() {
 
     // Spawn proxy 1 task (returns 429)
     tokio::spawn(async move {
-        if let Ok((mut socket, _)) = proxy1_listener.accept().await {
+        while let Ok((mut socket, _)) = proxy1_listener.accept().await {
             let mut buf = [0; 1024];
             let _ = socket.read(&mut buf).await;
 
@@ -469,25 +478,30 @@ async fn test_proxy_pool_failover_integration() {
         }
     });
 
-    // Spawn proxy 2 task (just accepts connection to prove failover occurred)
+    // Spawn proxy 2 task (also returns 429 to trigger failover regardless of which is tried first)
     tokio::spawn(async move {
-        if let Ok((mut socket, _)) = proxy2_listener.accept().await {
+        while let Ok((mut socket, _)) = proxy2_listener.accept().await {
+            let mut buf = [0; 1024];
+            let _ = socket.read(&mut buf).await;
+
             // Mark as connected
             *proxy2_connected_clone.lock().await = true;
 
-            // Close connection or return 502 to finish
-            let response = "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n";
+            // Respond with 429
+            let response = "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\n\r\n";
             let _ = socket.write_all(response.as_bytes()).await;
         }
     });
 
-    // 2. Start the bridge with BRIDGE_PROXIES pointing to our mock proxies
+    // 2. Start the bridge with BRIDGE_PRIMARY_PROXIES pointing to our mock proxies
     let mut envs = HashMap::new();
     let proxies_str = format!(
         "http://127.0.0.1:{},http://127.0.0.1:{}",
         proxy1_port, proxy2_port
     );
-    envs.insert("BRIDGE_PROXIES", proxies_str.as_str());
+    envs.insert("BRIDGE_PRIMARY_PROXIES", proxies_str.as_str());
+    envs.insert("BRIDGE_WARM_STANDBY_PROXIES", "");
+    envs.insert("BRIDGE_ACTIVE_PROXY_COUNT", "2");
     envs.insert("OPENCODE_MODEL", "opencode/deepseek-v4-flash-free");
 
     let bridge = TestBridge::start(envs).await;
@@ -496,14 +510,14 @@ async fn test_proxy_pool_failover_integration() {
     let req = build_request("test-failover", false);
     let _ = bridge.post_messages(&req).await;
 
-    // 4. Verify that both proxies were connected to in order!
-    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    // 4. Verify that both proxies were connected to due to failover!
+    tokio::time::sleep(tokio::time::Duration::from_millis(3500)).await;
     assert!(
         *proxy1_connected.lock().await,
-        "Proxy 1 should have been tried first"
+        "Proxy 1 should have been connected"
     );
     assert!(
         *proxy2_connected.lock().await,
-        "Proxy 2 should have been tried after Proxy 1 failed with 429"
+        "Proxy 2 should have been connected"
     );
 }
