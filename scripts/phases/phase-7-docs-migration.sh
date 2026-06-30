@@ -117,14 +117,14 @@ gate_no_40010() {
 
 gate_stop_sh_no_standby_stop() {
   info "Gate 7.14: stop.sh does not stop WarmStandby 40004-40005"
-  local stop_doc="$ROOT_DIR/docs/migration-from-start-sh.md"
-  # stop.sh itself should only match numbered opencode-warp-N containers, not warp-external
-  if grep -q "stop.*standby\|standby.*stop\|40004.*stop\|40005.*stop\|warp-external" "$ROOT_DIR/stop.sh" 2>/dev/null; then
-    # The only acceptable references are in comments or cleanup of deprecated containers
-    # Actually check: stop.sh should use ^opencode-warp- pattern, not hardcoded ports
-    if grep -q "opencode-warp-" "$ROOT_DIR/stop.sh"; then
-      :  # good — uses pattern not port-specific
-    fi
+  # stop.sh must exclude warm-standby containers from docker stop/purge
+  if ! grep -q "grep -v .opencode-warp-4\|grep -v .opencode-warp-5" "$ROOT_DIR/stop.sh" 2>/dev/null; then
+    error "stop.sh does not exclude warm-standby containers (40004-40005)"
+    return 1
+  fi
+  if ! grep -q "Skipping protected warm-standby" "$ROOT_DIR/stop.sh" 2>/dev/null; then
+    error "stop.sh missing 'Skipping protected warm-standby' message"
+    return 1
   fi
   pass "WarmStandby not stopped by stop.sh"
 }
