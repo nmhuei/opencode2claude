@@ -58,8 +58,6 @@ fi
 # ══════════════════════════════════════════════════════════════════════
 # Auto-detect Cloudflare WARP proxy settings or spin up Docker proxy pool
 # ══════════════════════════════════════════════════════════════════════
-BRIDGE_ALL_PROXY=""
-BRIDGE_NO_PROXY=""
 
 if command -v docker &>/dev/null && docker info &>/dev/null; then
     echo -e "${GREEN}✓ Docker is running. Automating SOCKS5 proxy pool setup for multi-agent support...${NC}"
@@ -212,7 +210,7 @@ if command -v docker &>/dev/null && docker info &>/dev/null; then
         for i in "${!VERIFY_PORTS[@]}"; do
             (
                 port=${VERIFY_PORTS[$i]}
-                for attempt in $(seq 1 "$max_attempts"); do
+                for _ in $(seq 1 "$max_attempts"); do
                     if curl -s -o /dev/null -w '' -x "socks5h://127.0.0.1:$port" --max-time 5 https://cloudflare.com/cdn-cgi/trace 2>/dev/null; then
                         echo "OK" > "${verify_dir}/port_${port}"
                         exit 0
@@ -306,8 +304,6 @@ else
         warp_settings=$(warp-cli settings list 2>/dev/null || warp-cli settings 2>/dev/null)
         if echo "$warp_settings" | grep -q "WarpProxy"; then
             echo -e "${GREEN}✓ Cloudflare WARP Proxy support detected on host.${NC}"
-            BRIDGE_ALL_PROXY="socks5://127.0.0.1:40000"
-            BRIDGE_NO_PROXY="localhost,127.0.0.1"
             echo -e "  Routing bridge traffic via ${YELLOW}socks5://127.0.0.1:40000${NC} (Other terminal commands remain unaffected)"
         fi
     fi

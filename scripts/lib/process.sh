@@ -8,7 +8,7 @@ pick_free_port() {
   local port
   for port in {49152..65535}; do
     # Use bash's built-in /dev/tcp to check if port is listening
-    if ! (: </dev/tcp/127.0.0.1/$port) 2>/dev/null; then
+    if ! (: </dev/tcp/127.0.0.1/"$port") 2>/dev/null; then
       echo "$port"
       return 0
     fi

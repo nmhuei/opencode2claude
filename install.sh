@@ -40,11 +40,11 @@ else
 fi
 
 # ── Logging helpers ───────────────────────────────────────────────────
-info()   { printf "${BLUE}::${NC} %s\n" "$*"; }
-ok()     { printf "${GREEN}OK${NC}  %s\n" "$*"; }
-warn()   { printf "${YELLOW}WARN${NC} %s\n" "$*"; }
-err()    { printf "${RED}ERR${NC}  %s\n" "$*"; }
-header() { printf "${BOLD}%s${NC}\n" "$*"; }
+info()   { printf '%s::%s %s\n' "${BLUE}" "${NC}" "$*"; }
+ok()     { printf '%sOK%s  %s\n' "${GREEN}" "${NC}" "$*"; }
+warn()   { printf '%sWARN%s %s\n' "${YELLOW}" "${NC}" "$*"; }
+err()    { printf '%sERR%s  %s\n' "${RED}" "${NC}" "$*"; }
+header() { printf '%s%s%s\n' "${BOLD}" "$*" "${NC}"; }
 
 # ── Cleanup handler ───────────────────────────────────────────────────
 cleanup() {
@@ -173,7 +173,7 @@ choose_install_dir() {
         return
     fi
 
-    local home="${HOME:-$(echo ~)}"
+    local home="${HOME:-~}"
 
     # 2. /usr/local/bin — with sudo when needed
     if [ -d /usr/local/bin ]; then
@@ -262,18 +262,16 @@ check_opencode() {
         ok "OpenCode CLI found: $(opencode --version 2>/dev/null | head -1)"
     else
         warn "OpenCode CLI is not installed — optional for monitoring (the bridge works without it)."
-        echo ""
-        printf "  To install for health monitoring:\n"
-        echo ""
-        printf "  ${CYAN}curl -fsSL https://docs.opencode.ai/install.sh | sh${NC}\n"
-        echo ""
-        printf "  ${BOLD}Alternative methods:${NC}\n"
-        echo ""
-        printf "  • npm:    ${CYAN}npm install -g @opencode/cli${NC}\n"
-        printf "  • brew:   ${CYAN}brew install opencode-ai/cli/opencode${NC}\n"
-        printf "  • cargo:  ${CYAN}cargo install opencode-cli${NC}\n"
-        echo ""
-        printf "  See: https://github.com/opencode-ai/opencode\n"
+        printf '%s\n' ""
+        printf '  %s%s%s\n' "${CYAN}" "curl -fsSL https://docs.opencode.ai/install.sh | sh" "${NC}"
+        printf '%s\n' ""
+        printf '  %s%s%s\n' "${BOLD}" "Alternative methods:" "${NC}"
+        printf '%s\n' ""
+        printf '  %s%s  %s%s%s\n' "• npm:" "${CYAN}" "npm install -g @opencode/cli" "${NC}"
+        printf '  %s%s  %s%s%s\n' "• brew:" "${CYAN}" "brew install opencode-ai/cli/opencode" "${NC}"
+        printf '  %s%s  %s%s%s\n' "• cargo:" "${CYAN}" "cargo install opencode-cli" "${NC}"
+        printf '%s\n' ""
+        printf '  %s\n' "See: https://github.com/opencode-ai/opencode"
     fi
 }
 
@@ -286,34 +284,34 @@ check_warp() {
         reg_status="$(warp-cli registration show 2>/dev/null || true)"
         if echo "$reg_status" | grep -qi "error\|not registered\|no registration"; then
             warn "WARP CLI found but not registered."
-            echo ""
-            printf "  ${BOLD}Register and start WARP:${NC}\n"
-            printf "  ${CYAN}warp-cli registration new${NC}\n"
-            printf "  ${CYAN}warp-cli mode proxy${NC}\n"
-            printf "  ${CYAN}warp-cli connect${NC}\n"
-            echo ""
-            printf "  ${BOLD}Then verify:${NC}\n"
-            printf "  ${CYAN}warp-cli status${NC}\n"
+            printf '%s\n' ""
+            printf '  %s%s%s\n' "${BOLD}" "Register and start WARP:" "${NC}"
+            printf '  %s%s%s\n' "${CYAN}" "warp-cli registration new" "${NC}"
+            printf '  %s%s%s\n' "${CYAN}" "warp-cli mode proxy" "${NC}"
+            printf '  %s%s%s\n' "${CYAN}" "warp-cli connect" "${NC}"
+            printf '%s\n' ""
+            printf '  %s%s%s\n' "${BOLD}" "Then verify:" "${NC}"
+            printf '  %s%s%s\n' "${CYAN}" "warp-cli status" "${NC}"
         else
             ok "Cloudflare WARP CLI found — IP rotation enabled."
         fi
     else
-        echo ""
+        printf '%s\n' ""
         info "Tip: Install Cloudflare WARP for automatic IP rotation on rate-limit retry."
-        echo ""
-        printf "  ${BOLD}1. Install WARP:${NC}\n"
-        printf "  ${CYAN}curl -fsSL https://pkg.cloudflareclient.com/install.sh | sh${NC}\n"
-        echo ""
-        printf "  ${BOLD}2. Register and start (first time only):${NC}\n"
-        printf "  ${CYAN}warp-cli registration new${NC}\n"
-        printf "  ${CYAN}warp-cli mode proxy${NC}\n"
-        printf "  ${CYAN}warp-cli connect${NC}\n"
-        echo ""
-        printf "  ${BOLD}3. Verify:${NC}\n"
-        printf "  ${CYAN}warp-cli status${NC}\n"
-        echo ""
-        printf "  ${BOLD}Docs:${NC}\n"
-        printf "  https://developers.cloudflare.com/warp-client/get-started/linux/\n"
+        printf '%s\n' ""
+        printf '  %s%s%s\n' "${BOLD}" "1. Install WARP:" "${NC}"
+        printf '  %s%s%s\n' "${CYAN}" "curl -fsSL https://pkg.cloudflareclient.com/install.sh | sh" "${NC}"
+        printf '%s\n' ""
+        printf '  %s%s%s\n' "${BOLD}" "2. Register and start (first time only):" "${NC}"
+        printf '  %s%s%s\n' "${CYAN}" "warp-cli registration new" "${NC}"
+        printf '  %s%s%s\n' "${CYAN}" "warp-cli mode proxy" "${NC}"
+        printf '  %s%s%s\n' "${CYAN}" "warp-cli connect" "${NC}"
+        printf '%s\n' ""
+        printf '  %s%s%s\n' "${BOLD}" "3. Verify:" "${NC}"
+        printf '  %s%s%s\n' "${CYAN}" "warp-cli status" "${NC}"
+        printf '%s\n' ""
+        printf '  %s%s%s\n' "${BOLD}" "Docs:" "${NC}"
+        printf '  %s\n' "https://developers.cloudflare.com/warp-client/get-started/linux/"
     fi
 }
 
@@ -321,57 +319,57 @@ check_warp() {
 #  Welcome message
 # ══════════════════════════════════════════════════════════════════════
 print_welcome() {
-    echo ""
+    printf '%s\n' ""
     header "================================================"
     header "  opencode2claude installed!"
     header "================================================"
-    echo ""
-    printf "  ${BOLD}Quick start${NC}\n"
-    echo ""
+    printf '%s\n' ""
+    printf '  %s%s%s\n' "${BOLD}" "Quick start" "${NC}"
+    printf '%s\n' ""
 
     if command -v opencode >/dev/null 2>&1; then
-        printf "  1. Start the bridge:\n"
-        printf "     ${CYAN}opencode2claude${NC}\n"
-        echo ""
-        printf "  2. Use Claude Code with any LLM:\n"
-        printf "     ${CYAN}claude${NC}\n"
-        echo ""
-        printf "  3. Use a specific model:\n"
-        printf "     ${CYAN}OPENCODE_MODEL=\"openai/gpt-4o\" opencode2claude${NC}\n"
+        printf '%s\n' "  1. Start the bridge:"
+        printf '     %s%s%s\n' "${CYAN}" "opencode2claude" "${NC}"
+        printf '%s\n' ""
+        printf '%s\n' "  2. Use Claude Code with any LLM:"
+        printf '     %s%s%s\n' "${CYAN}" "claude" "${NC}"
+        printf '%s\n' ""
+        printf '%s\n' "  3. Use a specific model:"
+        printf '     %s%s%s\n' "${CYAN}" "OPENCODE_MODEL=\"openai/gpt-4o\" opencode2claude" "${NC}"
     else
-        printf "  1. Install OpenCode first, then start the bridge:\n"
-        printf "     ${CYAN}curl -fsSL https://docs.opencode.ai/install.sh | sh${NC}\n"
-        printf "     ${CYAN}opencode2claude${NC}\n"
-        echo ""
-        printf "  2. Use Claude Code with any LLM:\n"
-        printf "     ${CYAN}claude${NC}\n"
+        printf '%s\n' "  1. Install OpenCode first, then start the bridge:"
+        printf '     %s%s%s\n' "${CYAN}" "curl -fsSL https://docs.opencode.ai/install.sh | sh" "${NC}"
+        printf '     %s%s%s\n' "${CYAN}" "opencode2claude" "${NC}"
+        printf '%s\n' ""
+        printf '%s\n' "  2. Use Claude Code with any LLM:"
+        printf '     %s%s%s\n' "${CYAN}" "claude" "${NC}"
     fi
-    echo ""
-    printf "  ${BOLD}Resources${NC}\n"
-    printf "    ${GITHUB}\n"
-    printf "    opencode2claude --help\n"
-    echo ""
+    printf '%s\n' ""
+    printf '  %s%s%s\n' "${BOLD}" "Resources" "${NC}"
+    printf '    %s\n' "${GITHUB}"
+    printf '    %s\n' "opencode2claude --help"
+    printf '%s\n' ""
 }
 
 # ══════════════════════════════════════════════════════════════════════
 #  Fallback suggestions
 # ══════════════════════════════════════════════════════════════════════
 suggest_fallback() {
-    echo ""
+    printf '%s\n' ""
     err "Binary download failed."
-    echo ""
-    printf "  ${BOLD}Try one of these alternatives:${NC}\n"
-    echo ""
-    printf "  1. Install via Cargo (requires Rust toolchain):\n"
-    printf "     ${CYAN}cargo install ${PROJECT}${NC}\n"
-    echo ""
-    printf "  2. Run via Docker:\n"
-    printf "     ${CYAN}docker pull ghcr.io/${REPO}${NC}\n"
-    echo ""
-    printf "  3. Build from source:\n"
-    printf "     ${CYAN}git clone ${GITHUB}.git${NC}\n"
-    printf "     ${CYAN}cd ${PROJECT} && cargo build --release${NC}\n"
-    echo ""
+    printf '%s\n' ""
+    printf '  %s%s%s\n' "${BOLD}" "Try one of these alternatives:" "${NC}"
+    printf '%s\n' ""
+    printf '%s\n' "  1. Install via Cargo (requires Rust toolchain):"
+    printf '     %s%s%s\n' "${CYAN}" "cargo install ${PROJECT}" "${NC}"
+    printf '%s\n' ""
+    printf '%s\n' "  2. Run via Docker:"
+    printf '     %s%s%s\n' "${CYAN}" "docker pull ghcr.io/${REPO}" "${NC}"
+    printf '%s\n' ""
+    printf '%s\n' "  3. Build from source:"
+    printf '     %s%s%s\n' "${CYAN}" "git clone ${GITHUB}.git" "${NC}"
+    printf '     %s%s%s\n' "${CYAN}" "cd ${PROJECT} && cargo build --release" "${NC}"
+    printf '%s\n' ""
 }
 
 # ══════════════════════════════════════════════════════════════════════
@@ -391,7 +389,7 @@ main() {
         latest_tag="$(fetch_latest_version)"
 
         if [ -n "$latest_tag" ]; then
-            printf "  Latest release: ${BOLD}%s${NC}\n" "$latest_tag"
+            printf '  Latest release: %s%s%s\n' "${BOLD}" "$latest_tag" "${NC}"
 
             # Strip prefix / suffix noise for simple string comparison
             installed_ver="$(printf '%s' "$existing" | sed 's/^[^0-9]*//' | sed 's/[^0-9.]*$//')"

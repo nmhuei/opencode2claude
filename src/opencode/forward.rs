@@ -7,7 +7,7 @@ use crate::error::BridgeError;
 use crate::handlers::{ContentVal, MessagesRequest};
 use crate::opencode::mapper::{extract_search_query, is_web_search_tool, map_anthropic_to_openai};
 use crate::opencode::retry::execute_with_warp_retry;
-use crate::opencode::sanitize::strip_system_tags;
+use crate::opencode::sanitize::{strip_system_tags, parse_dsml_tool_calls, extract_and_clean_dsml};
 use crate::opencode::search::SearchClient;
 use crate::opencode::types::*;
 use crate::sse::SseEventBuilder;
@@ -79,13 +79,22 @@ pub async fn forward_to_llm_sync(
             BridgeError::UpstreamError("No choices returned from upstream".to_string())
         })?;
 
-        // Check if there is an intercepted search tool call
+        // Extract DSML tool calls and clean the message content
+        let mut dsml_tool_calls = Vec::new();
+        let mut cleaned_message_content = choice.message.content.clone();
         let mut has_search = false;
         let mut search_tc_id = String::new();
         let mut search_tc_name = String::new();
         let mut search_tc_input = serde_json::Value::Null;
         let mut search_query = String::new();
 
+        if let Some(text) = &choice.message.content {
+            let (cleaned, calls) = extract_and_clean_dsml(text);
+            cleaned_message_content = Some(cleaned);
+            dsml_tool_calls = calls;
+        }
+
+        // Check if there is an intercepted search tool call (native first, then DSML)
         if let Some(tool_calls) = &choice.message.tool_calls {
             for tc in tool_calls {
                 if is_web_search_tool(&tc.function.name) {
@@ -96,6 +105,27 @@ pub async fn forward_to_llm_sync(
                         .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
                     search_tc_input = input_val;
                     search_query = extract_search_query(&tc.function.arguments);
+                    break;
+                }
+            }
+        }
+
+        if !has_search {
+            for (i, call) in dsml_tool_calls.iter().enumerate() {
+                if is_web_search_tool(&call.name) {
+                    has_search = true;
+                    search_tc_id = format!(
+                        "toolu_dsml_{}_{}",
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis(),
+                        i
+                    );
+                    search_tc_name = call.name.clone();
+                    search_tc_input = call.arguments.clone();
+                    let args_str = serde_json::to_string(&call.arguments).unwrap_or_default();
+                    search_query = extract_search_query(&args_str);
                     break;
                 }
             }
@@ -122,7 +152,7 @@ pub async fn forward_to_llm_sync(
                     );
                 }
             }
-            if let Some(content) = &choice.message.content {
+            if let Some(content) = &cleaned_message_content {
                 let cleaned = strip_system_tags(content);
                 if !cleaned.is_empty() {
                     assistant_content.push(
@@ -180,7 +210,7 @@ pub async fn forward_to_llm_sync(
         }
 
         // 2. Text block
-        if let Some(text) = &choice.message.content {
+        if let Some(text) = &cleaned_message_content {
             let cleaned = strip_system_tags(text);
             if !cleaned.is_empty() {
                 content_blocks.push(serde_json::json!({
@@ -190,9 +220,11 @@ pub async fn forward_to_llm_sync(
             }
         }
 
-        // 3. Tool calls
+        // 3. Native Tool calls
+        let mut has_tool_calls = false;
         if let Some(tool_calls) = &choice.message.tool_calls {
             for tc in tool_calls {
+                has_tool_calls = true;
                 let input_val: serde_json::Value = serde_json::from_str(&tc.function.arguments)
                     .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
                 content_blocks.push(serde_json::json!({
@@ -204,11 +236,30 @@ pub async fn forward_to_llm_sync(
             }
         }
 
+        // 4. DSML Tool calls
+        for (i, call) in dsml_tool_calls.into_iter().enumerate() {
+            has_tool_calls = true;
+            let tool_id = format!(
+                "toolu_dsml_{}_{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis(),
+                i
+            );
+            content_blocks.push(serde_json::json!({
+                "type": "tool_use",
+                "id": tool_id,
+                "name": call.name,
+                "input": call.arguments
+            }));
+        }
+
         let stop_reason = match choice.finish_reason.as_deref() {
-            Some("stop") => "end_turn",
+            Some("stop") => if has_tool_calls { "tool_use" } else { "end_turn" },
             Some("tool_calls") => "tool_use",
             Some("length") => "max_tokens",
-            _ => "end_turn",
+            _ => if has_tool_calls { "tool_use" } else { "end_turn" },
         };
 
         let usage = openai_resp.usage.unwrap_or(OpenAiUsage {
@@ -340,6 +391,10 @@ pub async fn forward_to_llm_stream(
             let mut accumulated_text = String::new();
 
             let mut stream_failed = false;
+            let mut has_emitted_tool_use = false;
+            let mut dsml_mode = false;
+            let mut dsml_stream_buffer = String::new();
+            let mut text_stream_buffer = String::new();
 
             while let Some(chunk_res) = bytes_stream.next().await {
                 let chunk = match chunk_res {
@@ -416,53 +471,205 @@ pub async fn forward_to_llm_stream(
 
                                 // 2. Process content (text delta)
                                 if let Some(content) = &choice.delta.content {
-                                    let cleaned = strip_system_tags(content);
-                                    if !cleaned.is_empty() {
-                                        accumulated_text.push_str(&cleaned);
-                                        if !intercepting_search {
-                                            // Close thinking block if open
-                                            if let Some(idx) = thinking_block_index {
+                                    if dsml_mode {
+                                        dsml_stream_buffer.push_str(content);
+                                        if let Some(end_pos) = dsml_stream_buffer.find("</｜DSML｜tool_calls>") {
+                                            let end_idx = end_pos + "</｜DSML｜tool_calls>".len();
+                                            let dsml_block = &dsml_stream_buffer[..end_idx];
+                                            let remaining = dsml_stream_buffer[end_idx..].to_string();
+                                            
+                                            let calls = parse_dsml_tool_calls(dsml_block);
+                                            for call in calls {
+                                                has_emitted_tool_use = true;
+                                                let tool_id = format!(
+                                                    "toolu_dsml_{}_{}",
+                                                    std::time::SystemTime::now()
+                                                        .duration_since(std::time::UNIX_EPOCH)
+                                                        .unwrap_or_default()
+                                                        .as_millis(),
+                                                    next_content_block_index
+                                                );
+                                                
+                                                if let Some(idx) = thinking_block_index {
+                                                    let stop_ev = Event::default()
+                                                        .event("content_block_stop")
+                                                        .json_data(serde_json::json!({
+                                                            "type": "content_block_stop",
+                                                            "index": idx
+                                                        }))
+                                                        .unwrap_or_else(|_| Event::default().data("{}"));
+                                                    let _ = tx.send(stop_ev).await;
+                                                    thinking_block_index = None;
+                                                }
+                                                if let Some(idx) = text_block_index {
+                                                    let stop_ev = Event::default()
+                                                        .event("content_block_stop")
+                                                        .json_data(serde_json::json!({
+                                                            "type": "content_block_stop",
+                                                            "index": idx
+                                                        }))
+                                                        .unwrap_or_else(|_| Event::default().data("{}"));
+                                                    let _ = tx.send(stop_ev).await;
+                                                    text_block_index = None;
+                                                }
+
+                                                let call_idx = next_content_block_index;
+                                                next_content_block_index += 1;
+
+                                                let start_ev = Event::default()
+                                                    .event("content_block_start")
+                                                    .json_data(serde_json::json!({
+                                                        "type": "content_block_start",
+                                                        "index": call_idx,
+                                                        "content_block": {
+                                                            "type": "tool_use",
+                                                            "id": tool_id,
+                                                            "name": call.name,
+                                                            "input": {}
+                                                        }
+                                                    }))
+                                                    .unwrap_or_else(|_| Event::default().data("{}"));
+                                                let _ = tx.send(start_ev).await;
+
+                                                let args_str = serde_json::to_string(&call.arguments).unwrap_or_default();
+                                                let delta_ev = Event::default()
+                                                    .event("content_block_delta")
+                                                    .json_data(serde_json::json!({
+                                                        "type": "content_block_delta",
+                                                        "index": call_idx,
+                                                        "delta": {
+                                                            "type": "input_json_delta",
+                                                            "partial_json": args_str
+                                                        }
+                                                    }))
+                                                    .unwrap_or_else(|_| Event::default().data("{}"));
+                                                let _ = tx.send(delta_ev).await;
+
                                                 let stop_ev = Event::default()
                                                     .event("content_block_stop")
                                                     .json_data(serde_json::json!({
                                                         "type": "content_block_stop",
-                                                        "index": idx
+                                                        "index": call_idx
                                                     }))
-                                                    .unwrap_or_else(|_| {
-                                                        Event::default().data("{}")
-                                                    });
+                                                    .unwrap_or_else(|_| Event::default().data("{}"));
                                                 let _ = tx.send(stop_ev).await;
-                                                thinking_block_index = None;
                                             }
-
-                                            let idx = match text_block_index {
-                                                Some(i) => i,
-                                                None => {
-                                                    let i = next_content_block_index;
-                                                    next_content_block_index += 1;
-                                                    text_block_index = Some(i);
-                                                    let start_ev = Event::default()
-                                                        .event("content_block_start")
+                                            
+                                            dsml_stream_buffer = String::new();
+                                            dsml_mode = false;
+                                            
+                                            if !remaining.is_empty() {
+                                                text_stream_buffer.push_str(&remaining);
+                                            }
+                                        }
+                                    } else {
+                                        text_stream_buffer.push_str(content);
+                                    }
+                                    
+                                    if !dsml_mode {
+                                        if let Some(start_pos) = text_stream_buffer.find("<｜DSML｜tool_calls>") {
+                                            let text_to_yield = &text_stream_buffer[..start_pos];
+                                            let remainder = &text_stream_buffer[start_pos..];
+                                            
+                                            let cleaned = strip_system_tags(text_to_yield);
+                                            if !cleaned.is_empty() {
+                                                accumulated_text.push_str(&cleaned);
+                                                if !intercepting_search {
+                                                    if let Some(idx) = thinking_block_index {
+                                                        let stop_ev = Event::default()
+                                                            .event("content_block_stop")
+                                                            .json_data(serde_json::json!({
+                                                                "type": "content_block_stop",
+                                                                "index": idx
+                                                            }))
+                                                            .unwrap_or_else(|_| Event::default().data("{}"));
+                                                        let _ = tx.send(stop_ev).await;
+                                                        thinking_block_index = None;
+                                                    }
+                                                    
+                                                    let idx = match text_block_index {
+                                                        Some(i) => i,
+                                                        None => {
+                                                            let i = next_content_block_index;
+                                                            next_content_block_index += 1;
+                                                            text_block_index = Some(i);
+                                                            let start_ev = Event::default()
+                                                                .event("content_block_start")
+                                                                .json_data(serde_json::json!({
+                                                                    "type": "content_block_start",
+                                                                    "index": i,
+                                                                    "content_block": {"type": "text", "text": ""}
+                                                                }))
+                                                                .unwrap_or_else(|_| Event::default().data("{}"));
+                                                            let _ = tx.send(start_ev).await;
+                                                            i
+                                                        }
+                                                    };
+                                                    
+                                                    let delta_ev = Event::default()
+                                                        .event("content_block_delta")
                                                         .json_data(serde_json::json!({
-                                                            "type": "content_block_start",
-                                                            "index": i,
-                                                            "content_block": {"type": "text", "text": ""}
+                                                            "type": "content_block_delta",
+                                                            "index": idx,
+                                                            "delta": {"type": "text_delta", "text": cleaned}
                                                         }))
                                                         .unwrap_or_else(|_| Event::default().data("{}"));
-                                                    let _ = tx.send(start_ev).await;
-                                                    i
+                                                    let _ = tx.send(delta_ev).await;
                                                 }
-                                            };
-
-                                            let delta_ev = Event::default()
-                                                .event("content_block_delta")
-                                                .json_data(serde_json::json!({
-                                                    "type": "content_block_delta",
-                                                    "index": idx,
-                                                    "delta": {"type": "text_delta", "text": cleaned}
-                                                }))
-                                                .unwrap_or_else(|_| Event::default().data("{}"));
-                                            let _ = tx.send(delta_ev).await;
+                                            }
+                                            
+                                            dsml_mode = true;
+                                            dsml_stream_buffer = remainder.to_string();
+                                            text_stream_buffer = String::new();
+                                        } else {
+                                            let (to_yield, pending) = split_pending_text(&text_stream_buffer);
+                                            let cleaned = strip_system_tags(&to_yield);
+                                            if !cleaned.is_empty() {
+                                                accumulated_text.push_str(&cleaned);
+                                                if !intercepting_search {
+                                                    if let Some(idx) = thinking_block_index {
+                                                        let stop_ev = Event::default()
+                                                            .event("content_block_stop")
+                                                            .json_data(serde_json::json!({
+                                                                "type": "content_block_stop",
+                                                                "index": idx
+                                                            }))
+                                                            .unwrap_or_else(|_| Event::default().data("{}"));
+                                                        let _ = tx.send(stop_ev).await;
+                                                        thinking_block_index = None;
+                                                    }
+                                                    
+                                                    let idx = match text_block_index {
+                                                        Some(i) => i,
+                                                        None => {
+                                                            let i = next_content_block_index;
+                                                            next_content_block_index += 1;
+                                                            text_block_index = Some(i);
+                                                            let start_ev = Event::default()
+                                                                .event("content_block_start")
+                                                                .json_data(serde_json::json!({
+                                                                    "type": "content_block_start",
+                                                                    "index": i,
+                                                                    "content_block": {"type": "text", "text": ""}
+                                                                }))
+                                                                .unwrap_or_else(|_| Event::default().data("{}"));
+                                                            let _ = tx.send(start_ev).await;
+                                                            i
+                                                        }
+                                                    };
+                                                    
+                                                    let delta_ev = Event::default()
+                                                        .event("content_block_delta")
+                                                        .json_data(serde_json::json!({
+                                                            "type": "content_block_delta",
+                                                            "index": idx,
+                                                            "delta": {"type": "text_delta", "text": cleaned}
+                                                        }))
+                                                        .unwrap_or_else(|_| Event::default().data("{}"));
+                                                    let _ = tx.send(delta_ev).await;
+                                                }
+                                            }
+                                            text_stream_buffer = pending;
                                         }
                                     }
                                 }
@@ -533,6 +740,7 @@ pub async fn forward_to_llm_stream(
                                                             .unwrap_or_else(|_| {
                                                                 Event::default().data("{}")
                                                             });
+                                                        has_emitted_tool_use = true;
                                                         let _ = tx.send(start_ev).await;
                                                     }
                                                 }
@@ -649,6 +857,134 @@ pub async fn forward_to_llm_stream(
                 continue;
             }
 
+            // Flush any remaining text in text_stream_buffer
+            let cleaned = strip_system_tags(&text_stream_buffer);
+            if !cleaned.is_empty() {
+                accumulated_text.push_str(&cleaned);
+                if !intercepting_search {
+                    if let Some(idx) = thinking_block_index {
+                        let stop_ev = Event::default()
+                            .event("content_block_stop")
+                            .json_data(serde_json::json!({
+                                "type": "content_block_stop",
+                                "index": idx
+                            }))
+                            .unwrap_or_else(|_| Event::default().data("{}"));
+                        let _ = tx.send(stop_ev).await;
+                        thinking_block_index = None;
+                    }
+                    
+                    let idx = match text_block_index {
+                        Some(i) => i,
+                        None => {
+                            let i = next_content_block_index;
+                            next_content_block_index += 1;
+                            text_block_index = Some(i);
+                            let start_ev = Event::default()
+                                .event("content_block_start")
+                                .json_data(serde_json::json!({
+                                    "type": "content_block_start",
+                                    "index": i,
+                                    "content_block": {"type": "text", "text": ""}
+                                }))
+                                .unwrap_or_else(|_| Event::default().data("{}"));
+                            let _ = tx.send(start_ev).await;
+                            i
+                        }
+                    };
+                    
+                    let delta_ev = Event::default()
+                        .event("content_block_delta")
+                        .json_data(serde_json::json!({
+                            "type": "content_block_delta",
+                            "index": idx,
+                            "delta": {"type": "text_delta", "text": cleaned}
+                        }))
+                        .unwrap_or_else(|_| Event::default().data("{}"));
+                    let _ = tx.send(delta_ev).await;
+                }
+            }
+
+            // Flush/parse any remaining unclosed DSML block in dsml_stream_buffer
+            if dsml_mode && !dsml_stream_buffer.is_empty() {
+                let calls = parse_dsml_tool_calls(&dsml_stream_buffer);
+                for call in calls {
+                    has_emitted_tool_use = true;
+                    let tool_id = format!(
+                        "toolu_dsml_{}_{}",
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis(),
+                        next_content_block_index
+                    );
+                    
+                    if let Some(idx) = thinking_block_index {
+                        let stop_ev = Event::default()
+                            .event("content_block_stop")
+                            .json_data(serde_json::json!({
+                                "type": "content_block_stop",
+                                "index": idx
+                            }))
+                            .unwrap_or_else(|_| Event::default().data("{}"));
+                        let _ = tx.send(stop_ev).await;
+                        thinking_block_index = None;
+                    }
+                    if let Some(idx) = text_block_index {
+                        let stop_ev = Event::default()
+                            .event("content_block_stop")
+                            .json_data(serde_json::json!({
+                                "type": "content_block_stop",
+                                "index": idx
+                            }))
+                            .unwrap_or_else(|_| Event::default().data("{}"));
+                        let _ = tx.send(stop_ev).await;
+                        text_block_index = None;
+                    }
+
+                    let call_idx = next_content_block_index;
+                    next_content_block_index += 1;
+
+                    let start_ev = Event::default()
+                        .event("content_block_start")
+                        .json_data(serde_json::json!({
+                            "type": "content_block_start",
+                            "index": call_idx,
+                            "content_block": {
+                                "type": "tool_use",
+                                "id": tool_id,
+                                "name": call.name,
+                                "input": {}
+                            }
+                        }))
+                        .unwrap_or_else(|_| Event::default().data("{}"));
+                    let _ = tx.send(start_ev).await;
+
+                    let args_str = serde_json::to_string(&call.arguments).unwrap_or_default();
+                    let delta_ev = Event::default()
+                        .event("content_block_delta")
+                        .json_data(serde_json::json!({
+                            "type": "content_block_delta",
+                            "index": call_idx,
+                            "delta": {
+                                "type": "input_json_delta",
+                                "partial_json": args_str
+                            }
+                        }))
+                        .unwrap_or_else(|_| Event::default().data("{}"));
+                    let _ = tx.send(delta_ev).await;
+
+                    let stop_ev = Event::default()
+                        .event("content_block_stop")
+                        .json_data(serde_json::json!({
+                            "type": "content_block_stop",
+                            "index": call_idx
+                        }))
+                        .unwrap_or_else(|_| Event::default().data("{}"));
+                    let _ = tx.send(stop_ev).await;
+                }
+            }
+
             // Close any remaining active content blocks
             if let Some(idx) = thinking_block_index {
                 let stop_ev = Event::default()
@@ -681,13 +1017,19 @@ pub async fn forward_to_llm_stream(
                 let _ = tx.send(stop_ev).await;
             }
 
+            let stop_reason = if has_emitted_tool_use {
+                "tool_use".to_string()
+            } else {
+                final_stop_reason
+            };
+
             // Send final message_delta and message_stop
             let delta_ev = Event::default()
                 .event("message_delta")
                 .json_data(serde_json::json!({
                     "type": "message_delta",
                     "delta": {
-                        "stop_reason": final_stop_reason,
+                        "stop_reason": stop_reason,
                         "stop_sequence": null
                     },
                     "usage": {"output_tokens": 0}
@@ -707,4 +1049,31 @@ pub async fn forward_to_llm_stream(
     });
 
     Ok(ReceiverStream::new(rx).map(Ok))
+}
+
+fn split_pending_text(text: &str) -> (String, String) {
+    let tag = "<｜DSML｜tool_calls>";
+    for i in (1..=tag.len()).rev() {
+        if tag.is_char_boundary(i) {
+            let prefix = &tag[..i];
+            if text.ends_with(prefix) {
+                let split_idx = text.len() - prefix.len();
+                return (text[..split_idx].to_string(), prefix.to_string());
+            }
+        }
+    }
+    (text.to_string(), String::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_split_pending_text() {
+        assert_eq!(split_pending_text("hello<"), ("hello".to_string(), "<".to_string()));
+        assert_eq!(split_pending_text("hello<｜"), ("hello".to_string(), "<｜".to_string()));
+        assert_eq!(split_pending_text("hello<｜DSML｜tool_calls>"), ("hello".to_string(), "<｜DSML｜tool_calls>".to_string()));
+        assert_eq!(split_pending_text("hello"), ("hello".to_string(), "".to_string()));
+    }
 }
