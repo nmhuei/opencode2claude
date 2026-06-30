@@ -3,7 +3,7 @@
 | Field | Value |
 |-------|-------|
 | **Phase ID** | `phase-1-cli-skeleton` |
-| **Status** | Planned |
+| **Status** | Implementation Complete |
 | **Dependencies** | None |
 | **Scope** | Refactor `main.rs` to use Clap subcommands: `serve`, `start`, `status`, `stop`, `restart`, `env`, `logs`. Extract `run_server()`. Create `src/cli.rs`. |
 | **Files to create** | `src/cli.rs` |

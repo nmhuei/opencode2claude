@@ -108,8 +108,6 @@ Priority: **CLI args > Env vars > TOML file > Defaults**
 | `TAVILY_API_KEY` | (none) | Web search API keys... |
 | `BRIDGE_PRIMARY_PROXIES` | (none) | Primary proxy URLs (socks5://...) |
 | `BRIDGE_WARM_STANDBY_PROXIES` | (none) | Warm-standby proxy URLs (protected) |
-| `PRIMARY_POOL_SIZE` | `3` | Number of primary WARP proxy containers (40001+) |
-| `STANDBY_POOL_SIZE` | `2` | Number of warm-standby proxy containers (follows primary) |
 
 Full list: see [CLAUDE.md](CLAUDE.md) or `opencode2claude --help`
 

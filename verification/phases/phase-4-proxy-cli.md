@@ -3,7 +3,7 @@
 | Field | Value |
 |-------|-------|
 | **Phase ID** | `phase-4-proxy-cli` |
-| **Status** | Planned |
+| **Status** | Implementation Complete |
 | **Dependencies** | Phase 3 (Security hardening) |
 | **Scope** | Implement 2-tier proxy architecture with Primary Managed Pool (40001-40003) and Warm-Standby Protected Pool (40004-40005). Remove 40010. Add proxy CLI commands (ps, status, restart, logs). Add `is_protected_proxy_port` guard. |
 | **Files to create** | `src/docker.rs` (Docker operations for primary only) |

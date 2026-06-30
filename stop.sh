@@ -82,7 +82,11 @@ fi
 
 # Handle Docker Proxy Pool containers
 if command -v docker &>/dev/null && docker info &>/dev/null; then
-    containers=$(docker ps -a --format '{{.Names}}' | grep "^opencode-warp-")
+    containers=$(docker ps -a --format '{{.Names}}' | grep "^opencode-warp-" | grep -v "opencode-warp-4$" | grep -v "opencode-warp-5$" || true)
+    standby_containers=$(docker ps -a --format '{{.Names}}' | grep -E "^opencode-warp-(4|5)$" || true)
+    if [ -n "$standby_containers" ]; then
+        echo -e "${YELLOW}Skipping protected warm-standby proxies: 40004, 40005${NC}"
+    fi
     # Also clean up stray WARP containers not in the numbered pool (e.g. deprecated warp-external on 40010)
     stray_containers=$(docker ps -a --format '{{.Names}}' | grep "^warp-external$" 2>/dev/null || true)
     if [ -n "$stray_containers" ]; then

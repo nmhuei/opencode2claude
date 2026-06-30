@@ -19,8 +19,9 @@ cargo build && ./target/debug/opencode2claude start
 ./target/debug/opencode2claude stop
 
 # Quick start with Docker proxy pool
-source start.sh                     # build + daemon + bridge + env export
-./stop.sh                           # graceful shutdown + Docker cleanup
+# Quick start with Docker proxy pool
+cargo build && source start.sh   # build + Docker proxies + env export (legacy wrapper)
+./stop.sh                        # cleanup
 
 # Test (unit)
 cargo test
@@ -143,7 +144,7 @@ src/
 | `BRIDGE_HOST` | `127.0.0.1` | Bind address |
 | `OPENCODE_PORT` | `4096` | OpenCode daemon health-check port |
 | `OPENCODE_MODEL` | (none) | Target LLM model |
-| `BRIDGE_SHELL_POLICY` | `unrestricted` | Shell policy: `disabled`, `allowlist`, `unrestricted` |
+| `BRIDGE_SHELL_POLICY` | `disabled` | Shell policy: `disabled`, `allowlist`, `unrestricted` |
 | `BRIDGE_SHELL_ALLOWLIST` | `git,ls,pwd,...` | Comma-separated allowed commands (when policy=allowlist) |
 | `BRIDGE_AUTH_TOKEN` | (none) | Comma-separated Bearer tokens (empty = auth disabled) |
 | `BRIDGE_RATE_LIMIT` | (none) | Max concurrent requests (via tokio::Semaphore) |
@@ -158,8 +159,6 @@ src/
 | `EXA_API_KEY` | (none) | Exa search API key (2nd priority) |
 | `SERPER_API_KEY` | (none) | Serper.dev search API key (3rd priority) |
 | `SEARXNG_URL` | (none) | Self-hosted SearXNG instance URL (4th priority) |
-| `PRIMARY_POOL_SIZE` | `3` | Number of primary Docker WARP proxy containers (ports 40001+) |
-| `STANDBY_POOL_SIZE` | `2` | Number of warm-standby Docker WARP proxy containers (follows primary) |
 
 ### CLI Subcommands
 

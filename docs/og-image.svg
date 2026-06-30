@@ -67,7 +67,7 @@
 
   <!-- Badges -->
   <rect x="1030" y="28" width="68" height="28" rx="14" fill="#21262d" stroke="#30363d" stroke-width="1" />
-  <text x="1064" y="46" font-family="Courier New, Liberation Mono, monospace" font-size="13" fill="#7ee787" text-anchor="middle" font-weight="bold">v0.2.0</text>
+  <text x="1064" y="46" font-family="Courier New, Liberation Mono, monospace" font-size="13" fill="#7ee787" text-anchor="middle" font-weight="bold">v0.3.0</text>
 
   <rect x="1108" y="28" width="56" height="28" rx="14" fill="#21262d" stroke="#30363d" stroke-width="1" />
   <text x="1136" y="46" font-family="Courier New, Liberation Mono, monospace" font-size="13" fill="#8b949e" text-anchor="middle" font-weight="bold">MIT</text>

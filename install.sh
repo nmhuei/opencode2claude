@@ -106,7 +106,7 @@ find_download_tool() {
     if command -v curl >/dev/null 2>&1; then
         dl() { curl -fL -sS "$1" -o "$2"; }
     elif command -v wget >/dev/null 2>&1; then
-        dl() { wget -q -O "$2" "$1"; }
+        dl() { wget -q --content-on-error -O "$2" "$1"; }
     else
         err "Neither curl nor wget is available."
         err "Install curl or wget and try again."
@@ -173,6 +173,8 @@ choose_install_dir() {
         return
     fi
 
+    local home="${HOME:-$(echo ~)}"
+
     # 2. /usr/local/bin — with sudo when needed
     if [ -d /usr/local/bin ]; then
         if [ -w /usr/local/bin ]; then
@@ -182,11 +184,11 @@ choose_install_dir() {
             installdir="/usr/local/bin"
             use_sudo=true
         else
-            installdir="${HOME}/.local/bin"
+            installdir="${home}/.local/bin"
             use_sudo=false
         fi
     else
-        installdir="${HOME}/.local/bin"
+        installdir="${home}/.local/bin"
         use_sudo=false
     fi
 
@@ -253,16 +255,15 @@ verify_install() {
 }
 
 # ══════════════════════════════════════════════════════════════════════
-#  Check for opencode dependency
+#  Optional dependency: opencode CLI (monitoring only)
 # ══════════════════════════════════════════════════════════════════════
 check_opencode() {
     if command -v opencode >/dev/null 2>&1; then
         ok "OpenCode CLI found: $(opencode --version 2>/dev/null | head -1)"
     else
+        warn "OpenCode CLI is not installed — optional for monitoring (the bridge works without it)."
         echo ""
-        warn "OpenCode CLI is not installed — the bridge needs it at runtime."
-        echo ""
-        printf "  ${BOLD}Install OpenCode:${NC}\n"
+        printf "  To install for health monitoring:\n"
         echo ""
         printf "  ${CYAN}curl -fsSL https://docs.opencode.ai/install.sh | sh${NC}\n"
         echo ""
