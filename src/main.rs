@@ -350,6 +350,7 @@ async fn run_server(args: ServeArgs) {
     // Build router — apply auth middleware only to API routes, not /health
     let app = Router::new()
         .route("/v1/messages", post(handlers::handle_messages))
+        .route("/v1/messages/count_tokens", post(handlers::handle_count_tokens))
         .route("/v1/models", get(handlers::handle_models))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),

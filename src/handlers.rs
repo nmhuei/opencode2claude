@@ -126,6 +126,16 @@ pub fn extract_prompt(messages: &[Message]) -> String {
 
 // ── Handlers ──
 
+pub async fn handle_count_tokens(
+    Json(payload): Json<MessagesRequest>,
+) -> Result<axum::response::Response, BridgeError> {
+    let input_tokens = opencode::estimate_input_tokens(&payload);
+    let resp = serde_json::json!({
+        "input_tokens": input_tokens
+    });
+    Ok(Json(resp).into_response())
+}
+
 pub async fn handle_messages(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,

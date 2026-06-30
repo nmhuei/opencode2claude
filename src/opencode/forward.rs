@@ -1067,8 +1067,7 @@ pub async fn forward_to_llm_stream(
             };
 
             // Send final message_delta and message_stop
-            let total_output_chars = accumulated_thinking.len() + accumulated_text.len();
-            let output_tokens = (total_output_chars as f32 / 3.5).round() as u32;
+            let output_tokens = estimate_string_tokens(&accumulated_thinking) + estimate_string_tokens(&accumulated_text);
             let output_tokens = if output_tokens == 0 && has_emitted_tool_use {
                 15
             } else {
@@ -1128,34 +1127,56 @@ fn get_correct_tool_name(name: &str, payload: &MessagesRequest) -> String {
     name.to_string()
 }
 
-fn estimate_input_tokens(payload: &MessagesRequest) -> u32 {
-    let mut chars = 0;
+pub fn estimate_string_tokens(text: &str) -> u32 {
+    let mut tokens: f32 = 0.0;
+    let mut in_word = false;
+    
+    for c in text.chars() {
+        if c.is_whitespace() {
+            tokens += 0.25;
+            in_word = false;
+        } else if c.is_ascii_alphanumeric() {
+            if !in_word {
+                tokens += 1.0;
+                in_word = true;
+            } else {
+                tokens += 0.22;
+            }
+        } else {
+            tokens += 0.5;
+            in_word = false;
+        }
+    }
+    tokens.round() as u32
+}
+
+pub fn estimate_input_tokens(payload: &MessagesRequest) -> u32 {
+    let mut total_tokens = 0;
     if let Some(ref sys) = payload.system {
-        chars += sys.to_string().len();
+        total_tokens += estimate_string_tokens(&sys.to_string());
     }
     for msg in &payload.messages {
         match &msg.content {
-            ContentVal::Single(text) => chars += text.len(),
+            ContentVal::Single(text) => total_tokens += estimate_string_tokens(text),
             ContentVal::Multiple(blocks) => {
                 for b in blocks {
                     if let Some(ref text) = b.text {
-                        chars += text.len();
+                        total_tokens += estimate_string_tokens(text);
                     }
                     if let Some(ref input) = b.input {
-                        chars += input.to_string().len();
+                        total_tokens += estimate_string_tokens(&input.to_string());
                     }
                     if let Some(ref content) = b.content {
-                        chars += content.to_string().len();
+                        total_tokens += estimate_string_tokens(&content.to_string());
                     }
                 }
             }
         }
     }
-    let tk = (chars as f32 / 3.5).round() as u32;
-    if tk == 0 {
+    if total_tokens == 0 {
         100
     } else {
-        tk
+        total_tokens
     }
 }
 
