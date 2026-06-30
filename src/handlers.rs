@@ -204,12 +204,13 @@ pub async fn handle_messages(
             let (tx, rx) = tokio::sync::mpsc::channel(10);
             let builder = SseEventBuilder::new("msg_local_shell_result".to_string(), req_model);
             let output = shell_result_text;
+            let output_tk = (output.len() as f32 / 3.5).round() as u32 + 10;
             tokio::spawn(async move {
-                let _ = tx.send(builder.message_start()).await;
+                let _ = tx.send(builder.message_start(10)).await;
                 let _ = tx.send(builder.content_block_start()).await;
                 let _ = tx.send(builder.text_delta(&output)).await;
                 let _ = tx.send(builder.content_block_stop()).await;
-                let _ = tx.send(builder.message_delta()).await;
+                let _ = tx.send(builder.message_delta(output_tk)).await;
                 let _ = tx.send(builder.message_stop()).await;
             });
             let response = Sse::new(
@@ -226,7 +227,11 @@ pub async fn handle_messages(
             Ok(res)
         } else {
             let builder = SseEventBuilder::new("msg_local_shell_result".to_string(), req_model);
-            Ok(Json(builder.non_streaming_response(&shell_result_text)).into_response())
+            let output_tk = (shell_result_text.len() as f32 / 3.5).round() as u32 + 10;
+            Ok(
+                Json(builder.non_streaming_response(&shell_result_text, 10, output_tk))
+                    .into_response(),
+            )
         }
     } else if !prompt.is_empty() && prompt.starts_with('!') {
         let shell_cmd = prompt.strip_prefix('!').unwrap().trim().to_string();
@@ -280,9 +285,11 @@ pub async fn handle_messages(
             let p_name = param_name;
             let cmd = shell_cmd;
             let t_id = tool_use_id;
+            let input_tk = 50;
+            let output_tk = (cmd.len() as f32 / 3.5).round() as u32 + 15;
 
             tokio::spawn(async move {
-                let _ = tx.send(builder.message_start()).await;
+                let _ = tx.send(builder.message_start(input_tk)).await;
 
                 let start_ev = Event::default()
                     .event("content_block_start")
@@ -330,7 +337,7 @@ pub async fn handle_messages(
                             "stop_reason": "tool_use",
                             "stop_sequence": null
                         },
-                        "usage": {"output_tokens": 0}
+                        "usage": {"output_tokens": output_tk}
                     }))
                     .unwrap_or_else(|_| Event::default().data("{}"));
                 let _ = tx.send(delta_ev).await;
@@ -357,6 +364,7 @@ pub async fn handle_messages(
             );
             Ok(res)
         } else {
+            let output_tk = (shell_cmd.len() as f32 / 3.5).round() as u32 + 15;
             let resp_val = serde_json::json!({
                 "id": "msg_local_shell",
                 "type": "message",
@@ -374,7 +382,7 @@ pub async fn handle_messages(
                 ],
                 "stop_reason": "tool_use",
                 "stop_sequence": null,
-                "usage": {"input_tokens": 0, "output_tokens": 0}
+                "usage": {"input_tokens": 50, "output_tokens": output_tk}
             });
             Ok(Json(resp_val).into_response())
         }

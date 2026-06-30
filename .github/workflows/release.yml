@@ -28,7 +28,7 @@ jobs:
 
     steps:
       - name: Checkout source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -60,7 +60,7 @@ jobs:
           cp target/${{ matrix.target }}/release/opencode2claude staging/${{ matrix.artifact_name }}
 
       - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.artifact_name }}
           path: staging/${{ matrix.artifact_name }}
@@ -75,7 +75,7 @@ jobs:
 
     steps:
       - name: Download all build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: artifacts
           merge-multiple: true
@@ -99,12 +99,27 @@ jobs:
 
     steps:
       - name: Checkout source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Regenerate Cargo.lock for --locked consistency
+        run: cargo generate-lockfile
+
+      - name: Check crate version exists
+        id: crate
+        shell: bash
+        run: |
+          VERSION="$(grep '^version =' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
+          if curl -fsSL "https://crates.io/api/v1/crates/opencode2claude/$VERSION" >/dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish to crates.io
+        if: steps.crate.outputs.exists == 'false'
         run: cargo publish --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -120,7 +135,7 @@ jobs:
 
     steps:
       - name: Checkout source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -131,7 +146,7 @@ jobs:
 
       - name: Extract Docker metadata (tags, labels)
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository_owner }}/opencode2claude
           tags: |
@@ -140,7 +155,7 @@ jobs:
             type=raw,value=latest,enable={{ is_default_branch }}
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: true

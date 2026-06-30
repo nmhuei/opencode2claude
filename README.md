@@ -43,7 +43,7 @@ Claude Code is locked to Anthropic's API. This bridge routes it through [OpenCod
 
 ## 📦 Install
 
-The [quick install script](#-quick-install) is the recommended method — it auto-detects your OS and architecture.
+The [quick install script](#-quick-install) is the recommended method — it auto-detects your OS and architecture. Verified on clean Linux (no Rust toolchain required).
 
 **Alternatives:**
 

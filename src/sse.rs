@@ -24,7 +24,7 @@ impl SseEventBuilder {
     }
 
     /// Generate the `message_start` event — sent at the beginning of a response.
-    pub fn message_start(&self) -> Event {
+    pub fn message_start(&self, input_tokens: u32) -> Event {
         Event::default()
             .event("message_start")
             .json_data(json!({
@@ -37,7 +37,7 @@ impl SseEventBuilder {
                     "model": self.model,
                     "stop_reason": null,
                     "stop_sequence": null,
-                    "usage": {"input_tokens": 0, "output_tokens": 0}
+                    "usage": {"input_tokens": input_tokens, "output_tokens": 0}
                 }
             }))
             .unwrap_or_else(|_| Event::default().data("{}"))
@@ -79,13 +79,13 @@ impl SseEventBuilder {
     }
 
     /// Generate the `message_delta` event — sent with stop reason at end of message.
-    pub fn message_delta(&self) -> Event {
+    pub fn message_delta(&self, output_tokens: u32) -> Event {
         Event::default()
             .event("message_delta")
             .json_data(json!({
                 "type": "message_delta",
                 "delta": {"stop_reason": "end_turn", "stop_sequence": null},
-                "usage": {"output_tokens": 0}
+                "usage": {"output_tokens": output_tokens}
             }))
             .unwrap_or_else(|_| Event::default().data("{}"))
     }
@@ -101,7 +101,12 @@ impl SseEventBuilder {
     }
 
     /// Build a complete non-streaming JSON response body.
-    pub fn non_streaming_response(&self, text: &str) -> serde_json::Value {
+    pub fn non_streaming_response(
+        &self,
+        text: &str,
+        input_tokens: u32,
+        output_tokens: u32,
+    ) -> serde_json::Value {
         json!({
             "id": self.msg_id,
             "type": "message",
@@ -110,7 +115,7 @@ impl SseEventBuilder {
             "content": [{"type": "text", "text": text}],
             "stop_reason": "end_turn",
             "stop_sequence": null,
-            "usage": {"input_tokens": 0, "output_tokens": 0}
+            "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens}
         })
     }
 }
@@ -124,18 +129,18 @@ mod tests {
         let builder = SseEventBuilder::new("msg_test".to_string(), "test-model".to_string());
 
         // All event builder methods should succeed without panic
-        let _ = builder.message_start();
+        let _ = builder.message_start(10);
         let _ = builder.content_block_start();
         let _ = builder.text_delta("hello");
         let _ = builder.content_block_stop();
-        let _ = builder.message_delta();
+        let _ = builder.message_delta(20);
         let _ = builder.message_stop();
     }
 
     #[test]
     fn test_non_streaming_response() {
         let builder = SseEventBuilder::new("msg_test".to_string(), "test-model".to_string());
-        let resp = builder.non_streaming_response("hello world");
+        let resp = builder.non_streaming_response("hello world", 15, 25);
 
         assert_eq!(resp["id"], "msg_test");
         assert_eq!(resp["model"], "test-model");
@@ -143,5 +148,7 @@ mod tests {
         assert_eq!(resp["role"], "assistant");
         assert_eq!(resp["content"][0]["text"], "hello world");
         assert_eq!(resp["stop_reason"], "end_turn");
+        assert_eq!(resp["usage"]["input_tokens"], 15);
+        assert_eq!(resp["usage"]["output_tokens"], 25);
     }
 }

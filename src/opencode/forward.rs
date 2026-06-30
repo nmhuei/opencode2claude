@@ -387,7 +387,8 @@ pub async fn forward_to_llm_stream(
             let mut line_buffer = Vec::new();
 
             if loop_count == 1 {
-                let _ = tx.send(builder.message_start()).await;
+                let input_tokens = estimate_input_tokens(&current_payload);
+                let _ = tx.send(builder.message_start(input_tokens)).await;
             }
 
             let mut thinking_block_index: Option<usize> = None;
@@ -761,7 +762,7 @@ pub async fn forward_to_llm_stream(
                                                                 idx,
                                                                 id.clone(),
                                                                 get_correct_tool_name(
-                                                                    &name,
+                                                                    name,
                                                                     &current_payload,
                                                                 ),
                                                             ),
@@ -775,7 +776,7 @@ pub async fn forward_to_llm_stream(
                                                                 "content_block": {
                                                                     "type": "tool_use",
                                                                     "id": id,
-                                                                    "name": get_correct_tool_name(&name, &current_payload),
+                                                                    "name": get_correct_tool_name(name, &current_payload),
                                                                     "input": {}
                                                                 }
                                                             }))
@@ -1066,6 +1067,14 @@ pub async fn forward_to_llm_stream(
             };
 
             // Send final message_delta and message_stop
+            let total_output_chars = accumulated_thinking.len() + accumulated_text.len();
+            let output_tokens = (total_output_chars as f32 / 3.5).round() as u32;
+            let output_tokens = if output_tokens == 0 && has_emitted_tool_use {
+                15
+            } else {
+                output_tokens
+            };
+
             let delta_ev = Event::default()
                 .event("message_delta")
                 .json_data(serde_json::json!({
@@ -1074,7 +1083,7 @@ pub async fn forward_to_llm_stream(
                         "stop_reason": stop_reason,
                         "stop_sequence": null
                     },
-                    "usage": {"output_tokens": 0}
+                    "usage": {"output_tokens": output_tokens}
                 }))
                 .unwrap_or_else(|_| Event::default().data("{}"));
             let _ = tx.send(delta_ev).await;
@@ -1117,6 +1126,37 @@ fn get_correct_tool_name(name: &str, payload: &MessagesRequest) -> String {
         }
     }
     name.to_string()
+}
+
+fn estimate_input_tokens(payload: &MessagesRequest) -> u32 {
+    let mut chars = 0;
+    if let Some(ref sys) = payload.system {
+        chars += sys.to_string().len();
+    }
+    for msg in &payload.messages {
+        match &msg.content {
+            ContentVal::Single(text) => chars += text.len(),
+            ContentVal::Multiple(blocks) => {
+                for b in blocks {
+                    if let Some(ref text) = b.text {
+                        chars += text.len();
+                    }
+                    if let Some(ref input) = b.input {
+                        chars += input.to_string().len();
+                    }
+                    if let Some(ref content) = b.content {
+                        chars += content.to_string().len();
+                    }
+                }
+            }
+        }
+    }
+    let tk = (chars as f32 / 3.5).round() as u32;
+    if tk == 0 {
+        100
+    } else {
+        tk
+    }
 }
 
 #[cfg(test)]
