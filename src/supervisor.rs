@@ -22,7 +22,7 @@ pub enum SupervisorStatus {
 
 impl SupervisorStatus {
     /// Returns true if the bridge is running.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // kept for public API completeness
     pub fn is_running(&self) -> bool {
         matches!(self, Self::Running { .. })
     }
@@ -47,7 +47,7 @@ pub enum SupervisorError {
     AlreadyRunning(u32),
 
     /// Bridge is not running.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // kept for supervisor response matching
     #[error("Bridge is not running")]
     NotRunning,
 

@@ -1,6 +1,6 @@
 FROM rust:1.86-alpine AS builder
 
-RUN apk add musl-dev openssl-dev openssl-libs-static
+RUN apk add --no-cache musl-dev gcc
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./

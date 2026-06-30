@@ -96,14 +96,14 @@ pub struct BridgeConfig {
     /// SearXNG self-hosted instance URL
     pub searxng_url: Option<String>,
     /// SearXNG API key
-    #[allow(dead_code)]
+    #[allow(dead_code)] // kept for future SearXNG auth integration
     pub searxng_api_key: Option<String>,
     /// Maximum number of search loops
-    #[allow(dead_code)]
+    #[allow(dead_code)] // kept for planned CLI override
     pub max_search_loops: u32,
     /// Comma-separated list of SOCKS5/HTTP proxies for multi-agent support
     /// (deprecated, use primary_proxies + warm_standby_proxies instead)
-    #[allow(dead_code)]
+    #[allow(dead_code)] // kept for migration warning messages
     pub proxies: Option<Vec<String>>,
     /// Primary proxy URLs (managed, restartable)
     pub primary_proxies: Option<Vec<String>>,
@@ -347,7 +347,7 @@ impl BridgeConfig {
     }
 
     /// Check if a given token is valid.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // kept for planned auth middleware refactor
     pub fn is_valid_token(&self, token: &str) -> bool {
         match &self.auth_tokens {
             Some(tokens) => tokens.iter().any(|t| t == token),

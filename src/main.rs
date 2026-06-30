@@ -3,25 +3,17 @@
 //! This binary provides a local HTTP server that translates Anthropic API requests
 //! into OpenAI-compatible API calls forwarded to opencode.ai/zen/v1/chat/completions.
 
-mod cli;
-mod config;
-mod docker;
-mod error;
-mod handlers;
-mod middleware;
-mod opencode;
-mod pidfile;
-mod proxy_pool;
-mod runtime;
-mod shell;
-mod sse;
-mod state;
-mod supervisor;
+use opencode2claude::cli::{self, Command, ServeArgs, StartArgs, StatusArgs, StopArgs};
+use opencode2claude::config::{self, BridgeConfig};
+use opencode2claude::docker;
+use opencode2claude::handlers;
+use opencode2claude::middleware;
+use opencode2claude::proxy_pool;
+use opencode2claude::runtime::RuntimePaths;
+use opencode2claude::state::AppState;
+use opencode2claude::supervisor::{Supervisor, SupervisorStatus};
 
 use clap::Parser;
-use cli::{Command, ServeArgs, StartArgs, StatusArgs, StopArgs};
-use config::BridgeConfig;
-use state::AppState;
 
 use axum::routing::{get, post};
 use axum::Router;
@@ -47,7 +39,7 @@ async fn main() {
     }
 }
 
-fn resolve_runtime(args: &StartArgs) -> supervisor::Supervisor {
+fn resolve_runtime(args: &StartArgs) -> Supervisor {
     let port = args
         .port
         .or_else(|| {
@@ -62,17 +54,15 @@ fn resolve_runtime(args: &StartArgs) -> supervisor::Supervisor {
         .or_else(|| std::env::var("BRIDGE_HOST").ok())
         .unwrap_or_else(|| config::DEFAULT_HOST.to_string());
     let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let paths = runtime::RuntimePaths::new(root);
-    supervisor::Supervisor::new(paths, port, host)
+    let paths = RuntimePaths::new(root);
+    Supervisor::new(paths, port, host)
 }
 
 fn cmd_start(args: StartArgs) {
     let sup = resolve_runtime(&args);
     match sup.start() {
         Ok(()) => {
-            let status = sup
-                .status()
-                .unwrap_or(supervisor::SupervisorStatus::Stopped);
+            let status = sup.status().unwrap_or(SupervisorStatus::Stopped);
             println!("Bridge started. {}", status);
         }
         Err(e) => {
@@ -101,7 +91,7 @@ fn cmd_stop(args: StopArgs) {
     }
 }
 
-fn resolve_runtime_for_port(port: Option<u16>, host: Option<String>) -> supervisor::Supervisor {
+fn resolve_runtime_for_port(port: Option<u16>, host: Option<String>) -> Supervisor {
     let p = port
         .or_else(|| {
             std::env::var("BRIDGE_PORT")
@@ -113,8 +103,8 @@ fn resolve_runtime_for_port(port: Option<u16>, host: Option<String>) -> supervis
         .or_else(|| std::env::var("BRIDGE_HOST").ok())
         .unwrap_or_else(|| config::DEFAULT_HOST.to_string());
     let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let paths = runtime::RuntimePaths::new(root);
-    supervisor::Supervisor::new(paths, p, h)
+    let paths = RuntimePaths::new(root);
+    Supervisor::new(paths, p, h)
 }
 
 fn cmd_restart() {
@@ -124,9 +114,7 @@ fn cmd_restart() {
     // Then start
     match sup.start() {
         Ok(()) => {
-            let status = sup
-                .status()
-                .unwrap_or(supervisor::SupervisorStatus::Stopped);
+            let status = sup.status().unwrap_or(SupervisorStatus::Stopped);
             println!("Bridge restarted. {}", status);
         }
         Err(e) => {
@@ -155,7 +143,7 @@ fn cmd_env() {
 
 fn cmd_logs() {
     let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let paths = runtime::RuntimePaths::new(root);
+    let paths = RuntimePaths::new(root);
     let log_path = paths.bridge_log();
 
     if !log_path.exists() {

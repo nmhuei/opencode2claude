@@ -62,13 +62,13 @@ pub struct ProxyEntry {
     /// Proxy role in the two-tier architecture (Primary/WarmStandby).
     pub role: ProxyRole,
     /// Proxy lifecycle management policy (Managed/Protected).
-    #[allow(dead_code)]
+    #[allow(dead_code)] // used by future CLI repair commands
     pub lifecycle: ProxyLifecycle,
     /// Consecutive failures since last healthy state.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // used by adaptive cooldown logic
     pub consecutive_failures: u32,
     /// Consecutive successes since last healthy/cooldown state.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // used by recovery threshold logic
     pub consecutive_successes: u32,
 }
 
@@ -81,7 +81,7 @@ pub struct ProxyEntry {
 pub struct ProxyPool {
     pub proxies: Vec<ProxyEntry>,
     /// Number of active proxy slots (used in constructor to split active/spare).
-    #[allow(dead_code)]
+    #[allow(dead_code)] // kept for pool capacity tracking
     pub active_count: usize,
     pub restart_queue: Vec<usize>,
 }
@@ -324,33 +324,6 @@ impl ProxyPool {
 
     // ── Selection helpers ──
 
-    /// Returns indices of all proxies with Primary role and healthy status (Active or Spare).
-    #[allow(dead_code)]
-    fn healthy_primary_indices(&self) -> Vec<usize> {
-        self.proxies
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| {
-                p.role == ProxyRole::Primary
-                    && matches!(p.status, ProxyStatus::Active | ProxyStatus::Spare)
-            })
-            .map(|(i, _)| i)
-            .collect()
-    }
-
-    /// Returns indices of all proxies with WarmStandby role and healthy status.
-    fn healthy_warm_standby_indices(&self) -> Vec<usize> {
-        self.proxies
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| {
-                p.role == ProxyRole::WarmStandby
-                    && matches!(p.status, ProxyStatus::Active | ProxyStatus::Spare)
-            })
-            .map(|(i, _)| i)
-            .collect()
-    }
-
     /// Returns the rendezvous-assigned primary for a routing key,
     /// considering ALL primaries regardless of health status.
     /// This ensures sticky assignment: even if a primary is on cooldown,
@@ -374,7 +347,16 @@ impl ProxyPool {
 
     /// Select the best WarmStandby failover for a routing key via Rendezvous hashing.
     fn rendezvous_warm_standby(&self, routing_key: &str) -> Option<usize> {
-        let candidates = self.healthy_warm_standby_indices();
+        let candidates: Vec<usize> = self
+            .proxies
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| {
+                p.role == ProxyRole::WarmStandby
+                    && matches!(p.status, ProxyStatus::Active | ProxyStatus::Spare)
+            })
+            .map(|(i, _)| i)
+            .collect();
         if candidates.is_empty() {
             return None;
         }
@@ -506,7 +488,7 @@ impl ProxyPool {
     }
 
     /// Mark a proxy as healthy (clear cooldown/dead).
-    #[allow(dead_code)]
+    #[allow(dead_code)] // used only in tests
     pub fn mark_healthy(&mut self, idx: usize) {
         if idx < self.proxies.len() {
             self.proxies[idx].status = ProxyStatus::Active;

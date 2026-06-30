@@ -11,15 +11,15 @@ use serde_json::json;
 /// Central error type for the OpenCode2Claude bridge.
 #[derive(Debug, thiserror::Error)]
 pub enum BridgeError {
-    #[allow(dead_code)]
+    #[allow(dead_code)] // kept for planned use in CLI & daemon startup
     #[error("Failed to bind to address: {0}")]
     BindFailed(#[source] std::io::Error),
 
-    #[allow(dead_code)]
+    #[allow(dead_code)] // kept for planned use in supervisor
     #[error("Failed to spawn process: {0}")]
     ProcessSpawnFailed(#[source] std::io::Error),
 
-    #[allow(dead_code)]
+    #[allow(dead_code)] // kept for structured error responses
     #[error("Shell commands are disabled by policy. Set BRIDGE_SHELL_POLICY=allowlist or unrestricted to enable.")]
     ShellDisabled,
 
@@ -32,7 +32,7 @@ pub enum BridgeError {
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
 
-    #[allow(dead_code)]
+    #[allow(dead_code)] // kept for health-check error paths
     #[error("OpenCode daemon unavailable on port {0}")]
     DaemonUnavailable(u16),
 

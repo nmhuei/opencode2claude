@@ -61,7 +61,6 @@ pub struct OpenAiFunction {
     pub parameters: serde_json::Value,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct OpenAiResponse {
     pub id: String,

@@ -1,0 +1,9 @@
+.git
+.github
+target
+.runtime
+*.log
+tests
+verification
+docs
+*.md

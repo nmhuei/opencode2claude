@@ -71,7 +71,7 @@ pub fn strip_html_tags(html: &str) -> String {
 // ── Types ──
 
 /// A structured search result with title, URL, and snippet.
-#[allow(dead_code)]
+#[allow(dead_code)] // kept for planned public structured search API
 #[derive(Debug, Clone)]
 pub struct SearchResult {
     pub title: String,
@@ -80,7 +80,7 @@ pub struct SearchResult {
 }
 
 /// Enumeration of supported search providers.
-#[allow(dead_code)]
+#[allow(dead_code)] // kept for planned public provider metadata API
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SearchProviderKind {
     Tavily,
