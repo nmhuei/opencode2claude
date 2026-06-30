@@ -19,7 +19,7 @@ jobs:
         run: ./scripts/verify.sh all --profile ci
 
       - name: Shellcheck
-        run: shellcheck scripts/verify.sh scripts/lib/*.sh scripts/phases/*.sh start.sh stop.sh install.sh
+        run: shellcheck --shell=bash scripts/verify.sh scripts/lib/*.sh scripts/phases/*.sh start.sh stop.sh install.sh
 
       - name: Cargo audit
         run: cargo install cargo-audit --locked && cargo audit
