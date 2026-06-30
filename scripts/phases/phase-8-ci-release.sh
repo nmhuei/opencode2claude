@@ -28,12 +28,15 @@ GATES=(
   gate_clippy_clean
   gate_compile_check
   gate_unit_tests
+  gate_fast_integration_tests
   gate_binary_build
   gate_ci_workflow_exists
   gate_release_workflow_exists
   gate_ci_calls_verify
   gate_release_build_locked
   gate_dockerfile_locked
+  gate_dockerignore_exists
+  gate_dockerfile_no_cache
   gate_changelog_exists
   gate_version_consistent
   gate_no_active_40010
@@ -72,6 +75,26 @@ gate_dockerfile_locked() {
   pass "Dockerfile uses --locked"
 }
 
+gate_dockerignore_exists() {
+  info "Gate 8.11: .dockerignore exists with standard exclusions"
+  [[ -f "$ROOT_DIR/.dockerignore" ]] || return 1
+  grep -q 'target' "$ROOT_DIR/.dockerignore" || return 1
+  grep -q '.git' "$ROOT_DIR/.dockerignore" || return 1
+  pass ".dockerignore exists with target and .git exclusions"
+}
+
+gate_dockerfile_no_cache() {
+  info "Gate 8.12: Dockerfile uses --no-cache for apk"
+  grep -q -- '--no-cache' "$ROOT_DIR/Dockerfile" || return 1
+  pass "Dockerfile uses apk add --no-cache"
+}
+
+gate_fast_integration_tests() {
+  info "Gate 8.13: Fast integration tests pass (non-ignored)"
+  cargo test --locked --test fast 2>&1 | tail -5 || return 1
+  pass "Fast integration tests pass"
+}
+
 gate_changelog_exists() {
   info "Gate 8.11: CHANGELOG.md exists"
   [[ -f "$ROOT_DIR/CHANGELOG.md" ]] || return 1
@@ -88,7 +111,7 @@ gate_version_consistent() {
 }
 
 gate_no_active_40010() {
-  info "Gate 8.13: no active reference to deprecated port 40010 in source code"
+  info "Gate 8.14: no active reference to deprecated port 40010 in source code"
   if grep -rn "socks5://.*40010\|http.*40010" "$ROOT_DIR/src/" "$ROOT_DIR/start.sh" "$ROOT_DIR/stop.sh" 2>/dev/null; then
     error "Found active reference to deprecated port 40010"
     return 1
@@ -97,7 +120,7 @@ gate_no_active_40010() {
 }
 
 gate_install_sh_present() {
-  info "Gate 8.14: install.sh exists"
+  info "Gate 8.15: install.sh exists"
   [[ -f "$ROOT_DIR/install.sh" ]] || return 1
   pass "install.sh exists"
 }
