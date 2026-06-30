@@ -127,13 +127,9 @@ async fn test_shell_disabled_default_fast() {
 
     assert_eq!(
         resp.status(),
-        200,
-        "Shell command delegation should return 200"
+        403,
+        "Default shell policy is Disabled — shell commands should be rejected"
     );
-
-    let val: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(val["content"][0]["type"], "tool_use");
-    assert_eq!(val["content"][0]["input"]["command"], "echo test");
 }
 
 #[tokio::test]

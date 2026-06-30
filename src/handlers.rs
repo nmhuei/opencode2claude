@@ -136,13 +136,16 @@ pub async fn handle_messages(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("default-agent")
         .to_string();
-    // Acquire rate limiter permit if configured
-    if let Some(ref limiter) = state.rate_limiter {
-        let _permit = limiter
-            .acquire()
-            .await
-            .map_err(|_| BridgeError::InvalidRequest("Rate limit exceeded".to_string()))?;
-    }
+    // Acquire rate limiter permit if configured — must live for the full handler
+    let _rate_permit = match state.rate_limiter {
+        Some(ref limiter) => Some(
+            limiter
+                .acquire()
+                .await
+                .map_err(|_| BridgeError::InvalidRequest("Rate limit exceeded".to_string()))?,
+        ),
+        None => None,
+    };
 
     if payload.messages.is_empty() {
         return Err(BridgeError::InvalidRequest("No messages found".to_string()));
@@ -231,6 +234,13 @@ pub async fn handle_messages(
             "Intercepted local shell command for delegation: '{}'",
             shell_cmd
         );
+
+        // Enforce shell policy before delegating to client
+        state
+            .config
+            .shell_policy
+            .check(&shell_cmd)
+            .map_err(|_| BridgeError::ShellDisabled)?;
 
         let mut shell_tool_name = "bash".to_string();
         let mut param_name = "command".to_string();

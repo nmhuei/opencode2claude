@@ -28,7 +28,7 @@ async fn test_bridge_binary_health() {
 #[tokio::test]
 #[ignore]
 async fn test_shell_command_non_streaming() {
-    let bridge = TestBridge::start(HashMap::new()).await;
+    let bridge = TestBridge::start(HashMap::from([("BRIDGE_SHELL_POLICY", "unrestricted")])).await;
     let resp = bridge
         .post_messages(&build_request("!echo integration_test_123", false))
         .await
@@ -54,7 +54,7 @@ async fn test_shell_command_non_streaming() {
 #[tokio::test]
 #[ignore]
 async fn test_shell_command_streaming_sse() {
-    let bridge = TestBridge::start(HashMap::new()).await;
+    let bridge = TestBridge::start(HashMap::from([("BRIDGE_SHELL_POLICY", "unrestricted")])).await;
     let resp = bridge
         .post_messages(&build_request("!echo sse_test_456", true))
         .await
@@ -177,11 +177,9 @@ async fn test_shell_disabled_policy() {
 
     assert_eq!(
         resp.status(),
-        200,
-        "Shell commands are delegated, not blocked"
+        403,
+        "Shell commands should be rejected when policy is disabled"
     );
-    let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["content"][0]["type"], "tool_use");
 }
 
 /// Test shell allowlist policy — allowed command passes, blocked command fails.
@@ -201,18 +199,16 @@ async fn test_shell_allowlist_policy() {
         .unwrap();
     assert_eq!(resp.status(), 200, "Allowed command should pass");
 
-    // Blocked command should also be delegated, returning 200
+    // Blocked command should be rejected by policy
     let resp = bridge
         .post_messages(&build_request("!rm -rf /", false))
         .await
         .unwrap();
     assert_eq!(
         resp.status(),
-        200,
-        "Blocked command should be delegated to client"
+        403,
+        "Blocked command should be rejected by shell policy"
     );
-    let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["content"][0]["type"], "tool_use");
 }
 
 /// Test multi-content message format (array of content blocks).
@@ -363,7 +359,7 @@ async fn test_large_body_rejection() {
 #[tokio::test]
 #[ignore]
 async fn test_concurrent_requests() {
-    let bridge = TestBridge::start(HashMap::new()).await;
+    let bridge = TestBridge::start(HashMap::from([("BRIDGE_SHELL_POLICY", "unrestricted")])).await;
     let bridge = std::sync::Arc::new(bridge);
     let mut handles = Vec::new();
 
@@ -392,7 +388,11 @@ async fn test_shell_disabled_streaming() {
         .post_messages(&build_request("!echo hi", true))
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.status(),
+        403,
+        "Disabled policy should reject streaming shell command"
+    );
 }
 
 /// Auth với streaming request.
