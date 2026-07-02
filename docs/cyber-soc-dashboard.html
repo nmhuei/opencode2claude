@@ -1,0 +1,788 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OpenCode2Claude Cyber/SOC Dashboard Concept</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #050914;
+      --bg-2: #08111f;
+      --panel: rgba(12, 22, 38, 0.88);
+      --panel-2: rgba(15, 30, 52, 0.72);
+      --line: rgba(75, 213, 255, 0.18);
+      --line-strong: rgba(75, 213, 255, 0.42);
+      --text: #e6f6ff;
+      --muted: #7f94ab;
+      --cyan: #42d9ff;
+      --blue: #4b7dff;
+      --green: #35f29a;
+      --yellow: #ffd166;
+      --orange: #ff8c42;
+      --red: #ff4d6d;
+      --violet: #a78bfa;
+      --shadow: 0 22px 80px rgba(0, 0, 0, 0.42);
+      --radius-xl: 28px;
+      --radius-lg: 20px;
+      --radius-md: 14px;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 18% 12%, rgba(66, 217, 255, 0.16), transparent 32%),
+        radial-gradient(circle at 78% 2%, rgba(167, 139, 250, 0.18), transparent 36%),
+        radial-gradient(circle at 70% 88%, rgba(53, 242, 154, 0.10), transparent 26%),
+        linear-gradient(135deg, #03050c 0%, var(--bg) 48%, #07172a 100%);
+      overflow-x: hidden;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background-image:
+        linear-gradient(rgba(75, 213, 255, 0.04) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(75, 213, 255, 0.04) 1px, transparent 1px);
+      background-size: 44px 44px;
+      mask-image: linear-gradient(to bottom, rgba(0,0,0,0.86), transparent 88%);
+    }
+
+    .shell {
+      width: min(1480px, calc(100vw - 40px));
+      margin: 24px auto;
+      display: grid;
+      grid-template-columns: 280px 1fr;
+      gap: 22px;
+    }
+
+    .sidebar,
+    .panel,
+    .topbar {
+      border: 1px solid var(--line);
+      background: linear-gradient(180deg, var(--panel), rgba(7, 16, 31, 0.86));
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(20px);
+    }
+
+    .sidebar {
+      position: sticky;
+      top: 24px;
+      min-height: calc(100vh - 48px);
+      border-radius: var(--radius-xl);
+      padding: 24px;
+      overflow: hidden;
+    }
+
+    .sidebar::after {
+      content: "";
+      position: absolute;
+      inset: auto -80px -120px auto;
+      width: 220px;
+      height: 220px;
+      background: radial-gradient(circle, rgba(66, 217, 255, 0.22), transparent 68%);
+    }
+
+    .brand {
+      display: flex;
+      gap: 14px;
+      align-items: center;
+      margin-bottom: 30px;
+    }
+
+    .brand-mark {
+      width: 48px;
+      height: 48px;
+      border-radius: 16px;
+      display: grid;
+      place-items: center;
+      font-size: 24px;
+      background: linear-gradient(135deg, rgba(66, 217, 255, 0.22), rgba(167, 139, 250, 0.18));
+      border: 1px solid var(--line-strong);
+      box-shadow: 0 0 34px rgba(66, 217, 255, 0.18);
+    }
+
+    .brand h1 {
+      margin: 0;
+      font-size: 15px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .brand p {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .nav-label {
+      color: var(--muted);
+      font-size: 11px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      margin: 22px 0 10px;
+    }
+
+    .nav-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 14px;
+      margin: 6px 0;
+      border-radius: 14px;
+      color: #b8cce1;
+      background: transparent;
+      border: 1px solid transparent;
+    }
+
+    .nav-item.active,
+    .nav-item:hover {
+      color: var(--text);
+      background: rgba(66, 217, 255, 0.08);
+      border-color: rgba(66, 217, 255, 0.18);
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid rgba(53, 242, 154, 0.28);
+      color: var(--green);
+      border-radius: 999px;
+      padding: 8px 10px;
+      font-size: 12px;
+      background: rgba(53, 242, 154, 0.08);
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: currentColor;
+      box-shadow: 0 0 16px currentColor;
+    }
+
+    main {
+      display: grid;
+      gap: 22px;
+    }
+
+    .topbar {
+      min-height: 92px;
+      border-radius: var(--radius-xl);
+      padding: 20px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+    }
+
+    .eyebrow {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--cyan);
+      font-size: 12px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+    }
+
+    .topbar h2 {
+      margin: 8px 0 0;
+      font-size: clamp(24px, 3vw, 40px);
+      line-height: 1.05;
+    }
+
+    .topbar-actions {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .button {
+      border: 1px solid var(--line-strong);
+      color: var(--text);
+      background: rgba(66, 217, 255, 0.08);
+      border-radius: 14px;
+      padding: 12px 14px;
+      font-weight: 700;
+      font-size: 13px;
+    }
+
+    .button.primary {
+      background: linear-gradient(135deg, rgba(66, 217, 255, 0.28), rgba(75, 125, 255, 0.22));
+      box-shadow: 0 0 28px rgba(66, 217, 255, 0.16);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 18px;
+    }
+
+    .panel {
+      border-radius: var(--radius-lg);
+      padding: 18px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .panel::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      border-radius: inherit;
+      background: linear-gradient(135deg, rgba(255,255,255,0.08), transparent 32%);
+      opacity: 0.6;
+    }
+
+    .kpi { grid-column: span 3; min-height: 154px; }
+    .map { grid-column: span 7; min-height: 432px; }
+    .alerts { grid-column: span 5; min-height: 432px; }
+    .timeline { grid-column: span 8; min-height: 360px; }
+    .agents { grid-column: span 4; min-height: 360px; }
+
+    .panel-header {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .panel-title {
+      margin: 0;
+      font-size: 14px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: #b9d6ea;
+    }
+
+    .panel-subtitle {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .metric {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .metric-value {
+      font-size: 38px;
+      line-height: 1;
+      font-weight: 800;
+      letter-spacing: -0.04em;
+    }
+
+    .metric-value small {
+      color: var(--muted);
+      font-size: 13px;
+      letter-spacing: 0;
+    }
+
+    .trend {
+      color: var(--green);
+      font-weight: 800;
+      font-size: 12px;
+    }
+
+    .spark {
+      position: relative;
+      z-index: 1;
+      height: 54px;
+      margin-top: 18px;
+      border-radius: 12px;
+      background:
+        linear-gradient(180deg, rgba(66, 217, 255, 0.14), transparent),
+        repeating-linear-gradient(90deg, rgba(255,255,255,0.08) 0 1px, transparent 1px 22px);
+      clip-path: polygon(0 76%, 10% 68%, 18% 74%, 29% 46%, 41% 54%, 53% 28%, 65% 48%, 74% 24%, 86% 34%, 100% 12%, 100% 100%, 0 100%);
+    }
+
+    .network-stage {
+      position: relative;
+      z-index: 1;
+      min-height: 320px;
+      border-radius: 20px;
+      border: 1px solid rgba(75, 213, 255, 0.14);
+      background:
+        radial-gradient(circle at 50% 42%, rgba(66, 217, 255, 0.12), transparent 28%),
+        repeating-linear-gradient(0deg, rgba(255,255,255,0.035) 0 1px, transparent 1px 30px),
+        repeating-linear-gradient(90deg, rgba(255,255,255,0.035) 0 1px, transparent 1px 30px),
+        rgba(3, 9, 18, 0.58);
+      overflow: hidden;
+    }
+
+    .ring {
+      position: absolute;
+      inset: 58px;
+      border-radius: 50%;
+      border: 1px dashed rgba(66, 217, 255, 0.22);
+      animation: rotate 28s linear infinite;
+    }
+
+    .ring:nth-child(2) {
+      inset: 96px;
+      animation-direction: reverse;
+      border-color: rgba(53, 242, 154, 0.22);
+    }
+
+    @keyframes rotate {
+      to { transform: rotate(360deg); }
+    }
+
+    .node {
+      position: absolute;
+      width: 118px;
+      padding: 10px;
+      border-radius: 16px;
+      border: 1px solid rgba(66, 217, 255, 0.24);
+      background: rgba(8, 19, 34, 0.92);
+      box-shadow: 0 0 24px rgba(66, 217, 255, 0.10);
+    }
+
+    .node strong {
+      display: block;
+      font-size: 12px;
+      margin-bottom: 3px;
+    }
+
+    .node span {
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .node.center {
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      width: 156px;
+      text-align: center;
+      border-color: rgba(53, 242, 154, 0.38);
+      box-shadow: 0 0 40px rgba(53, 242, 154, 0.15);
+    }
+
+    .node.n1 { left: 7%; top: 12%; }
+    .node.n2 { right: 7%; top: 16%; }
+    .node.n3 { left: 10%; bottom: 16%; }
+    .node.n4 { right: 9%; bottom: 12%; }
+
+    .node-status {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 8px;
+      color: var(--green);
+      font-size: 11px;
+    }
+
+    .alert-row,
+    .agent-row,
+    .log-row {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      gap: 6px;
+      padding: 13px 0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    }
+
+    .alert-row:last-child,
+    .agent-row:last-child,
+    .log-row:last-child {
+      border-bottom: 0;
+    }
+
+    .alert-top,
+    .agent-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .severity {
+      border-radius: 999px;
+      padding: 5px 8px;
+      font-size: 10px;
+      font-weight: 900;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .severity.high { color: var(--red); background: rgba(255, 77, 109, 0.12); border: 1px solid rgba(255, 77, 109, 0.24); }
+    .severity.medium { color: var(--orange); background: rgba(255, 140, 66, 0.12); border: 1px solid rgba(255, 140, 66, 0.24); }
+    .severity.low { color: var(--yellow); background: rgba(255, 209, 102, 0.10); border: 1px solid rgba(255, 209, 102, 0.22); }
+    .severity.info { color: var(--cyan); background: rgba(66, 217, 255, 0.10); border: 1px solid rgba(66, 217, 255, 0.22); }
+
+    .alert-row strong,
+    .agent-row strong,
+    .log-row strong {
+      font-size: 13px;
+    }
+
+    .alert-row p,
+    .agent-row p,
+    .log-row p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .bars {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      gap: 13px;
+      margin-top: 10px;
+    }
+
+    .bar-label {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 6px;
+      font-size: 12px;
+      color: #c5d8ea;
+    }
+
+    .bar-track {
+      height: 9px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.07);
+      overflow: hidden;
+    }
+
+    .bar-fill {
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, var(--cyan), var(--green));
+      box-shadow: 0 0 18px rgba(66, 217, 255, 0.22);
+    }
+
+    .log-row {
+      grid-template-columns: 82px 1fr auto;
+      align-items: center;
+    }
+
+    .time {
+      color: var(--cyan);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 12px;
+    }
+
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+
+    .footer-note {
+      color: var(--muted);
+      font-size: 12px;
+      text-align: center;
+      padding: 6px 0 14px;
+    }
+
+    @media (max-width: 1100px) {
+      .shell { grid-template-columns: 1fr; }
+      .sidebar { position: relative; min-height: auto; top: 0; }
+      .kpi { grid-column: span 6; }
+      .map, .alerts, .timeline, .agents { grid-column: span 12; }
+    }
+
+    @media (max-width: 720px) {
+      .shell { width: min(100% - 24px, 1480px); margin: 12px auto; }
+      .topbar { align-items: flex-start; flex-direction: column; }
+      .kpi { grid-column: span 12; }
+      .log-row { grid-template-columns: 1fr; }
+      .node { width: 104px; }
+      .node.center { width: 132px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">🌉</div>
+        <div>
+          <h1>OpenCode2Claude</h1>
+          <p>Cyber/SOC operations console</p>
+        </div>
+      </div>
+
+      <div class="pill"><span class="dot"></span> Bridge online · 127.0.0.1:4000</div>
+
+      <div class="nav-label">Monitoring</div>
+      <div class="nav-item active">🛡️ Command Center</div>
+      <div class="nav-item">🌐 WARP Proxy Pool</div>
+      <div class="nav-item">📊 Token Telemetry</div>
+      <div class="nav-item">🔐 Auth & Rate Limits</div>
+      <div class="nav-item">🧩 Tool Casing Map</div>
+
+      <div class="nav-label">Response</div>
+      <div class="nav-item">🚨 Alert Queue</div>
+      <div class="nav-item">🧾 Structured Logs</div>
+      <div class="nav-item">⚙️ Config Baseline</div>
+    </aside>
+
+    <main>
+      <section class="topbar">
+        <div>
+          <div class="eyebrow"><span class="dot"></span> Live bridge observability</div>
+          <h2>Cyber/SOC Dashboard Concept</h2>
+        </div>
+        <div class="topbar-actions">
+          <button class="button primary">Export incident report</button>
+          <button class="button">Open /metrics</button>
+          <button class="button">Run health check</button>
+        </div>
+      </section>
+
+      <section class="grid">
+        <article class="panel kpi">
+          <div class="panel-header">
+            <div>
+              <h3 class="panel-title">Bridge Health</h3>
+              <p class="panel-subtitle">Axum/Tokio runtime</p>
+            </div>
+            <span class="severity info">OK</span>
+          </div>
+          <div class="metric">
+            <div class="metric-value">99.98<small>%</small></div>
+            <div class="trend">+0.04%</div>
+          </div>
+          <div class="spark"></div>
+        </article>
+
+        <article class="panel kpi">
+          <div class="panel-header">
+            <div>
+              <h3 class="panel-title">Proxy Nodes</h3>
+              <p class="panel-subtitle">Primary + standby</p>
+            </div>
+            <span class="severity low">Watch</span>
+          </div>
+          <div class="metric">
+            <div class="metric-value">5<small>/5</small></div>
+            <div class="trend">healthy</div>
+          </div>
+          <div class="spark"></div>
+        </article>
+
+        <article class="panel kpi">
+          <div class="panel-header">
+            <div>
+              <h3 class="panel-title">Avg Latency</h3>
+              <p class="panel-subtitle">Request routing</p>
+            </div>
+            <span class="severity info">Fast</span>
+          </div>
+          <div class="metric">
+            <div class="metric-value">2.8<small>ms</small></div>
+            <div class="trend">-12%</div>
+          </div>
+          <div class="spark"></div>
+        </article>
+
+        <article class="panel kpi">
+          <div class="panel-header">
+            <div>
+              <h3 class="panel-title">Risk Events</h3>
+              <p class="panel-subtitle">Last 24 hours</p>
+            </div>
+            <span class="severity medium">4</span>
+          </div>
+          <div class="metric">
+            <div class="metric-value">17</div>
+            <div class="trend" style="color: var(--orange)">triage</div>
+          </div>
+          <div class="spark"></div>
+        </article>
+
+        <article class="panel map">
+          <div class="panel-header">
+            <div>
+              <h3 class="panel-title">Network Flow Map</h3>
+              <p class="panel-subtitle">OpenCode CLI → bridge → WARP pool → upstream LLM API</p>
+            </div>
+            <span class="pill"><span class="dot"></span> realtime</span>
+          </div>
+          <div class="network-stage">
+            <div class="ring"></div>
+            <div class="ring"></div>
+            <div class="node center">
+              <strong>Bridge Core</strong>
+              <span>HTTP transform layer</span>
+              <div class="node-status"><span class="dot"></span> online</div>
+            </div>
+            <div class="node n1">
+              <strong>OpenCode CLI</strong>
+              <span>snake_case tools</span>
+              <div class="node-status"><span class="dot"></span> trusted</div>
+            </div>
+            <div class="node n2">
+              <strong>Token Estimator</strong>
+              <span>cost forecast</span>
+              <div class="node-status"><span class="dot"></span> calibrated</div>
+            </div>
+            <div class="node n3">
+              <strong>WARP Pool</strong>
+              <span>weighted egress</span>
+              <div class="node-status"><span class="dot"></span> 3 primary</div>
+            </div>
+            <div class="node n4">
+              <strong>LLM Provider</strong>
+              <span>proxied upstream</span>
+              <div class="node-status"><span class="dot"></span> reachable</div>
+            </div>
+          </div>
+        </article>
+
+        <article class="panel alerts">
+          <div class="panel-header">
+            <div>
+              <h3 class="panel-title">Alert Severity</h3>
+              <p class="panel-subtitle">Prioritized operational events</p>
+            </div>
+            <span class="severity high">SOC</span>
+          </div>
+
+          <div class="alert-row">
+            <div class="alert-top">
+              <strong>Rate-limit pressure detected</strong>
+              <span class="severity high">High</span>
+            </div>
+            <p>Warm-standby pool prepared for failover. No active user sessions remapped yet.</p>
+          </div>
+
+          <div class="alert-row">
+            <div class="alert-top">
+              <strong>Unknown tool casing normalized</strong>
+              <span class="severity medium">Medium</span>
+            </div>
+            <p><span class="mono">legacy_soap_call</span> mapped to <span class="mono">legacySoapCall</span> by heuristic strategy.</p>
+          </div>
+
+          <div class="alert-row">
+            <div class="alert-top">
+              <strong>Auth token missing on API route</strong>
+              <span class="severity medium">Medium</span>
+            </div>
+            <p>Request blocked before handler execution. Source remained below rate threshold.</p>
+          </div>
+
+          <div class="alert-row">
+            <div class="alert-top">
+              <strong>Health endpoint stable</strong>
+              <span class="severity info">Info</span>
+            </div>
+            <p>Bridge and proxy pool remain healthy across the last five polling intervals.</p>
+          </div>
+        </article>
+
+        <article class="panel timeline">
+          <div class="panel-header">
+            <div>
+              <h3 class="panel-title">Realtime Event Log</h3>
+              <p class="panel-subtitle">Structured log stream preview</p>
+            </div>
+            <span class="severity info">JSON</span>
+          </div>
+
+          <div class="log-row">
+            <div class="time">14:21:08</div>
+            <div>
+              <strong>bridge.request.accepted</strong>
+              <p>POST /v1/messages routed to opencode target with session stickiness.</p>
+            </div>
+            <span class="severity info">Info</span>
+          </div>
+
+          <div class="log-row">
+            <div class="time">14:21:09</div>
+            <div>
+              <strong>token.estimate.completed</strong>
+              <p>Estimated 1,847 input tokens, confidence 94%, predicted latency 1.3s.</p>
+            </div>
+            <span class="severity info">Info</span>
+          </div>
+
+          <div class="log-row">
+            <div class="time">14:21:11</div>
+            <div>
+              <strong>proxy.node.cooldown</strong>
+              <p>Primary node ORD exceeded threshold and entered temporary cooldown.</p>
+            </div>
+            <span class="severity low">Low</span>
+          </div>
+
+          <div class="log-row">
+            <div class="time">14:21:12</div>
+            <div>
+              <strong>auth.middleware.denied</strong>
+              <p>Bearer token missing for protected API route; request rejected.</p>
+            </div>
+            <span class="severity medium">Medium</span>
+          </div>
+        </article>
+
+        <article class="panel agents">
+          <div class="panel-header">
+            <div>
+              <h3 class="panel-title">Subsystem Load</h3>
+              <p class="panel-subtitle">Operational capacity snapshot</p>
+            </div>
+          </div>
+
+          <div class="bars">
+            <div>
+              <div class="bar-label"><span>Bridge router</span><span>32%</span></div>
+              <div class="bar-track"><div class="bar-fill" style="width: 32%"></div></div>
+            </div>
+            <div>
+              <div class="bar-label"><span>Token estimator</span><span>48%</span></div>
+              <div class="bar-track"><div class="bar-fill" style="width: 48%"></div></div>
+            </div>
+            <div>
+              <div class="bar-label"><span>Proxy pool</span><span>64%</span></div>
+              <div class="bar-track"><div class="bar-fill" style="width: 64%; background: linear-gradient(90deg, var(--yellow), var(--orange));"></div></div>
+            </div>
+            <div>
+              <div class="bar-label"><span>Auth middleware</span><span>21%</span></div>
+              <div class="bar-track"><div class="bar-fill" style="width: 21%"></div></div>
+            </div>
+          </div>
+
+          <div class="agent-row">
+            <div class="agent-top">
+              <strong>Recommended next step</strong>
+              <span class="severity info">UX</span>
+            </div>
+            <p>Wire this static concept to <span class="mono">/health</span>, <span class="mono">/metrics</span>, and structured logs when a real web UI is introduced.</p>
+          </div>
+        </article>
+      </section>
+
+      <div class="footer-note">Static prototype for visual direction only. No runtime data is loaded from the bridge.</div>
+    </main>
+  </div>
+</body>
+</html>
