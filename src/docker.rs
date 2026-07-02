@@ -145,6 +145,30 @@ pub async fn list_containers(ports: &[u16]) -> Vec<(u16, String, bool)> {
     result
 }
 
+/// Check if the Docker daemon is reachable and return its version string.
+pub async fn check_daemon() -> DockerResult<String> {
+    let output = tokio::process::Command::new("docker")
+        .args(["version", "--format", "{{.Server.Version}}"])
+        .output()
+        .await
+        .map_err(|e| DockerError::CommandFailed(e.to_string()))?;
+
+    if output.status.success() {
+        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Ok(if version.is_empty() {
+            "unknown".into()
+        } else {
+            version
+        })
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(DockerError::CommandFailed(format!(
+            "Docker daemon not reachable: {}",
+            stderr.trim()
+        )))
+    }
+}
+
 /// Get logs from a Docker WARP container (primary only).
 pub async fn container_logs(port: u16, tail: usize) -> DockerResult<String> {
     validate_read_only_port(port)?;

@@ -7,10 +7,12 @@
 pub mod cli;
 pub mod config;
 pub mod docker;
+pub mod doctor;
 pub mod error;
 pub mod handlers;
 pub mod middleware;
 pub mod opencode;
+pub mod output;
 pub mod pidfile;
 pub mod proxy_pool;
 pub mod runtime;
