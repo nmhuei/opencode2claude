@@ -21,6 +21,7 @@ use clap_complete::generate;
 
 use axum::routing::{get, post};
 use axum::Router;
+use comfy_table::{presets, Cell as CtCell, Color as CtColor, ContentArrangement, Table};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -77,7 +78,7 @@ async fn main() {
                 "{} `status` is deprecated, use `server status` instead",
                 "ℹ".cyan().dim()
             );
-            cmd_status_legacy(args, fmt)
+            cmd_status_legacy(args, fmt).await
         }
         Some(Command::Stop(args)) => {
             eprintln!(
@@ -152,7 +153,7 @@ async fn cmd_server(cmd: ServerCommand, fmt: OutputFormat) {
                 }
             } else {
                 match sup.status() {
-                    Ok(status) => cmd_print_status(status),
+                    Ok(status) => cmd_print_status(status).await,
                     Err(e) => eprintln!("{} bridge: status failed — {}.", "✗".red().bold(), e),
                 }
             }
@@ -362,30 +363,10 @@ async fn cmd_proxy(cmd: ProxyCommand, fmt: OutputFormat) {
 
             println!();
             println!(" {}", " Proxy Pool Status".cyan().bold());
-            println!(" {}", "─".repeat(50).cyan().dim());
-
-            for (port, name, running) in &containers {
-                let role = if primary_ports.contains(port) {
-                    "Primary"
-                } else {
-                    "Standby"
-                };
-                let status = if *running {
-                    "● Healthy".green().bold()
-                } else {
-                    "● Stopped".red().bold()
-                };
-                let short_name = name.strip_prefix("opencode-warp-").unwrap_or(name);
-                println!(
-                    " {} {:<8}  {:<10}  {}",
-                    "│".cyan().dim(),
-                    short_name,
-                    role.blue().bold(),
-                    status
-                );
-            }
-            println!(" {}", "─".repeat(50).cyan().dim());
+            let proxy_table = print_proxy_table().await;
+            println!("{}", proxy_table);
             println!();
+
             println!(
                 " {} Primary: {:?}   Standby: {:?}",
                 "ℹ".cyan().dim(),
@@ -693,7 +674,7 @@ fn cmd_start_legacy(args: cli::StartArgs, fmt: OutputFormat) {
     start_daemon(args.port, args.host, fmt);
 }
 
-fn cmd_status_legacy(args: cli::StatusArgs, fmt: OutputFormat) {
+async fn cmd_status_legacy(args: cli::StatusArgs, fmt: OutputFormat) {
     let sup = resolve_runtime(args.port, args.host);
     if fmt == OutputFormat::Json {
         let status_info = ServerStatusInfo::from(sup.status().map_err(|e| e.to_string()));
@@ -702,7 +683,7 @@ fn cmd_status_legacy(args: cli::StatusArgs, fmt: OutputFormat) {
         }
     } else {
         match sup.status() {
-            Ok(status) => cmd_print_status(status),
+            Ok(status) => cmd_print_status(status).await,
             Err(e) => eprintln!("{} bridge: status failed — {}.", "✗".red().bold(), e),
         }
     }
@@ -751,17 +732,99 @@ fn cmd_logs_legacy(fmt: OutputFormat) {
 
 // ── Print utilities ──
 
-fn cmd_print_status(status: SupervisorStatus) {
+fn uptime_str(started_at: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let elapsed_secs = (now.saturating_sub(started_at)) / 1000;
+    let hours = elapsed_secs / 3600;
+    let mins = (elapsed_secs % 3600) / 60;
+    if hours > 0 {
+        format!("{}h {}m", hours, mins)
+    } else {
+        format!("{}m", mins)
+    }
+}
+
+/// Print proxy pool status table (used by `server status` and `proxy ps`).
+async fn print_proxy_table() -> Table {
+    let primary_ports = proxy_pool::get_primary_ports();
+    let ws_ports = proxy_pool::get_warm_standby_ports();
+    let all_ports: Vec<u16> = primary_ports
+        .iter()
+        .chain(ws_ports.iter())
+        .copied()
+        .collect();
+    let containers = docker::list_containers(&all_ports).await;
+
+    let mut table = Table::new();
+    table
+        .load_preset(presets::NOTHING)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(vec!["Node", "Role", "Status", "Port"]);
+
+    for (port, name, running) in &containers {
+        let short_name = name.strip_prefix("opencode-warp-").unwrap_or(name);
+        let role = if primary_ports.contains(port) {
+            "Primary"
+        } else {
+            "Standby"
+        };
+        let (status_str, status_color) = if *running {
+            ("● Alive", CtColor::Green)
+        } else {
+            ("● Dead", CtColor::Red)
+        };
+
+        table.add_row(vec![
+            CtCell::new(short_name),
+            CtCell::new(role),
+            CtCell::new(status_str).fg(status_color),
+            CtCell::new(port.to_string()),
+        ]);
+    }
+
+    table
+}
+
+async fn cmd_print_status(status: SupervisorStatus) {
     println!();
     match status {
-        SupervisorStatus::Running { pid, port } => {
+        SupervisorStatus::Running {
+            pid,
+            port,
+            started_at,
+        } => {
+            let uptime = uptime_str(started_at);
+            let model = std::env::var("OPENCODE_MODEL").unwrap_or_else(|_| "auto".into());
+            let auth = if std::env::var("BRIDGE_AUTH_TOKEN")
+                .ok()
+                .filter(|t| !t.is_empty())
+                .is_some()
+            {
+                "enabled".green().bold().to_string()
+            } else {
+                "disabled".yellow().bold().to_string()
+            };
+
+            // Bridge dashboard header
             println!(
-                " {}  {}  PID: {}  Port: {}",
+                " {}            PID: {:<10} Uptime: {}",
                 "● Online".green().bold(),
-                "│".cyan().dim(),
                 pid.to_string().yellow().bold(),
-                port.to_string().cyan().bold()
+                uptime.cyan().bold()
             );
+            println!(
+                "  Port: {:<14} Model: {}",
+                port.to_string().cyan().bold(),
+                model.blue().bold()
+            );
+            println!("  Auth: {}", auth);
+            println!();
+            println!(" {}", " Proxy Pool".cyan().bold());
+            let proxy_table = print_proxy_table().await;
+            println!("{}", proxy_table);
         }
         SupervisorStatus::Stopped => {
             println!(" {}  Bridge is not running", "● Stopped".red().bold());
@@ -781,10 +844,12 @@ struct ServerStatusInfo {
 impl From<Result<SupervisorStatus, String>> for ServerStatusInfo {
     fn from(result: Result<SupervisorStatus, String>) -> Self {
         match result {
-            Ok(SupervisorStatus::Running { pid, port }) => Self {
+            Ok(SupervisorStatus::Running {
+                pid, started_at, ..
+            }) => Self {
                 status: "running".to_string(),
                 pid: Some(pid),
-                uptime: Some(format!("port {}", port)),
+                uptime: Some(uptime_str(started_at)),
                 message: None,
             },
             Ok(SupervisorStatus::Stopped) => Self {

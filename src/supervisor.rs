@@ -14,15 +14,19 @@ use std::time::Duration;
 
 /// Possible states of the bridge supervisor.
 pub enum SupervisorStatus {
-    /// Bridge is running with the given PID and port.
-    Running { pid: u32, port: u16 },
+    /// Bridge is running with the given PID, port, and started-at timestamp.
+    Running {
+        pid: u32,
+        port: u16,
+        /// Unix epoch millis when the bridge started.
+        started_at: u64,
+    },
     /// Bridge is not running.
     Stopped,
 }
 
 impl SupervisorStatus {
     /// Returns true if the bridge is running.
-    #[allow(dead_code)] // kept for public API completeness
     pub fn is_running(&self) -> bool {
         matches!(self, Self::Running { .. })
     }
@@ -31,7 +35,7 @@ impl SupervisorStatus {
 impl std::fmt::Display for SupervisorStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Running { pid, port } => {
+            Self::Running { pid, port, .. } => {
                 write!(f, "Running (PID: {}, port: {})", pid, port)
             }
             Self::Stopped => write!(f, "Stopped"),
@@ -183,6 +187,7 @@ impl Supervisor {
             Ok(SupervisorStatus::Running {
                 pid,
                 port: pidfile.port,
+                started_at: pidfile.started_at,
             })
         } else {
             // Stale PID file — clean up
