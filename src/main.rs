@@ -3,7 +3,9 @@
 //! This binary provides a local HTTP server that translates Anthropic API requests
 //! into OpenAI-compatible API calls forwarded to opencode.ai/zen/v1/chat/completions.
 
-use opencode2claude::cli::{self, Command, CompletionArgs, ProxyCommand, ServerCommand};
+use opencode2claude::cli::{
+    self, Command, CompletionArgs, InitArgs, ProxyCommand, ServerCommand, UpdateArgs,
+};
 use opencode2claude::config::{self, BridgeConfig};
 use opencode2claude::docker;
 use opencode2claude::doctor;
@@ -52,6 +54,8 @@ async fn main() {
         // New commands
         Some(Command::Doctor) => cmd_doctor(fmt).await,
         Some(Command::Completion(args)) => cmd_completion(args),
+        Some(Command::Update(args)) => cmd_update(args).await,
+        Some(Command::Init(args)) => cmd_init(args).await,
         Some(Command::Env) => cmd_env(fmt),
 
         // Proxy group (unchanged, but uses fmt)
@@ -284,6 +288,105 @@ fn cmd_completion(args: CompletionArgs) {
     let mut cmd = cli::Cli::command();
     let name = cmd.get_name().to_string();
     generate(args.shell, &mut cmd, name, &mut std::io::stdout());
+}
+
+async fn cmd_update(args: UpdateArgs) {
+    use opencode2claude::update::{self, fetch_latest_release, find_matching_asset, has_update};
+
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("opencode2claude/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .unwrap_or_default();
+
+    match fetch_latest_release(&client).await {
+        Ok(release) => {
+            let current = update::current_version();
+            let available = has_update(current, &release);
+
+            if args.check {
+                // Just check mode — don't download
+                if available {
+                    eprintln!(
+                        "{} Update available: {} → {}",
+                        "↑".green().bold(),
+                        current,
+                        release.version
+                    );
+                    if !release.body.is_empty() {
+                        eprintln!("\nRelease notes:\n{}", release.body);
+                    }
+                } else {
+                    eprintln!("{} You are up-to-date ({})", "✓".green().bold(), current);
+                }
+                return;
+            }
+
+            if !available && !args.force {
+                eprintln!(
+                    "{} You are up-to-date ({}) — use --force to reinstall",
+                    "✓".green().bold(),
+                    current
+                );
+                return;
+            }
+
+            // Find matching asset for this platform
+            let asset = match find_matching_asset(&release) {
+                Some(a) => a,
+                None => {
+                    eprintln!(
+                        "{} No binary available for {}/{}",
+                        "✗".red().bold(),
+                        std::env::consts::OS,
+                        std::env::consts::ARCH
+                    );
+                    eprintln!("   Supported platforms: linux (amd64, arm64), macOS (amd64, arm64)");
+                    std::process::exit(1);
+                }
+            };
+
+            eprintln!(
+                "{} Updating {} → {} (downloading {})...",
+                "↓".cyan().bold(),
+                current,
+                release.version,
+                asset.name
+            );
+
+            match update::apply_update(&client, asset).await {
+                Ok(path) => {
+                    eprintln!(
+                        "{} Updated to {} — binary replaced at {}",
+                        "✓".green().bold(),
+                        release.version,
+                        path.display()
+                    );
+                    eprintln!("   Restart the bridge if it was running.");
+                }
+                Err(e) => {
+                    eprintln!("{} Update failed: {}", "✗".red().bold(), e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("{} Failed to check for updates: {}", "✗".red().bold(), e);
+            std::process::exit(1);
+        }
+    }
+}
+
+async fn cmd_init(args: InitArgs) {
+    use opencode2claude::init::generate_config;
+
+    let path = std::path::Path::new(&args.output);
+    match generate_config(path, args.force).await {
+        Ok(()) => {}
+        Err(e) => {
+            eprintln!("{} Init failed: {}", "✗".red().bold(), e);
+            std::process::exit(1);
+        }
+    }
 }
 
 fn cmd_env(fmt: OutputFormat) {
