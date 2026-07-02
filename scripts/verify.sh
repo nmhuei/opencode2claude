@@ -4,7 +4,7 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 export ROOT_DIR
 export PROFILE="${PROFILE:-local}"
-export RUNTIME_DIR="${RUNTIME_DIR:-$ROOT_DIR/.runtime}"
+export RUNTIME_DIR="${RUNTIME_DIR:-$HOME/.opencode2claude}"
 export VERIFY_LOG_DIR="${VERIFY_LOG_DIR:-$RUNTIME_DIR/verify}"
 mkdir -p "$VERIFY_LOG_DIR"
 

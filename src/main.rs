@@ -24,7 +24,6 @@ use axum::Router;
 use comfy_table::{presets, Cell as CtCell, Color as CtColor, ContentArrangement, Table};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use tower_http::limit::RequestBodyLimitLayer;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -954,8 +953,7 @@ fn cmd_print_config() {
 }
 
 fn show_logs(fmt: OutputFormat) {
-    let root = find_project_root();
-    let paths = RuntimePaths::new(root);
+    let paths = RuntimePaths::new();
     let log_path = paths.bridge_log();
 
     if !log_path.exists() {
@@ -1163,30 +1161,6 @@ async fn shutdown_signal() {
 
 // ── Runtime helpers ──
 
-fn find_project_root() -> PathBuf {
-    if let Ok(exe) = std::env::current_exe() {
-        let mut dir = exe.parent().unwrap_or(&exe).to_path_buf();
-        for _ in 0..5 {
-            if dir.join(".runtime").exists() || dir.join("target").exists() {
-                return dir;
-            }
-            if let Some(parent) = dir.parent() {
-                dir = parent.to_path_buf();
-            } else {
-                break;
-            }
-        }
-        if let Some(root) = exe
-            .parent()
-            .and_then(|p| p.parent())
-            .and_then(|p| p.parent())
-        {
-            return root.to_path_buf();
-        }
-    }
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-}
-
 fn resolve_runtime(port: Option<u16>, host: Option<String>) -> Supervisor {
     let p = port
         .or_else(|| {
@@ -1198,6 +1172,6 @@ fn resolve_runtime(port: Option<u16>, host: Option<String>) -> Supervisor {
     let h = host
         .or_else(|| std::env::var("BRIDGE_HOST").ok())
         .unwrap_or_else(|| config::DEFAULT_HOST.to_string());
-    let paths = RuntimePaths::new(find_project_root());
+    let paths = RuntimePaths::new();
     Supervisor::new(paths, p, h)
 }
