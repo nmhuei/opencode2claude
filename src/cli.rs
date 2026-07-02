@@ -195,7 +195,11 @@ pub enum ProxyCommand {
     Restart,
 
     /// Purge and recreate all primary proxy containers
-    Purge,
+    Purge {
+        /// Skip confirmation prompt
+        #[arg(short, long)]
+        yes: bool,
+    },
 
     /// View proxy container logs
     Logs,
