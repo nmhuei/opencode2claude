@@ -9,8 +9,8 @@ dist/
 # Logs
 # OS files
 RELEASE_GUIDE.md
-.runtime/
 # Runtime files
+.opencode2claude/
 /target
 # Temporary test files (excluding tests/ directory)
 /test

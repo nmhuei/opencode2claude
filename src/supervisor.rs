@@ -1,7 +1,7 @@
 //! Bridge supervisor — start, stop, and status commands.
 //!
 //! `start` spawns `serve` as a background child process, writes its PID,
-//! and redirects stdout/stderr to `.runtime/opencode2claude.log`.
+//! and redirects stdout/stderr to `~/.opencode2claude/opencode2claude.log`.
 //! `stop` reads the PID, kills the process, cleans up the PID file.
 //! `status` checks if the PID file exists and the process is alive.
 
@@ -85,7 +85,7 @@ impl Supervisor {
         }
     }
 
-    /// Start the bridge: create `.runtime/`, spawn `serve` as background child, write PID.
+    /// Start the bridge: create `~/.opencode2claude/`, spawn `serve` as background child, write PID.
     pub fn start(&self) -> Result<(), SupervisorError> {
         // Check if already running
         let status = self.status()?;
