@@ -71,7 +71,7 @@ async fn main() {
                 "{} `start` is deprecated, use `server start` instead",
                 "ℹ".cyan().dim()
             );
-            cmd_start_legacy(args, fmt)
+            cmd_start_legacy(args, fmt).await
         }
         Some(Command::Status(args)) => {
             eprintln!(
@@ -92,7 +92,7 @@ async fn main() {
                 "{} `restart` is deprecated, use `server restart` instead",
                 "ℹ".cyan().dim()
             );
-            cmd_restart_legacy(fmt)
+            cmd_restart_legacy(fmt).await
         }
         Some(Command::Logs) => {
             eprintln!(
@@ -128,7 +128,7 @@ async fn cmd_server(cmd: ServerCommand, fmt: OutputFormat) {
                 };
                 cmd_run_server(bridge_args).await;
             } else {
-                start_daemon(args.port, args.host, fmt);
+                start_daemon(args.port, args.host, fmt).await;
             }
         }
         ServerCommand::Stop(args) => {
@@ -153,7 +153,7 @@ async fn cmd_server(cmd: ServerCommand, fmt: OutputFormat) {
                 }
             } else {
                 match sup.status() {
-                    Ok(status) => cmd_print_status(status).await,
+                    Ok(status) => cmd_print_status(status, fmt).await,
                     Err(e) => eprintln!("{} bridge: status failed — {}.", "✗".red().bold(), e),
                 }
             }
@@ -171,6 +171,7 @@ async fn cmd_server(cmd: ServerCommand, fmt: OutputFormat) {
                         }
                     } else {
                         println!("{} Bridge restarted. {}", "✓".green().bold(), status);
+                        maybe_print_proxy_table(fmt).await;
                     }
                 }
                 Err(e) => {
@@ -213,7 +214,7 @@ async fn cmd_server(cmd: ServerCommand, fmt: OutputFormat) {
     }
 }
 
-fn start_daemon(port: Option<u16>, host: Option<String>, fmt: OutputFormat) {
+async fn start_daemon(port: Option<u16>, host: Option<String>, fmt: OutputFormat) {
     let sup = resolve_runtime(port, host);
 
     if fmt == OutputFormat::Json {
@@ -253,6 +254,7 @@ fn start_daemon(port: Option<u16>, host: Option<String>, fmt: OutputFormat) {
                 "✓".green().bold(),
                 status
             ));
+            maybe_print_proxy_table(fmt).await;
         }
         Err(e) => {
             spinner.finish_with_message(format!("{} Error: {}", "✗".red().bold(), e));
@@ -670,8 +672,8 @@ async fn cmd_serve_legacy(args: cli::ServeArgs) {
     cmd_run_server(bridge_args).await;
 }
 
-fn cmd_start_legacy(args: cli::StartArgs, fmt: OutputFormat) {
-    start_daemon(args.port, args.host, fmt);
+async fn cmd_start_legacy(args: cli::StartArgs, fmt: OutputFormat) {
+    start_daemon(args.port, args.host, fmt).await;
 }
 
 async fn cmd_status_legacy(args: cli::StatusArgs, fmt: OutputFormat) {
@@ -683,7 +685,7 @@ async fn cmd_status_legacy(args: cli::StatusArgs, fmt: OutputFormat) {
         }
     } else {
         match sup.status() {
-            Ok(status) => cmd_print_status(status).await,
+            Ok(status) => cmd_print_status(status, fmt).await,
             Err(e) => eprintln!("{} bridge: status failed — {}.", "✗".red().bold(), e),
         }
     }
@@ -703,7 +705,7 @@ fn cmd_stop_legacy(args: cli::StopArgs) {
     }
 }
 
-fn cmd_restart_legacy(fmt: OutputFormat) {
+async fn cmd_restart_legacy(fmt: OutputFormat) {
     let sup = resolve_runtime(None, None);
     let _ = sup.stop();
     match sup.start() {
@@ -716,6 +718,7 @@ fn cmd_restart_legacy(fmt: OutputFormat) {
                 }
             } else {
                 println!("{} Bridge restarted. {}", "✓".green().bold(), status);
+                maybe_print_proxy_table(fmt).await;
             }
         }
         Err(e) => {
@@ -788,7 +791,18 @@ async fn print_proxy_table() -> Table {
     table
 }
 
-async fn cmd_print_status(status: SupervisorStatus) {
+/// Print proxy pool table in Human mode; no-op in Json/Quiet.
+async fn maybe_print_proxy_table(fmt: OutputFormat) {
+    if fmt == OutputFormat::Human {
+        println!();
+        println!(" {}", " Proxy Pool".cyan().bold());
+        let proxy_table = print_proxy_table().await;
+        println!("{}", proxy_table);
+    }
+}
+
+/// Bridge status dashboard with uptime and proxy pool table.
+async fn cmd_print_status(status: SupervisorStatus, fmt: OutputFormat) {
     println!();
     match status {
         SupervisorStatus::Running {
@@ -821,10 +835,7 @@ async fn cmd_print_status(status: SupervisorStatus) {
                 model.blue().bold()
             );
             println!("  Auth: {}", auth);
-            println!();
-            println!(" {}", " Proxy Pool".cyan().bold());
-            let proxy_table = print_proxy_table().await;
-            println!("{}", proxy_table);
+            maybe_print_proxy_table(fmt).await;
         }
         SupervisorStatus::Stopped => {
             println!(" {}  Bridge is not running", "● Stopped".red().bold());
