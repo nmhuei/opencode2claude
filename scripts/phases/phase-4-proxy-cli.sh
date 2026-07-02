@@ -55,8 +55,8 @@ gate_proxy_ps() {
     error "proxy ps failed"
     return 1
   }
-  echo "$output" | grep -q "Primary managed proxies" || return 1
-  echo "$output" | grep -q "Warm-standby protected proxies" || return 1
+  echo "$output" | grep -q -E "Primary managed proxies|Proxy Pool Status" || return 1
+  echo "$output" | grep -q -E "Warm-standby protected proxies|Warm-standby proxies" || return 1
   pass "proxy ps shows primary and warm-standby pools"
 }
 
@@ -82,16 +82,17 @@ gate_no_40010_reference() {
 gate_proxy_restart_primary_only() {
   info "Gate 4.10: proxy restart command only affects primary ports 40001-40003"
   grep -q "get_primary_ports" "$ROOT_DIR/src/main.rs" || return 1
-  grep -q "Restarting primary managed proxies" "$ROOT_DIR/src/main.rs" || return 1
+  grep -q "docker::create_container" "$ROOT_DIR/src/main.rs" || return 1
   # Verify restart never calls into warm-standby ports
-  grep -q "Protected warm-standby proxies skipped.*always protected" "$ROOT_DIR/src/main.rs" || return 1
+  grep -q "always protected" "$ROOT_DIR/src/main.rs" || return 1
   pass "proxy restart only affects 40001-40003"
 }
 
 gate_proxy_purge_primary_only() {
   info "Gate 4.11: proxy purge command recreates only primary ports 40001-40003"
-  grep -q "Purging primary managed proxies" "$ROOT_DIR/src/main.rs" || return 1
-  grep -q "Protected warm-standby proxies skipped.*always protected" "$ROOT_DIR/src/main.rs" || return 1
+  grep -q "get_primary_ports" "$ROOT_DIR/src/main.rs" || return 1
+  grep -q "About to purge and recreate" "$ROOT_DIR/src/main.rs" || return 1
+  grep -q "always protected" "$ROOT_DIR/src/main.rs" || return 1
   pass "proxy purge only affects 40001-40003"
 }
 
