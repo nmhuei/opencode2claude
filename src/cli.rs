@@ -5,6 +5,8 @@
 //! - `proxy` — manage proxy pool
 //! - `env` — display environment info
 //! - `doctor` — diagnose common issues
+//! - `update` — self-update binary
+//! - `init` — generate default config
 //! - `completion` — generate shell completions
 
 use crate::output::ColorChoice;
@@ -70,6 +72,12 @@ pub enum Command {
 
     /// Generate shell completion scripts
     Completion(CompletionArgs),
+
+    /// Self-update to the latest release
+    Update(UpdateArgs),
+
+    /// Generate a default config file
+    Init(InitArgs),
 
     // Legacy aliases (hidden, backward-compatible)
     /// Start the API bridge server (foreground)
@@ -274,4 +282,28 @@ pub type StopArgs = StartArgs;
 pub struct CompletionArgs {
     /// Shell to generate completions for (bash, zsh, fish, powershell, elvish)
     pub shell: clap_complete::Shell,
+}
+
+/// Arguments for `update`.
+#[derive(Args, Debug)]
+pub struct UpdateArgs {
+    /// Check for updates without applying
+    #[arg(long)]
+    pub check: bool,
+
+    /// Force reinstall even if up-to-date
+    #[arg(long)]
+    pub force: bool,
+}
+
+/// Arguments for `init`.
+#[derive(Args, Debug)]
+pub struct InitArgs {
+    /// Output path for the config file (default: ./opencode2claude.toml)
+    #[arg(short, long, default_value = "opencode2claude.toml")]
+    pub output: String,
+
+    /// Overwrite existing file without prompting
+    #[arg(short, long)]
+    pub force: bool,
 }
