@@ -376,4 +376,98 @@ mod tests {
         assert_eq!(CheckStatus::Pass, CheckStatus::Pass);
         assert_ne!(CheckStatus::Pass, CheckStatus::Warn);
     }
+
+    #[test]
+    fn test_check_result_warn_display() {
+        let cr = CheckResult {
+            name: "warn-test".into(),
+            label: "Warn Check".into(),
+            status: CheckStatus::Warn,
+            message: "something degraded".into(),
+        };
+        let display = cr.to_string();
+        assert!(display.contains('⚠'));
+    }
+
+    #[test]
+    fn test_check_result_fail_display() {
+        let cr = CheckResult {
+            name: "fail-test".into(),
+            label: "Fail Check".into(),
+            status: CheckStatus::Fail,
+            message: "something broken".into(),
+        };
+        let display = cr.to_string();
+        assert!(display.contains('✗'));
+    }
+
+    #[test]
+    fn test_doctor_report_all_pass_display() {
+        let report = DoctorReport {
+            checks: vec![CheckResult {
+                name: "test".into(),
+                label: "Test".into(),
+                status: CheckStatus::Pass,
+                message: "ok".into(),
+            }],
+            summary: DoctorSummary::AllPass,
+        };
+        let display = report.to_string();
+        assert!(display.contains("All checks passed"));
+    }
+
+    #[test]
+    fn test_doctor_report_warnings_display() {
+        let report = DoctorReport {
+            checks: vec![],
+            summary: DoctorSummary::Warnings(1),
+        };
+        let display = report.to_string();
+        assert!(display.contains("warning"));
+    }
+
+    #[test]
+    fn test_doctor_report_failures_display() {
+        let report = DoctorReport {
+            checks: vec![],
+            summary: DoctorSummary::Failures(2),
+        };
+        let display = report.to_string();
+        assert!(display.contains("failure"));
+    }
+
+    #[test]
+    fn test_check_result_serialize_pass() {
+        let cr = CheckResult {
+            name: "test".into(),
+            label: "Test".into(),
+            status: CheckStatus::Pass,
+            message: "ok".into(),
+        };
+        let json = serde_json::to_string(&cr).unwrap();
+        assert!(json.contains("\"name\":\"test\""));
+        assert!(json.contains("\"status\":\"Pass\""));
+    }
+
+    #[test]
+    fn test_check_result_serialize_fail() {
+        let cr = CheckResult {
+            name: "fail".into(),
+            label: "Fail".into(),
+            status: CheckStatus::Fail,
+            message: "broken".into(),
+        };
+        let json = serde_json::to_string(&cr).unwrap();
+        assert!(json.contains("\"status\":\"Fail\""));
+    }
+
+    #[test]
+    fn test_doctor_report_serialize() {
+        let report = DoctorReport {
+            checks: vec![],
+            summary: DoctorSummary::AllPass,
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.contains("\"summary\":\"AllPass\""));
+    }
 }

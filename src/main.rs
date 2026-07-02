@@ -21,6 +21,7 @@ use clap_complete::generate;
 
 use axum::routing::{get, post};
 use axum::Router;
+use indicatif::{ProgressBar, ProgressStyle};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use tower_http::limit::RequestBodyLimitLayer;
@@ -134,7 +135,10 @@ async fn cmd_server(cmd: ServerCommand, fmt: OutputFormat) {
             match sup.stop() {
                 Ok(()) => println!("Bridge stopped."),
                 Err(e) => {
-                    eprintln!("Error: {}", e);
+                    eprintln!("{} bridge: stop failed — {}", "✗".red().bold(), e);
+                    eprintln!(
+                        "   Hint: Is the bridge running? Try `opencode2claude server status`"
+                    );
                     std::process::exit(1);
                 }
             }
@@ -149,7 +153,7 @@ async fn cmd_server(cmd: ServerCommand, fmt: OutputFormat) {
             } else {
                 match sup.status() {
                     Ok(status) => cmd_print_status(status),
-                    Err(e) => eprintln!("Bridge: Error — {}", e),
+                    Err(e) => eprintln!("{} bridge: status failed — {}.", "✗".red().bold(), e),
                 }
             }
         }
@@ -169,7 +173,8 @@ async fn cmd_server(cmd: ServerCommand, fmt: OutputFormat) {
                     }
                 }
                 Err(e) => {
-                    eprintln!("{} Error: {}", "✗".red().bold(), e);
+                    eprintln!("{} restart: {}", "✗".red().bold(), e);
+                    eprintln!("   Hint: Check the PID file or run `opencode2claude server start`");
                     std::process::exit(1);
                 }
             }
@@ -209,20 +214,48 @@ async fn cmd_server(cmd: ServerCommand, fmt: OutputFormat) {
 
 fn start_daemon(port: Option<u16>, host: Option<String>, fmt: OutputFormat) {
     let sup = resolve_runtime(port, host);
-    match sup.start() {
-        Ok(()) => {
-            let status = sup.status().unwrap_or(SupervisorStatus::Stopped);
-            if fmt == OutputFormat::Json {
+
+    if fmt == OutputFormat::Json {
+        // No spinner in JSON mode — output structured data only
+        match sup.start() {
+            Ok(()) => {
+                let status = sup.status().unwrap_or(SupervisorStatus::Stopped);
                 let info = ServerStatusInfo::from(Ok(status));
                 if let Ok(s) = serde_json::to_string_pretty(&info) {
                     println!("{s}");
                 }
-            } else {
-                println!("{} Bridge started. {}", "✓".green().bold(), status);
+            }
+            Err(e) => {
+                eprintln!("{} start: {}", "✗".red().bold(), e);
+                eprintln!("   Hint: Check if the bridge is already running. Try: `opencode2claude server stop`");
+                std::process::exit(1);
             }
         }
+        return;
+    }
+
+    // Human / Quiet: spinner while starting
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(
+        ProgressStyle::with_template("{spinner} {msg}")
+            .unwrap()
+            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
+    );
+    spinner.set_message("Starting bridge daemon...");
+    spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+
+    match sup.start() {
+        Ok(()) => {
+            let status = sup.status().unwrap_or(SupervisorStatus::Stopped);
+            spinner.finish_with_message(format!(
+                "{} Bridge started. {}",
+                "✓".green().bold(),
+                status
+            ));
+        }
         Err(e) => {
-            eprintln!("{} Error: {}", "✗".red().bold(), e);
+            spinner.finish_with_message(format!("{} Error: {}", "✗".red().bold(), e));
+            eprintln!("   Hint: Check if the bridge is already running. Try: `opencode2claude server stop`");
             std::process::exit(1);
         }
     }
@@ -386,17 +419,46 @@ async fn cmd_proxy(cmd: ProxyCommand, fmt: OutputFormat) {
                 return;
             }
 
-            println!("Restarting primary managed proxies:");
-            for port in proxy_pool::get_primary_ports() {
-                print!("  {}... ", port);
-                match docker::create_container(port).await {
-                    Ok(()) => println!("{}", "OK".green().bold()),
-                    Err(DockerError::Protected(msg)) => {
-                        println!("{} ({})", "SKIPPED".yellow().bold(), msg)
+            let ports = proxy_pool::get_primary_ports();
+            let mp = indicatif::MultiProgress::new();
+            let sty =
+                ProgressStyle::with_template("{prefix} [{bar:20.cyan/blue}] {pos}/{len} {msg}")
+                    .unwrap()
+                    .progress_chars("=> ");
+
+            // Create progress bars
+            let mut bars: Vec<(u16, ProgressBar)> = Vec::new();
+            for port in &ports {
+                let pb = mp.add(ProgressBar::new(1));
+                pb.set_style(sty.clone());
+                pb.set_prefix(format!("  {}", port));
+                pb.set_message("restarting...");
+                bars.push((*port, pb));
+            }
+
+            // Run all restarts sequentially, updating each bar
+            for (port, pb) in &bars {
+                match docker::create_container(*port).await {
+                    Ok(()) => {
+                        pb.set_message("OK".to_string());
+                        pb.inc(1);
                     }
-                    Err(e) => println!("{}: {}", "ERROR".red().bold(), e),
+                    Err(DockerError::Protected(msg)) => {
+                        pb.set_message(format!("SKIPPED ({})", msg));
+                        pb.finish();
+                    }
+                    Err(e) => {
+                        pb.set_message(format!("ERROR: {}", e));
+                        pb.finish();
+                    }
                 }
             }
+
+            for (_, pb) in bars {
+                pb.finish_and_clear();
+            }
+            mp.clear().unwrap();
+
             println!();
             println!(
                 " {}",
@@ -449,8 +511,9 @@ async fn cmd_proxy(cmd: ProxyCommand, fmt: OutputFormat) {
                 }
             }
         }
-        ProxyCommand::Purge => {
+        ProxyCommand::Purge { yes } => {
             if fmt == OutputFormat::Json {
+                // JSON path: no spinner, no confirm
                 #[derive(serde::Serialize)]
                 struct PurgeResult {
                     port: u16,
@@ -485,24 +548,104 @@ async fn cmd_proxy(cmd: ProxyCommand, fmt: OutputFormat) {
                 return;
             }
 
-            println!("Purging primary managed proxies:");
-            for port in proxy_pool::get_primary_ports() {
-                print!("  {} remove... ", port);
-                match docker::remove_container(port).await {
-                    Ok(()) => println!("{}", "removed".green().bold()),
-                    Err(DockerError::Protected(msg)) => {
-                        println!("{} ({})", "SKIPPED".yellow().bold(), msg)
+            // Quiet mode: skip confirm, no decoration
+            if fmt == OutputFormat::Quiet {
+                for port in proxy_pool::get_primary_ports() {
+                    let _ = docker::remove_container(port).await;
+                    let _ = docker::create_container(port).await;
+                }
+                return;
+            }
+
+            // Human mode: confirm + MultiProgress
+            if !yes {
+                let ports = proxy_pool::get_primary_ports();
+                eprintln!(
+                    "{} About to purge and recreate {} primary proxies: {:?}",
+                    "⚠".yellow().bold(),
+                    ports.len(),
+                    ports
+                );
+                eprintln!(
+                    "{} This will reset all WARP connections.",
+                    "⚠".yellow().bold()
+                );
+                eprint!("Continue? [y/N] ");
+                use std::io::Write;
+                std::io::stdout().flush().ok();
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input).ok();
+                let input = input.trim().to_lowercase();
+                if input != "y" && input != "yes" {
+                    println!("Aborted.");
+                    return;
+                }
+            }
+
+            let ports = proxy_pool::get_primary_ports();
+            let mp = indicatif::MultiProgress::new();
+            let sty =
+                ProgressStyle::with_template("{prefix} [{bar:20.cyan/blue}] {pos}/{len} {msg}")
+                    .unwrap()
+                    .progress_chars("=> ");
+
+            // Phase 1: remove
+            let mut bars: Vec<(u16, ProgressBar)> = Vec::new();
+            for port in &ports {
+                let pb = mp.add(ProgressBar::new(1));
+                pb.set_style(sty.clone());
+                pb.set_prefix(format!("  {} remove", port));
+                pb.set_message("removing...");
+                bars.push((*port, pb));
+            }
+
+            for (port, pb) in &bars {
+                match docker::remove_container(*port).await {
+                    Ok(()) => {
+                        pb.set_message("removed".to_string());
+                        pb.inc(1);
                     }
-                    Err(e) => println!("{}: {}", "ERROR".red().bold(), e),
+                    Err(DockerError::Protected(msg)) => {
+                        pb.set_message(format!("SKIPPED ({})", msg));
+                        pb.finish();
+                    }
+                    Err(e) => {
+                        pb.set_message(format!("ERROR: {}", e));
+                        pb.finish();
+                    }
                 }
             }
-            for port in proxy_pool::get_primary_ports() {
-                print!("  {} recreate... ", port);
-                match docker::create_container(port).await {
-                    Ok(()) => println!("{}", "OK".green().bold()),
-                    Err(e) => println!("{}: {}", "ERROR".red().bold(), e),
+            for (_, pb) in bars {
+                pb.finish_and_clear();
+            }
+
+            // Phase 2: recreate
+            let mut bars: Vec<(u16, ProgressBar)> = Vec::new();
+            for port in &ports {
+                let pb = mp.add(ProgressBar::new(1));
+                pb.set_style(sty.clone());
+                pb.set_prefix(format!("  {} recreate", port));
+                pb.set_message("creating...");
+                bars.push((*port, pb));
+            }
+
+            for (port, pb) in &bars {
+                match docker::create_container(*port).await {
+                    Ok(()) => {
+                        pb.set_message("OK".to_string());
+                        pb.inc(1);
+                    }
+                    Err(e) => {
+                        pb.set_message(format!("ERROR: {}", e));
+                        pb.finish();
+                    }
                 }
             }
+            for (_, pb) in bars {
+                pb.finish_and_clear();
+            }
+
+            mp.clear().unwrap();
             println!();
             println!(
                 " {}",
@@ -560,7 +703,7 @@ fn cmd_status_legacy(args: cli::StatusArgs, fmt: OutputFormat) {
     } else {
         match sup.status() {
             Ok(status) => cmd_print_status(status),
-            Err(e) => eprintln!("Bridge: Error — {}", e),
+            Err(e) => eprintln!("{} bridge: status failed — {}.", "✗".red().bold(), e),
         }
     }
 }
@@ -570,7 +713,10 @@ fn cmd_stop_legacy(args: cli::StopArgs) {
     match sup.stop() {
         Ok(()) => println!("Bridge stopped."),
         Err(e) => {
-            eprintln!("Error: {}", e);
+            eprintln!("{} bridge: stop failed — {}", "✗".red().bold(), e);
+            eprintln!(
+                "   Hint: Try `opencode2claude server status` to check if the bridge is running."
+            );
             std::process::exit(1);
         }
     }
@@ -592,7 +738,8 @@ fn cmd_restart_legacy(fmt: OutputFormat) {
             }
         }
         Err(e) => {
-            eprintln!("{} Error: {}", "✗".red().bold(), e);
+            eprintln!("{} restart: {}", "✗".red().bold(), e);
+            eprintln!("   Hint: Check the PID file or run `opencode2claude server start`");
             std::process::exit(1);
         }
     }
@@ -736,7 +883,10 @@ fn show_logs(fmt: OutputFormat) {
     let log_path = paths.bridge_log();
 
     if !log_path.exists() {
-        eprintln!("No log file found. Start the daemon first.");
+        eprintln!(
+            "{} No log file found. Start the daemon first: `opencode2claude server start`",
+            "✗".red().bold()
+        );
         std::process::exit(1);
     }
 
@@ -783,7 +933,8 @@ fn show_logs(fmt: OutputFormat) {
             }
         }
         Err(e) => {
-            eprintln!("Error reading log file: {}", e);
+            eprintln!("{} log: {}", "✗".red().bold(), e);
+            eprintln!("   Hint: Is the daemon running? Try `opencode2claude server start`");
             std::process::exit(1);
         }
     }
