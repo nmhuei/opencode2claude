@@ -1,14 +1,13 @@
 //! Command-line interface for OpenCode2Claude.
 //!
-//! Uses Clap derive macros to define a subcommand-based CLI:
-//! - `serve` (default): Start the API bridge server
-//! - `start`: Start the supervisor daemon
-//! - `status`: Show bridge status
-//! - `stop`: Stop the bridge
-//! - `restart`: Restart the bridge
-//! - `env`: Display environment variables for use with Claude Code
-//! - `logs`: View bridge daemon logs
+//! Defines the hierarchical command tree using Clap derive macros:
+//! - `server` — manage the bridge daemon
+//! - `proxy` — manage proxy pool
+//! - `env` — display environment info
+//! - `doctor` — diagnose common issues
+//! - `completion` — generate shell completions
 
+use crate::output::ColorChoice;
 use clap::{Args, Parser, Subcommand};
 
 /// Command-line interface for the OpenCode2Claude bridge.
@@ -16,37 +15,195 @@ use clap::{Args, Parser, Subcommand};
 #[command(
     name = "opencode2claude",
     version,
-    about = "A blazing-fast API bridge connecting Claude Code to OpenCode CLI and any LLM"
+    about = "A blazing-fast API bridge connecting Claude Code to any LLM",
+    long_about = "OpenCode2Claude is a local HTTP proxy that translates Anthropic Messages API \n\
+                  requests into OpenAI-compatible API calls. Use Claude Code with any LLM \n\
+                  provider — DeepSeek, GPT-4o, Gemini, Llama, and more.",
+    styles = clap_styles()
 )]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
+
+    /// Output in JSON format (machine-readable)
+    #[arg(long, global = true, conflicts_with = "quiet")]
+    pub json: bool,
+
+    /// Minimal output (errors/success only)
+    #[arg(long, global = true, conflicts_with = "json")]
+    pub quiet: bool,
+
+    /// Color output: auto (default), always, never
+    #[arg(long, global = true, value_enum, default_value_t = ColorChoice::default())]
+    pub color: ColorChoice,
+}
+
+/// Clap help text styling for a cyber/SOC aesthetic.
+fn clap_styles() -> clap::builder::Styles {
+    use clap::builder::styling::AnsiColor;
+    clap::builder::Styles::styled()
+        .header(AnsiColor::Green.on_default().bold())
+        .usage(AnsiColor::Green.on_default().bold())
+        .literal(AnsiColor::Cyan.on_default().bold())
+        .placeholder(AnsiColor::Blue.on_default().bold())
+        .error(AnsiColor::Red.on_default().bold())
+        .valid(AnsiColor::Cyan.on_default().bold())
 }
 
 /// Bridge subcommands.
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum Command {
-    /// Manage proxy pools
+    /// Manage the bridge server (start, stop, status, etc.)
+    #[command(subcommand)]
+    Server(ServerCommand),
+
+    /// Manage WARP proxy pools
     #[command(subcommand)]
     Proxy(ProxyCommand),
-    /// Start the API bridge server
+
+    /// Display environment information for Claude Code
+    Env,
+
+    /// Diagnose common issues with the bridge and its dependencies
+    Doctor,
+
+    /// Generate shell completion scripts
+    Completion(CompletionArgs),
+
+    // Legacy aliases (hidden, backward-compatible)
+    /// Start the API bridge server (foreground)
+    #[command(hide = true)]
     Serve(ServeArgs),
     /// Start the bridge as a background daemon
+    #[command(hide = true)]
     Start(StartArgs),
     /// Show bridge status
+    #[command(hide = true)]
     Status(StatusArgs),
     /// Stop the bridge
+    #[command(hide = true)]
     Stop(StopArgs),
     /// Restart the bridge
+    #[command(hide = true)]
     Restart,
-    /// Display environment information
-    Env,
     /// View bridge logs
+    #[command(hide = true)]
     Logs,
 }
 
-/// Arguments for the `serve` subcommand.
+/// Server management subcommands.
+#[derive(Subcommand)]
+pub enum ServerCommand {
+    /// Start the bridge server
+    ///
+    /// By default starts as a background daemon.
+    /// Use `-f` or `--foreground` to run in the current terminal.
+    Start(ServerStartArgs),
+
+    /// Stop the bridge daemon
+    Stop(ServerStopArgs),
+
+    /// Show bridge status
+    Status(ServerStatusArgs),
+
+    /// Restart the bridge daemon
+    Restart,
+
+    /// View bridge daemon logs
+    Logs,
+
+    /// Show current configuration
+    Config,
+}
+
+/// Arguments for `server start`.
+#[derive(Args, Debug, Default)]
+pub struct ServerStartArgs {
+    /// Run in foreground (don't daemonize)
+    #[arg(short = 'f', long)]
+    pub foreground: bool,
+
+    /// Override bridge port
+    #[arg(short = 'p', long)]
+    pub port: Option<u16>,
+
+    /// Override bind address
+    #[arg(long)]
+    pub host: Option<String>,
+
+    /// Path to custom TOML config file
+    #[arg(short = 'c', long)]
+    pub config: Option<String>,
+
+    /// Override model
+    #[arg(short = 'm', long)]
+    pub model: Option<String>,
+
+    /// Override shell policy (disabled, allowlist, unrestricted)
+    #[arg(long = "shell-policy")]
+    pub shell_policy: Option<String>,
+
+    /// Tavily search API key override
+    #[arg(long)]
+    pub tavily_api_key: Option<String>,
+
+    /// Exa search API key override
+    #[arg(long)]
+    pub exa_api_key: Option<String>,
+
+    /// Serper.dev search API key override
+    #[arg(long)]
+    pub serper_api_key: Option<String>,
+
+    /// SearXNG instance URL override
+    #[arg(long)]
+    pub searxng_url: Option<String>,
+
+    /// SearXNG API key override
+    #[arg(long)]
+    pub searxng_api_key: Option<String>,
+}
+
+/// Arguments for `server stop`.
+#[derive(Args, Debug, Default)]
+pub struct ServerStopArgs {
+    /// Override bridge port
+    #[arg(short = 'p', long)]
+    pub port: Option<u16>,
+
+    /// Override bind address
+    #[arg(long)]
+    pub host: Option<String>,
+}
+
+/// Arguments for `server status`.
+pub type ServerStatusArgs = ServerStopArgs;
+
+/// Proxy pool management subcommands.
+#[derive(Subcommand)]
+pub enum ProxyCommand {
+    /// List proxy pool status (table view)
+    #[command(name = "ps")]
+    Ps,
+
+    /// Show proxy pool status (alias for ps)
+    #[command(hide = true)]
+    Status,
+
+    /// Restart primary managed proxies
+    Restart,
+
+    /// Purge and recreate all primary proxy containers
+    Purge,
+
+    /// View proxy container logs
+    Logs,
+}
+
+// ── Legacy backward-compatible types ──
+
+/// Arguments for `serve` (legacy, hidden).
 #[derive(Args, Default)]
 pub struct ServeArgs {
     /// Override bridge port
@@ -90,7 +247,7 @@ pub struct ServeArgs {
     pub searxng_api_key: Option<String>,
 }
 
-/// Base args shared by start/status/stop (port and host).
+/// Base args shared by start/status/stop (legacy, hidden).
 #[derive(Args, Default)]
 pub struct StartArgs {
     /// Override bridge port for the daemon
@@ -102,23 +259,15 @@ pub struct StartArgs {
     pub host: Option<String>,
 }
 
-/// Arguments for the `status` subcommand.
+/// Arguments for the `status` subcommand (legacy).
 pub type StatusArgs = StartArgs;
 
-/// Arguments for the `stop` subcommand.
+/// Arguments for the `stop` subcommand (legacy).
 pub type StopArgs = StartArgs;
 
-/// Proxy pool management subcommands.
-#[derive(Subcommand)]
-pub enum ProxyCommand {
-    /// List proxy pool status
-    Ps,
-    /// Restart primary managed proxies
-    Restart,
-    /// Show proxy pool (alias for ps)
-    Status,
-    /// View proxy container logs
-    Logs,
-    /// Purge and recreate all primary proxy containers
-    Purge,
+/// Arguments for `completion <shell>`.
+#[derive(Args, Debug)]
+pub struct CompletionArgs {
+    /// Shell to generate completions for (bash, zsh, fish, powershell, elvish)
+    pub shell: clap_complete::Shell,
 }

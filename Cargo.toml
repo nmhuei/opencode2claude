@@ -23,8 +23,13 @@ tower-http = { version = "0.5", features = ["trace", "limit"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "1.0"
+anyhow = "1.0"
 toml = "0.8"
-clap = { version = "4.4", features = ["derive"] }
+clap = { version = "4.4", features = ["derive", "wrap_help", "string"] }
+clap_complete = "4.5"
+yansi = "1.0"
+comfy-table = "7.1"
+indicatif = "0.17"
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "socks", "rustls-tls"] }
