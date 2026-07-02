@@ -124,6 +124,37 @@ pub fn extract_prompt(messages: &[Message]) -> String {
     prompt.trim().to_string()
 }
 
+/// Extract a shell command (`!cmd`) from the **last** user message only.
+///
+/// Returns `Some(cmd)` if the last user text starts with `!`, or `None` otherwise.
+/// This prevents follow-up conversation turns from re-triggering shell
+/// interception after a previous `!` command was already handled.
+fn last_user_shell_cmd(messages: &[Message]) -> Option<String> {
+    for msg in messages.iter().rev() {
+        if msg.role == "user" {
+            let text = match &msg.content {
+                ContentVal::Single(t) => t.trim().to_string(),
+                ContentVal::Multiple(parts) => {
+                    let mut buf = String::new();
+                    for part in parts {
+                        if part.content_type == "text" {
+                            if let Some(ref t) = part.text {
+                                buf.push_str(t);
+                            }
+                        }
+                    }
+                    buf.trim().to_string()
+                }
+            };
+            if text.starts_with('!') {
+                return Some(text.strip_prefix('!').unwrap().trim().to_string());
+            }
+            return None;
+        }
+    }
+    None
+}
+
 // ── Handlers ──
 
 pub async fn handle_count_tokens(
@@ -170,8 +201,9 @@ pub async fn handle_messages(
         .unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
     info!(
-        "Incoming request ({} messages) [Model: {}]",
+        "Incoming request ({} messages, {} chars) [Model: {}]",
         payload.messages.len(),
+        prompt.len(),
         req_model
     );
 
@@ -243,192 +275,197 @@ pub async fn handle_messages(
                     .into_response(),
             )
         }
-    } else if !prompt.is_empty() && prompt.starts_with('!') {
-        let shell_cmd = prompt.strip_prefix('!').unwrap().trim().to_string();
-        info!(
-            "Intercepted local shell command for delegation: '{}'",
-            shell_cmd
-        );
+    } else {
+        // Only inspect the last user message for shell command detection.
+        // This prevents follow-up conversation turns from re-triggering the
+        // `!` branch after a previous `!` command was already handled.
+        let last_shell_cmd = last_user_shell_cmd(&payload.messages);
+        if let Some(shell_cmd) = last_shell_cmd {
+            info!(
+                "Intercepted local shell command for delegation: '{}'",
+                shell_cmd
+            );
 
-        // Enforce shell policy before delegating to client
-        state
-            .config
-            .shell_policy
-            .check(&shell_cmd)
-            .map_err(|_| BridgeError::ShellDisabled)?;
+            // Enforce shell policy before delegating to client
+            state
+                .config
+                .shell_policy
+                .check(&shell_cmd)
+                .map_err(|_| BridgeError::ShellDisabled)?;
 
-        let mut shell_tool_name = "bash".to_string();
-        let mut param_name = "command".to_string();
+            let mut shell_tool_name = "bash".to_string();
+            let mut param_name = "command".to_string();
 
-        if let Some(ref tools) = payload.tools {
-            for tool in tools {
-                let name_lower = tool.name.to_lowercase();
-                if name_lower == "bash"
-                    || name_lower == "execute_command"
-                    || name_lower == "run_command"
-                {
-                    shell_tool_name = tool.name.clone();
-                    if let Some(properties) = tool
-                        .input_schema
-                        .get("properties")
-                        .and_then(|p| p.as_object())
+            if let Some(ref tools) = payload.tools {
+                for tool in tools {
+                    let name_lower = tool.name.to_lowercase();
+                    if name_lower == "bash"
+                        || name_lower == "execute_command"
+                        || name_lower == "run_command"
                     {
-                        if properties.contains_key("command") {
-                            param_name = "command".to_string();
-                        } else if properties.contains_key("cmd") {
-                            param_name = "cmd".to_string();
-                        } else if !properties.is_empty() {
-                            param_name = properties.keys().next().unwrap().clone();
+                        shell_tool_name = tool.name.clone();
+                        if let Some(properties) = tool
+                            .input_schema
+                            .get("properties")
+                            .and_then(|p| p.as_object())
+                        {
+                            if properties.contains_key("command") {
+                                param_name = "command".to_string();
+                            } else if properties.contains_key("cmd") {
+                                param_name = "cmd".to_string();
+                            } else if !properties.is_empty() {
+                                param_name = properties.keys().next().unwrap().clone();
+                            }
                         }
+                        break;
                     }
-                    break;
                 }
             }
-        }
 
-        let tool_use_id = "toolu_local_shell".to_string();
+            let tool_use_id = "toolu_local_shell".to_string();
 
-        if payload.stream {
-            let (tx, rx) = tokio::sync::mpsc::channel(10);
-            let builder = SseEventBuilder::new("msg_local_shell".to_string(), req_model);
-            let tool_name = shell_tool_name;
-            let p_name = param_name;
-            let cmd = shell_cmd;
-            let t_id = tool_use_id;
-            let input_tk = 50;
-            let output_tk = (cmd.len() as f32 / 3.5).round() as u32 + 15;
+            if payload.stream {
+                let (tx, rx) = tokio::sync::mpsc::channel(10);
+                let builder = SseEventBuilder::new("msg_local_shell".to_string(), req_model);
+                let tool_name = shell_tool_name;
+                let p_name = param_name;
+                let cmd = shell_cmd;
+                let t_id = tool_use_id;
+                let input_tk = 50;
+                let output_tk = (cmd.len() as f32 / 3.5).round() as u32 + 15;
 
-            tokio::spawn(async move {
-                let _ = tx.send(builder.message_start(input_tk)).await;
+                tokio::spawn(async move {
+                    let _ = tx.send(builder.message_start(input_tk)).await;
 
-                let start_ev = Event::default()
-                    .event("content_block_start")
-                    .json_data(serde_json::json!({
-                        "type": "content_block_start",
-                        "index": 0,
-                        "content_block": {
-                            "type": "tool_use",
-                            "id": t_id,
-                            "name": tool_name,
-                            "input": {}
-                        }
-                    }))
-                    .unwrap_or_else(|_| Event::default().data("{}"));
-                let _ = tx.send(start_ev).await;
+                    let start_ev = Event::default()
+                        .event("content_block_start")
+                        .json_data(serde_json::json!({
+                            "type": "content_block_start",
+                            "index": 0,
+                            "content_block": {
+                                "type": "tool_use",
+                                "id": t_id,
+                                "name": tool_name,
+                                "input": {}
+                            }
+                        }))
+                        .unwrap_or_else(|_| Event::default().data("{}"));
+                    let _ = tx.send(start_ev).await;
 
-                let args = serde_json::json!({ p_name: cmd }).to_string();
-                let delta_ev = Event::default()
-                    .event("content_block_delta")
-                    .json_data(serde_json::json!({
-                        "type": "content_block_delta",
-                        "index": 0,
-                        "delta": {
-                            "type": "input_json_delta",
-                            "partial_json": args
-                        }
-                    }))
-                    .unwrap_or_else(|_| Event::default().data("{}"));
-                let _ = tx.send(delta_ev).await;
+                    let args = serde_json::json!({ p_name: cmd }).to_string();
+                    let delta_ev = Event::default()
+                        .event("content_block_delta")
+                        .json_data(serde_json::json!({
+                            "type": "content_block_delta",
+                            "index": 0,
+                            "delta": {
+                                "type": "input_json_delta",
+                                "partial_json": args
+                            }
+                        }))
+                        .unwrap_or_else(|_| Event::default().data("{}"));
+                    let _ = tx.send(delta_ev).await;
 
-                let stop_ev = Event::default()
-                    .event("content_block_stop")
-                    .json_data(serde_json::json!({
-                        "type": "content_block_stop",
-                        "index": 0
-                    }))
-                    .unwrap_or_else(|_| Event::default().data("{}"));
-                let _ = tx.send(stop_ev).await;
+                    let stop_ev = Event::default()
+                        .event("content_block_stop")
+                        .json_data(serde_json::json!({
+                            "type": "content_block_stop",
+                            "index": 0
+                        }))
+                        .unwrap_or_else(|_| Event::default().data("{}"));
+                    let _ = tx.send(stop_ev).await;
 
-                let delta_ev = Event::default()
-                    .event("message_delta")
-                    .json_data(serde_json::json!({
-                        "type": "message_delta",
-                        "delta": {
-                            "stop_reason": "tool_use",
-                            "stop_sequence": null
-                        },
-                        "usage": {"output_tokens": output_tk}
-                    }))
-                    .unwrap_or_else(|_| Event::default().data("{}"));
-                let _ = tx.send(delta_ev).await;
+                    let delta_ev = Event::default()
+                        .event("message_delta")
+                        .json_data(serde_json::json!({
+                            "type": "message_delta",
+                            "delta": {
+                                "stop_reason": "tool_use",
+                                "stop_sequence": null
+                            },
+                            "usage": {"output_tokens": output_tk}
+                        }))
+                        .unwrap_or_else(|_| Event::default().data("{}"));
+                    let _ = tx.send(delta_ev).await;
 
-                let stop_ev = Event::default()
-                    .event("message_stop")
-                    .json_data(serde_json::json!({
-                        "type": "message_stop"
-                    }))
-                    .unwrap_or_else(|_| Event::default().data("{}"));
-                let _ = tx.send(stop_ev).await;
-            });
+                    let stop_ev = Event::default()
+                        .event("message_stop")
+                        .json_data(serde_json::json!({
+                            "type": "message_stop"
+                        }))
+                        .unwrap_or_else(|_| Event::default().data("{}"));
+                    let _ = tx.send(stop_ev).await;
+                });
 
-            let response = Sse::new(
-                tokio_stream::wrappers::ReceiverStream::new(rx)
-                    .map(Ok::<_, std::convert::Infallible>),
-            )
-            .keep_alive(KeepAlive::default())
-            .into_response();
-            let mut res = response;
-            res.headers_mut().insert(
-                axum::http::header::HeaderName::from_static("x-accel-buffering"),
-                axum::http::HeaderValue::from_static("no"),
-            );
-            Ok(res)
-        } else {
-            let output_tk = (shell_cmd.len() as f32 / 3.5).round() as u32 + 15;
-            let resp_val = serde_json::json!({
-                "id": "msg_local_shell",
-                "type": "message",
-                "role": "assistant",
-                "model": req_model,
-                "content": [
-                    {
-                        "type": "tool_use",
-                        "id": tool_use_id,
-                        "name": shell_tool_name,
-                        "input": {
-                            param_name: shell_cmd
-                        }
-                    }
-                ],
-                "stop_reason": "tool_use",
-                "stop_sequence": null,
-                "usage": {"input_tokens": 50, "output_tokens": output_tk}
-            });
-            Ok(Json(resp_val).into_response())
-        }
-    } else {
-        // OpenCode path — forward directly to upstream API
-        if payload.stream {
-            let stream = opencode::forward_to_llm_stream(
-                &state,
-                api_key,
-                payload,
-                req_model,
-                state.config.channel_capacity,
-                state.search_client.clone(),
-                state.config.max_search_loops,
-            )
-            .await?;
-            let response = Sse::new(stream)
+                let response = Sse::new(
+                    tokio_stream::wrappers::ReceiverStream::new(rx)
+                        .map(Ok::<_, std::convert::Infallible>),
+                )
                 .keep_alive(KeepAlive::default())
                 .into_response();
-            let mut res = response;
-            res.headers_mut().insert(
-                axum::http::header::HeaderName::from_static("x-accel-buffering"),
-                axum::http::HeaderValue::from_static("no"),
-            );
-            Ok(res)
+                let mut res = response;
+                res.headers_mut().insert(
+                    axum::http::header::HeaderName::from_static("x-accel-buffering"),
+                    axum::http::HeaderValue::from_static("no"),
+                );
+                Ok(res)
+            } else {
+                let output_tk = (shell_cmd.len() as f32 / 3.5).round() as u32 + 15;
+                let resp_val = serde_json::json!({
+                    "id": "msg_local_shell",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": req_model,
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": tool_use_id,
+                            "name": shell_tool_name,
+                            "input": {
+                                param_name: shell_cmd
+                            }
+                        }
+                    ],
+                    "stop_reason": "tool_use",
+                    "stop_sequence": null,
+                    "usage": {"input_tokens": 50, "output_tokens": output_tk}
+                });
+                Ok(Json(resp_val).into_response())
+            }
         } else {
-            let response = opencode::forward_to_llm_sync(
-                &state,
-                api_key,
-                payload,
-                req_model,
-                state.search_client.clone(),
-                state.config.max_search_loops,
-            )
-            .await?;
-            Ok(Json(response).into_response())
+            // OpenCode path — forward directly to upstream API
+            if payload.stream {
+                let stream = opencode::forward_to_llm_stream(
+                    &state,
+                    api_key,
+                    payload,
+                    req_model,
+                    state.config.channel_capacity,
+                    state.search_client.clone(),
+                    state.config.max_search_loops,
+                )
+                .await?;
+                let response = Sse::new(stream)
+                    .keep_alive(KeepAlive::default())
+                    .into_response();
+                let mut res = response;
+                res.headers_mut().insert(
+                    axum::http::header::HeaderName::from_static("x-accel-buffering"),
+                    axum::http::HeaderValue::from_static("no"),
+                );
+                Ok(res)
+            } else {
+                let response = opencode::forward_to_llm_sync(
+                    &state,
+                    api_key,
+                    payload,
+                    req_model,
+                    state.search_client.clone(),
+                    state.config.max_search_loops,
+                )
+                .await?;
+                Ok(Json(response).into_response())
+            }
         }
     }
 }
@@ -547,5 +584,54 @@ mod tests {
             make_msg("user", ContentVal::Single("second".into())),
         ];
         assert_eq!(extract_prompt(&msgs), "first\nsecond");
+    }
+
+    #[test]
+    fn test_last_user_shell_cmd_single_prompt() {
+        let msgs = vec![make_msg("user", ContentVal::Single("!ls".into()))];
+        assert_eq!(last_user_shell_cmd(&msgs), Some("ls".to_string()));
+    }
+
+    #[test]
+    fn test_last_user_shell_cmd_no_bang() {
+        let msgs = vec![make_msg("user", ContentVal::Single("hello".into()))];
+        assert_eq!(last_user_shell_cmd(&msgs), None);
+    }
+
+    #[test]
+    fn test_last_user_shell_cmd_only_last() {
+        let msgs = vec![
+            make_msg("user", ContentVal::Single("!ls".into())),
+            make_msg("assistant", ContentVal::Single("ok".into())),
+            make_msg("user", ContentVal::Single("what next?".into())),
+        ];
+        // Last user message is "what next?" — no bang
+        assert_eq!(last_user_shell_cmd(&msgs), None);
+    }
+
+    #[test]
+    fn test_last_user_shell_cmd_ignores_tool_result() {
+        let msgs = vec![
+            make_msg("user", ContentVal::Single("!ls".into())),
+            make_msg("assistant", ContentVal::Single("ok".into())),
+            Message {
+                role: "user".to_string(),
+                content: ContentVal::Multiple(vec![MessageContent {
+                    content_type: "tool_result".into(),
+                    text: None,
+                    tool_use_id: Some("toolu_local_shell".into()),
+                    content: Some(serde_json::json!("assets\nREADME.md")),
+                    ..Default::default()
+                }]),
+            },
+        ];
+        // tool_result doesn't start with ! — returns None
+        assert_eq!(last_user_shell_cmd(&msgs), None);
+    }
+
+    #[test]
+    fn test_last_user_shell_cmd_empty_messages() {
+        let msgs: Vec<Message> = vec![];
+        assert_eq!(last_user_shell_cmd(&msgs), None);
     }
 }

@@ -1067,7 +1067,8 @@ pub async fn forward_to_llm_stream(
             };
 
             // Send final message_delta and message_stop
-            let output_tokens = estimate_string_tokens(&accumulated_thinking) + estimate_string_tokens(&accumulated_text);
+            let output_tokens = estimate_string_tokens(&accumulated_thinking)
+                + estimate_string_tokens(&accumulated_text);
             let output_tokens = if output_tokens == 0 && has_emitted_tool_use {
                 15
             } else {
@@ -1130,7 +1131,7 @@ fn get_correct_tool_name(name: &str, payload: &MessagesRequest) -> String {
 pub fn estimate_string_tokens(text: &str) -> u32 {
     let mut tokens: f32 = 0.0;
     let mut in_word = false;
-    
+
     for c in text.chars() {
         if c.is_whitespace() {
             tokens += 0.25;
