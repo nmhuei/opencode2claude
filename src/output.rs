@@ -36,20 +36,15 @@ pub fn render<T: Serialize + Display>(data: T, format: OutputFormat) -> anyhow::
 }
 
 /// Control ANSI color output.
-#[derive(Debug, Clone, Copy, PartialEq, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, clap::ValueEnum)]
 pub enum ColorChoice {
     /// Use colors if stdout is a terminal (default).
+    #[default]
     Auto,
     /// Always use colors, even when piping.
     Always,
     /// Never use colors (disables ANSI escape codes).
     Never,
-}
-
-impl Default for ColorChoice {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 /// Initialize color support based on user preference and terminal capabilities.
@@ -84,5 +79,87 @@ pub struct KeyValue {
 impl Display for KeyValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}: {}", self.key, self.value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    struct TestData {
+        name: String,
+        count: u32,
+    }
+
+    impl Display for TestData {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}: {}", self.name, self.count)
+        }
+    }
+
+    #[test]
+    fn test_render_human_calls_display() {
+        let data = TestData {
+            name: "test".into(),
+            count: 42,
+        };
+        let result = render(&data, OutputFormat::Human).unwrap();
+        assert_eq!(result, "test: 42");
+    }
+
+    #[test]
+    fn test_render_json_valid() {
+        let data = TestData {
+            name: "json-test".into(),
+            count: 7,
+        };
+        let result = render(&data, OutputFormat::Json).unwrap();
+        assert!(result.contains("\"name\""));
+        assert!(result.contains("\"count\""));
+        assert!(result.contains("json-test"));
+    }
+
+    #[test]
+    fn test_render_quiet_calls_display() {
+        let data = TestData {
+            name: "quiet".into(),
+            count: 0,
+        };
+        let result = render(&data, OutputFormat::Quiet).unwrap();
+        assert_eq!(result, "quiet: 0");
+    }
+
+    #[test]
+    fn test_color_choice_default_is_auto() {
+        assert_eq!(ColorChoice::default(), ColorChoice::Auto);
+    }
+
+    #[test]
+    fn test_key_value_display() {
+        let kv = KeyValue {
+            key: "port".into(),
+            value: "4000".into(),
+        };
+        assert_eq!(kv.to_string(), "port: 4000");
+    }
+
+    #[test]
+    fn test_key_value_serialize() {
+        let kv = KeyValue {
+            key: "key".into(),
+            value: "val".into(),
+        };
+        let json = serde_json::to_string(&kv).unwrap();
+        assert!(json.contains("\"key\":\"key\""));
+        assert!(json.contains("\"value\":\"val\""));
+    }
+
+    #[test]
+    fn test_output_format_partial_eq() {
+        assert_eq!(OutputFormat::Human, OutputFormat::Human);
+        assert_ne!(OutputFormat::Human, OutputFormat::Json);
+        assert_ne!(OutputFormat::Json, OutputFormat::Quiet);
     }
 }

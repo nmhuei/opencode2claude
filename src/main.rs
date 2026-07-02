@@ -56,13 +56,49 @@ async fn main() {
         // Proxy group (unchanged, but uses fmt)
         Some(Command::Proxy(cmd)) => cmd_proxy(cmd, fmt).await,
 
-        // Legacy aliases (backward compatible)
-        Some(Command::Serve(args)) => cmd_serve_legacy(args).await,
-        Some(Command::Start(args)) => cmd_start_legacy(args, fmt),
-        Some(Command::Status(args)) => cmd_status_legacy(args, fmt),
-        Some(Command::Stop(args)) => cmd_stop_legacy(args),
-        Some(Command::Restart) => cmd_restart_legacy(fmt),
-        Some(Command::Logs) => cmd_logs_legacy(fmt),
+        // Legacy aliases (backward compatible) — show deprecation hint once
+        Some(Command::Serve(args)) => {
+            eprintln!(
+                "{} `serve` is deprecated, use `server start -f` instead",
+                "ℹ".cyan().dim()
+            );
+            cmd_serve_legacy(args).await
+        }
+        Some(Command::Start(args)) => {
+            eprintln!(
+                "{} `start` is deprecated, use `server start` instead",
+                "ℹ".cyan().dim()
+            );
+            cmd_start_legacy(args, fmt)
+        }
+        Some(Command::Status(args)) => {
+            eprintln!(
+                "{} `status` is deprecated, use `server status` instead",
+                "ℹ".cyan().dim()
+            );
+            cmd_status_legacy(args, fmt)
+        }
+        Some(Command::Stop(args)) => {
+            eprintln!(
+                "{} `stop` is deprecated, use `server stop` instead",
+                "ℹ".cyan().dim()
+            );
+            cmd_stop_legacy(args)
+        }
+        Some(Command::Restart) => {
+            eprintln!(
+                "{} `restart` is deprecated, use `server restart` instead",
+                "ℹ".cyan().dim()
+            );
+            cmd_restart_legacy(fmt)
+        }
+        Some(Command::Logs) => {
+            eprintln!(
+                "{} `logs` is deprecated, use `server logs` instead",
+                "ℹ".cyan().dim()
+            );
+            cmd_logs_legacy(fmt)
+        }
 
         // Default: run server in foreground
         None => cmd_run_server(ServeArgsBridge::default()).await,
@@ -107,7 +143,9 @@ async fn cmd_server(cmd: ServerCommand, fmt: OutputFormat) {
             let sup = resolve_runtime(args.port, args.host);
             if fmt == OutputFormat::Json {
                 let status_info = ServerStatusInfo::from(sup.status().map_err(|e| e.to_string()));
-                println!("{}", serde_json::to_string_pretty(&status_info).unwrap());
+                if let Ok(s) = serde_json::to_string_pretty(&status_info) {
+                    println!("{s}");
+                }
             } else {
                 match sup.status() {
                     Ok(status) => cmd_print_status(status),
@@ -123,7 +161,9 @@ async fn cmd_server(cmd: ServerCommand, fmt: OutputFormat) {
                     let status = sup.status().unwrap_or(SupervisorStatus::Stopped);
                     if fmt == OutputFormat::Json {
                         let info = ServerStatusInfo::from(Ok(status));
-                        println!("{}", serde_json::to_string_pretty(&info).unwrap());
+                        if let Ok(s) = serde_json::to_string_pretty(&info) {
+                            println!("{s}");
+                        }
                     } else {
                         println!("{} Bridge restarted. {}", "✓".green().bold(), status);
                     }
@@ -157,7 +197,9 @@ async fn cmd_server(cmd: ServerCommand, fmt: OutputFormat) {
                     model: cfg.model.unwrap_or_else(|| "auto".to_string()),
                     max_body_size: cfg.max_body_size,
                 };
-                println!("{}", serde_json::to_string_pretty(&info).unwrap());
+                if let Ok(s) = serde_json::to_string_pretty(&info) {
+                    println!("{s}");
+                }
             } else {
                 cmd_print_config();
             }
@@ -172,7 +214,9 @@ fn start_daemon(port: Option<u16>, host: Option<String>, fmt: OutputFormat) {
             let status = sup.status().unwrap_or(SupervisorStatus::Stopped);
             if fmt == OutputFormat::Json {
                 let info = ServerStatusInfo::from(Ok(status));
-                println!("{}", serde_json::to_string_pretty(&info).unwrap());
+                if let Ok(s) = serde_json::to_string_pretty(&info) {
+                    println!("{s}");
+                }
             } else {
                 println!("{} Bridge started. {}", "✓".green().bold(), status);
             }
@@ -190,7 +234,9 @@ async fn cmd_doctor(fmt: OutputFormat) {
     let report = doctor::run_diagnostics().await;
     match fmt {
         OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&report).unwrap());
+            if let Ok(s) = serde_json::to_string_pretty(&report) {
+                println!("{s}");
+            }
         }
         _ => {
             println!("{}", report);
@@ -223,7 +269,9 @@ fn cmd_env(fmt: OutputFormat) {
             anthropic_base_url: format!("http://127.0.0.1:{}/v1", port),
             opencode_model: model,
         };
-        println!("{}", serde_json::to_string_pretty(&info).unwrap());
+        if let Ok(s) = serde_json::to_string_pretty(&info) {
+            println!("{s}");
+        }
         return;
     }
 
@@ -273,7 +321,9 @@ async fn cmd_proxy(cmd: ProxyCommand, fmt: OutputFormat) {
                         }
                     })
                     .collect();
-                println!("{}", serde_json::to_string_pretty(&nodes).unwrap());
+                if let Ok(s) = serde_json::to_string_pretty(&nodes) {
+                    println!("{s}");
+                }
                 return;
             }
 
@@ -330,7 +380,9 @@ async fn cmd_proxy(cmd: ProxyCommand, fmt: OutputFormat) {
                     };
                     results.push(RestartResult { port, status });
                 }
-                println!("{}", serde_json::to_string_pretty(&results).unwrap());
+                if let Ok(s) = serde_json::to_string_pretty(&results) {
+                    println!("{s}");
+                }
                 return;
             }
 
@@ -371,7 +423,9 @@ async fn cmd_proxy(cmd: ProxyCommand, fmt: OutputFormat) {
                         });
                     }
                 }
-                println!("{}", serde_json::to_string_pretty(&results).unwrap());
+                if let Ok(s) = serde_json::to_string_pretty(&results) {
+                    println!("{s}");
+                }
                 return;
             }
 
@@ -425,7 +479,9 @@ async fn cmd_proxy(cmd: ProxyCommand, fmt: OutputFormat) {
                         status: cs,
                     });
                 }
-                println!("{}", serde_json::to_string_pretty(&results).unwrap());
+                if let Ok(s) = serde_json::to_string_pretty(&results) {
+                    println!("{s}");
+                }
                 return;
             }
 
@@ -498,7 +554,9 @@ fn cmd_status_legacy(args: cli::StatusArgs, fmt: OutputFormat) {
     let sup = resolve_runtime(args.port, args.host);
     if fmt == OutputFormat::Json {
         let status_info = ServerStatusInfo::from(sup.status().map_err(|e| e.to_string()));
-        println!("{}", serde_json::to_string_pretty(&status_info).unwrap());
+        if let Ok(s) = serde_json::to_string_pretty(&status_info) {
+            println!("{s}");
+        }
     } else {
         match sup.status() {
             Ok(status) => cmd_print_status(status),
@@ -526,7 +584,9 @@ fn cmd_restart_legacy(fmt: OutputFormat) {
             let status = sup.status().unwrap_or(SupervisorStatus::Stopped);
             if fmt == OutputFormat::Json {
                 let info = ServerStatusInfo::from(Ok(status));
-                println!("{}", serde_json::to_string_pretty(&info).unwrap());
+                if let Ok(s) = serde_json::to_string_pretty(&info) {
+                    println!("{s}");
+                }
             } else {
                 println!("{} Bridge restarted. {}", "✓".green().bold(), status);
             }
@@ -703,7 +763,9 @@ fn show_logs(fmt: OutputFormat) {
                         line_number: i + 1,
                     })
                     .collect();
-                println!("{}", serde_json::to_string_pretty(&entries).unwrap());
+                if let Ok(s) = serde_json::to_string_pretty(&entries) {
+                    println!("{s}");
+                }
                 return;
             }
 
