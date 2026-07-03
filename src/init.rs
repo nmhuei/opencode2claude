@@ -64,6 +64,12 @@ const CONFIG_TEMPLATE: &str = r##"# OpenCode2Claude configuration
 # Self-hosted SearXNG instance
 # searxng_url = "http://searxng.local:8080"
 # searxng_api_key = ""
+
+# ── TLS / HTTPS ─────────────────────────────────────────────────────────
+# Enable TLS for encrypted connections (requires cert + key files)
+# tls_enabled = true
+# tls_cert_path = "/path/to/cert.pem"
+# tls_key_path = "/path/to/key.pem"
 "##;
 
 /// Generate the default config file at the given path.
@@ -105,5 +111,9 @@ mod tests {
         assert!(CONFIG_TEMPLATE.contains("OpenCode2Claude configuration"));
         assert!(CONFIG_TEMPLATE.contains("Web Search API Keys"));
         assert!(CONFIG_TEMPLATE.contains("Proxy Pool"));
+        assert!(CONFIG_TEMPLATE.contains("TLS / HTTPS"));
+        assert!(CONFIG_TEMPLATE.contains("tls_enabled"));
+        assert!(CONFIG_TEMPLATE.contains("tls_cert_path"));
+        assert!(CONFIG_TEMPLATE.contains("tls_key_path"));
     }
 }

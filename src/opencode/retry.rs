@@ -9,13 +9,13 @@ use crate::error::BridgeError;
 use crate::opencode::types::OpenAiRequest;
 use crate::state::AppState;
 use std::time::Duration;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Rotate WARP IP address by disconnecting and reconnecting.
 async fn rotate_warp_ip() {
     info!("Rotating WARP IP address...");
 
-    let disconnect = tokio::process::Command::new("warp-cli")
+    let disconnect = tokio::process::Command::new("/usr/bin/warp-cli")
         .arg("disconnect")
         .output()
         .await;
@@ -38,7 +38,7 @@ async fn rotate_warp_ip() {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
 
-    let connect = tokio::process::Command::new("warp-cli")
+    let connect = tokio::process::Command::new("/usr/bin/warp-cli")
         .arg("connect")
         .output()
         .await;
@@ -171,10 +171,11 @@ pub(super) async fn execute_with_warp_retry(
                     // 400: Read body to distinguish genuine errors from rate limits
                     let body_bytes = response.bytes().await.unwrap_or_default();
                     let body_text = String::from_utf8_lossy(&body_bytes);
+                    let body_preview = body_text.chars().take(200).collect::<String>();
                     if is_rate_limit_body(&body_text) {
                         warn!(
                             "Upstream returned 400 with rate-limit body (truncated): {}",
-                            body_text.chars().take(200).collect::<String>()
+                            body_preview
                         );
                         if (retry_count as usize) < max_retries {
                             retry_count += 1;
@@ -200,14 +201,15 @@ pub(super) async fn execute_with_warp_retry(
                             retry_count
                         )));
                     } else {
-                        // Genuine 400 error — upstream provider failure, retry up to 10x
+                        // Genuine 400 error — upstream provider failure, retry up to MAX_PROVIDER_RETRIES
+                        let truncated_body = body_text.chars().take(200).collect::<String>();
                         if retry_count < MAX_PROVIDER_RETRIES {
                             retry_count += 1;
                             warn!(
-                                "Upstream returned 400 (provider error, attempt {}/{}, truncated): {}",
-                                retry_count, MAX_PROVIDER_RETRIES,
-                                body_text.chars().take(200).collect::<String>()
+                                "Upstream returned 400 (provider error, attempt {}/{}).",
+                                retry_count, MAX_PROVIDER_RETRIES
                             );
+                            debug!(%truncated_body, "400 error body trace");
                             if let (Some(idx), Some(ref _url)) = (idx, &proxy_url) {
                                 let mut pool = state.proxy_pool.write().await;
                                 pool.mark_rate_limited(idx, Duration::from_secs(5));
@@ -222,17 +224,16 @@ pub(super) async fn execute_with_warp_retry(
                             continue;
                         }
                         warn!(
-                            "Upstream returned 400 (failed after {} retries, truncated): {}",
-                            MAX_PROVIDER_RETRIES,
-                            body_text.chars().take(300).collect::<String>()
+                            "Upstream returned 400 (failed after {} retries).",
+                            MAX_PROVIDER_RETRIES
                         );
+                        debug!(%truncated_body, "400 error body after all retries");
                         return Err(BridgeError::UpstreamError(
                             "Upstream returned 400 after 10 retries".to_string(),
                         ));
                     }
                 } else {
-                    // Success or other status — return as-is
-                    // Record success on proxy since transport worked (even for 4xx)
+                    // 2xx success — record transport health
                     if let Some(idx) = idx {
                         let mut pool = state.proxy_pool.write().await;
                         pool.record_success(idx);

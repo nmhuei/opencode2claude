@@ -125,6 +125,7 @@ pub fn map_anthropic_to_openai(payload: &MessagesRequest, model: String) -> Open
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
+                reasoning_content: None,
             });
         }
     }
@@ -139,6 +140,7 @@ pub fn map_anthropic_to_openai(payload: &MessagesRequest, model: String) -> Open
                     tool_calls: None,
                     tool_call_id: None,
                     name: None,
+                    reasoning_content: None,
                 });
             }
             ContentVal::Multiple(blocks) => {
@@ -170,6 +172,7 @@ pub fn map_anthropic_to_openai(payload: &MessagesRequest, model: String) -> Open
                                     tool_calls: None,
                                     tool_call_id: block.tool_use_id.clone(),
                                     name,
+                                    reasoning_content: None,
                                 });
                             }
                             _ => {}
@@ -182,10 +185,12 @@ pub fn map_anthropic_to_openai(payload: &MessagesRequest, model: String) -> Open
                             tool_calls: None,
                             tool_call_id: None,
                             name: None,
+                            reasoning_content: None,
                         });
                     }
                 } else if msg.role == "assistant" {
                     let mut assistant_text = String::new();
+                    let mut reasoning_content = String::new();
                     let mut tool_calls = Vec::new();
                     for block in blocks {
                         match block.content_type.as_str() {
@@ -195,6 +200,14 @@ pub fn map_anthropic_to_openai(payload: &MessagesRequest, model: String) -> Open
                                         assistant_text.push('\n');
                                     }
                                     assistant_text.push_str(t);
+                                }
+                            }
+                            "thinking" => {
+                                if let Some(t) = &block.thinking {
+                                    if !reasoning_content.is_empty() {
+                                        reasoning_content.push('\n');
+                                    }
+                                    reasoning_content.push_str(t);
                                 }
                             }
                             "tool_use" => {
@@ -221,6 +234,11 @@ pub fn map_anthropic_to_openai(payload: &MessagesRequest, model: String) -> Open
                             None
                         } else {
                             Some(assistant_text)
+                        },
+                        reasoning_content: if reasoning_content.is_empty() {
+                            None
+                        } else {
+                            Some(reasoning_content)
                         },
                         tool_calls: if tool_calls.is_empty() {
                             None
@@ -510,5 +528,47 @@ mod tests {
     fn test_extract_system_prompt_null() {
         let val = serde_json::json!(null);
         assert_eq!(extract_system_prompt(&val), "");
+    }
+
+    #[test]
+    fn test_map_anthropic_to_openai_thinking() {
+        use crate::handlers::{ContentVal, Message, MessageContent, MessagesRequest};
+
+        let payload = MessagesRequest {
+            model: Some("deepseek-v4-flash".to_string()),
+            messages: vec![Message {
+                role: "assistant".to_string(),
+                content: ContentVal::Multiple(vec![
+                    MessageContent {
+                        content_type: "thinking".to_string(),
+                        thinking: Some("Let's analyze the directory layout first.".to_string()),
+                        ..Default::default()
+                    },
+                    MessageContent {
+                        content_type: "text".to_string(),
+                        text: Some("I will run `ls`.".to_string()),
+                        ..Default::default()
+                    },
+                ]),
+            }],
+            system: None,
+            tools: None,
+            tool_choice: None,
+            stream: true,
+            temperature: None,
+            max_tokens: None,
+        };
+
+        let result = map_anthropic_to_openai(&payload, "deepseek-v4-flash".to_string());
+        assert_eq!(result.messages.len(), 1);
+        assert_eq!(result.messages[0].role, "assistant");
+        assert_eq!(
+            result.messages[0].content.as_deref(),
+            Some("I will run `ls`.")
+        );
+        assert_eq!(
+            result.messages[0].reasoning_content.as_deref(),
+            Some("Let's analyze the directory layout first.")
+        );
     }
 }

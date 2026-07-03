@@ -39,6 +39,11 @@ pub async fn auth_middleware(
     let token = auth_header.strip_prefix("Bearer ").unwrap_or("");
 
     if !state.config.is_valid_token(token) {
+        tracing::warn!(
+            "Auth failure from {}: invalid Bearer token (path: {})",
+            request.uri().path(),
+            auth_header.chars().take(20).collect::<String>(),
+        );
         return Err(BridgeError::Unauthorized(
             "Missing or invalid authentication token. Provide a valid Bearer token in the Authorization header."
                 .to_string(),
@@ -79,6 +84,9 @@ mod tests {
             proxies: None,
             primary_proxies: None,
             warm_standby_proxies: None,
+            tls_enabled: false,
+            tls_cert_path: None,
+            tls_key_path: None,
         };
         let state = AppState::new(config);
 

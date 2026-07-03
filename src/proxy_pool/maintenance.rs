@@ -182,7 +182,7 @@ async fn restart_container(idx: usize, pool: Arc<TokioRwLock<ProxyPool>>) {
     pool.write().await.proxies[idx].status = ProxyStatus::Starting;
 
     // docker rm -f
-    let rm = tokio::process::Command::new("docker")
+    let rm = tokio::process::Command::new("/usr/bin/docker")
         .args(["rm", "-f", &container_name])
         .output()
         .await;
@@ -202,7 +202,7 @@ async fn restart_container(idx: usize, pool: Arc<TokioRwLock<ProxyPool>>) {
     }
 
     // docker run -d --name ... --restart always ...
-    let run = tokio::process::Command::new("docker")
+    let run = tokio::process::Command::new("/usr/bin/docker")
         .args([
             "run",
             "-d",
@@ -312,6 +312,9 @@ async fn requeue_or_giveup(idx: usize, pool: &Arc<TokioRwLock<ProxyPool>>, reaso
 }
 
 /// Verify SOCKS5 proxy connectivity via cloudflare CDN trace.
+/// Creates a new reqwest::Client per call because each port needs a
+/// different proxy URL; the ClientBuilder overhead is negligible vs
+/// the TCP/TLS handshake time.
 async fn verify_proxy_socks(port: u16) -> bool {
     let proxy_url = format!("socks5h://127.0.0.1:{}", port);
     let proxy = match reqwest::Proxy::all(&proxy_url) {

@@ -54,10 +54,15 @@ jobs:
       - name: Check binary size
         run: ls -lh target/${{ matrix.target }}/release/opencode2claude
 
-      - name: Rename binary for upload
+      - name: Compute SHA-256 checksum
+        run: |
+          sha256sum target/${{ matrix.target }}/release/opencode2claude | awk '{print $1}' > target/${{ matrix.target }}/release/opencode2claude.sha256
+
+      - name: Rename binary and checksum for upload
         run: |
           mkdir -p staging
           cp target/${{ matrix.target }}/release/opencode2claude staging/${{ matrix.artifact_name }}
+          cp target/${{ matrix.target }}/release/opencode2claude.sha256 staging/${{ matrix.artifact_name }}.sha256
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v5

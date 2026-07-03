@@ -18,9 +18,9 @@
 **Claude Code** → `opencode2claude` → **opencode.ai/zen/v1/chat/completions** → **Any LLM**
 
 ```bash
-opencode2claude start  # Start the bridge daemon (background)
-opencode2claude status # Check if it's running
-claude                 # Works with any model
+opencode2claude server start  # Start the bridge daemon (background)
+opencode2claude server status # Check if it's running
+claude                        # Works with any model
 ```
 
 [Install](#-installation) • [Quick Start](#-quick-start) • [Architecture](#%EF%B8%8F-architecture) • [Features](#-features) • [Configuration](#-configuration) • [Benchmarks](#-benchmarks)
@@ -124,10 +124,10 @@ graph LR
 
 ```bash
 # 1. Start the bridge daemon (background, auto-spawns WARP proxies if Docker available)
-opencode2claude start
+opencode2claude server start
 
 # 2. Verify it's running
-opencode2claude status
+opencode2claude server status
 # → Bridge: RUNNING (pid 12345)
 # → WARP Pool: 3 primary + 2 warm-standby healthy
 
@@ -141,7 +141,7 @@ claude
 # Want a specific model? Override via env or CLI flag:
 export OPENCODE_MODEL="openai/gpt-4o"
 # or
-opencode2claude serve --port 4000 --model "google/gemini-2.5-pro"
+opencode2claude server start -f --port 4000 --model "google/gemini-2.5-pro"
 
 # Shell commands bypass the LLM entirely — prefix with `!`:
 You: !git status          # → instant local exec (~10ms)
@@ -289,14 +289,14 @@ graph TB
 - 🔧 **Zero-Config** — `start.sh` auto-spawns `warp-cli` Docker containers if Docker is running
 
 ```bash
-# Enable WARP pool (requires warp-cli registered on host)
-opencode2claude serve --warp-pool --pool-size 3 --standby-size 2
+# Setup WARP proxies (requires Docker + warp-cli registered on host)
+opencode2claude proxy restart
 
 # Or via env vars:
-export BRIDGE_WARP_POOL=true
+export BRIDGE_PRIMARY_PROXIES="socks5://127.0.0.1:40001,socks5://127.0.0.1:40002,socks5://127.0.0.1:40003"
 export BRIDGE_WARP_POOL_SIZE=3
 export BRIDGE_WARP_STANDBY_SIZE=2
-opencode2claude start
+opencode2claude server start
 
 # Manage proxy containers:
 opencode2claude proxy status      # List with roles (primary vs protected) + health
@@ -309,7 +309,7 @@ opencode2claude proxy logs        # View proxy container logs
 ```bash
 export BRIDGE_PRIMARY_PROXIES="socks5://127.0.0.1:40001,socks5://127.0.0.1:40002,socks5://127.0.0.1:40003"
 export BRIDGE_WARM_STANDBY_PROXIES="socks5://127.0.0.1:40004,socks5://127.0.0.1:40005"
-opencode2claude start
+opencode2claude server start
 ```
 
 ---
@@ -393,6 +393,11 @@ max_results = 10
 metrics_port = 9090              # Prometheus /metrics (0 = disabled)
 log_level = "info"               # trace | debug | info | warn | error
 log_format = "json"              # json | pretty
+
+[tls]
+# enabled = false                 # Enable TLS/HTTPS
+# cert_path = "/path/to/cert.pem" # PEM certificate file
+# key_path = "/path/to/key.pem"   # PEM private key file
 ```
 
 </details>
@@ -400,12 +405,10 @@ log_format = "json"              # json | pretty
 **Quick CLI Overrides:**
 ```bash
 # All config via flags (highest priority)
-opencode2claude serve \
+opencode2claude server start -f \
   --port 8080 \
   --host 0.0.0.0 \
   --model "openai/gpt-4o" \
-  --warp-pool \
-  --pool-size 5 \
   --shell-policy allowlist \
   --allowlist "git,ls,cat" \
   --auth-token "secret1,secret2" \

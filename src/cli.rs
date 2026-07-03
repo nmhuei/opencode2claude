@@ -12,6 +12,28 @@
 use crate::output::ColorChoice;
 use clap::{Args, Parser, Subcommand};
 
+/// Shell policy values accepted on the CLI.
+///
+/// Parsed by clap as a `ValueEnum` so invalid input is rejected before any
+/// bridge startup code runs.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum CliShellPolicy {
+    Disabled,
+    Allowlist,
+    Unrestricted,
+}
+
+impl std::fmt::Display for CliShellPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            CliShellPolicy::Disabled => "disabled",
+            CliShellPolicy::Allowlist => "allowlist",
+            CliShellPolicy::Unrestricted => "unrestricted",
+        };
+        write!(f, "{value}")
+    }
+}
+
 /// Command-line interface for the OpenCode2Claude bridge.
 #[derive(Parser)]
 #[command(
@@ -101,6 +123,7 @@ pub enum Command {
 }
 
 /// Server management subcommands.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum ServerCommand {
     /// Start the bridge server
@@ -149,8 +172,8 @@ pub struct ServerStartArgs {
     pub model: Option<String>,
 
     /// Override shell policy (disabled, allowlist, unrestricted)
-    #[arg(long = "shell-policy")]
-    pub shell_policy: Option<String>,
+    #[arg(long = "shell-policy", value_enum)]
+    pub shell_policy: Option<CliShellPolicy>,
 
     /// Tavily search API key override
     #[arg(long)]
@@ -171,8 +194,15 @@ pub struct ServerStartArgs {
     /// SearXNG API key override
     #[arg(long)]
     pub searxng_api_key: Option<String>,
-}
 
+    /// Path to TLS certificate (PEM)
+    #[arg(long, requires = "tls_key")]
+    pub tls_cert: Option<String>,
+
+    /// Path to TLS private key (PEM)
+    #[arg(long, requires = "tls_cert")]
+    pub tls_key: Option<String>,
+}
 /// Arguments for `server stop`.
 #[derive(Args, Debug, Default)]
 pub struct ServerStopArgs {
@@ -235,8 +265,8 @@ pub struct ServeArgs {
     pub model: Option<String>,
 
     /// Override shell policy (disabled, allowlist, unrestricted)
-    #[arg(long = "shell-policy")]
-    pub shell_policy: Option<String>,
+    #[arg(long = "shell-policy", value_enum)]
+    pub shell_policy: Option<CliShellPolicy>,
 
     /// Tavily search API key override
     #[arg(long)]
@@ -257,8 +287,15 @@ pub struct ServeArgs {
     /// SearXNG API key override
     #[arg(long)]
     pub searxng_api_key: Option<String>,
-}
 
+    /// Path to TLS certificate (PEM)
+    #[arg(long, requires = "tls_key")]
+    pub tls_cert: Option<String>,
+
+    /// Path to TLS private key (PEM)
+    #[arg(long, requires = "tls_cert")]
+    pub tls_key: Option<String>,
+}
 /// Base args shared by start/status/stop (legacy, hidden).
 #[derive(Args, Default)]
 pub struct StartArgs {

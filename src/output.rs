@@ -7,6 +7,17 @@
 use serde::Serialize;
 use std::fmt::Display;
 use std::io::IsTerminal;
+use std::io::Write;
+use yansi::Paint;
+
+/// Error details inside a JSON CLI response.
+#[derive(Debug, Serialize)]
+pub struct CliErrorInfo {
+    pub code: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
 
 /// Output format selection for CLI commands.
 ///
@@ -80,6 +91,62 @@ impl Display for KeyValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}: {}", self.key, self.value)
     }
+}
+
+/// Prompt the user for yes/no confirmation via stdin.
+///
+/// Uses `tokio::task::spawn_blocking` to avoid stalling the async runtime.
+/// Returns `true` if the user typed "y" or "yes".
+pub async fn confirm_action(action: &str) -> bool {
+    let action = action.to_string();
+    tokio::task::spawn_blocking(move || {
+        let stdin = std::io::stdin();
+        let mut stdout = std::io::stdout();
+        let _ = write!(
+            stdout,
+            "{} Are you sure you want to {}? [y/N] ",
+            "⚠".yellow().bold(),
+            action
+        );
+        let _ = stdout.flush();
+        let mut input = String::new();
+        stdin.read_line(&mut input).ok();
+        input.trim().to_lowercase() == "y" || input.trim().to_lowercase() == "yes"
+    })
+    .await
+    .unwrap_or(false)
+}
+
+// ── Structured JSON output for CLI errors and responses ──
+
+/// Wrapper for JSON CLI responses.
+#[derive(Debug, Serialize)]
+pub struct CliResponse<T: Serialize> {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<T>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<CliErrorInfo>,
+}
+
+/// Print an error response as JSON and exit with status 1.
+///
+/// Emits a structured JSON object to stderr and calls `std::process::exit(1)`.
+/// This is used by all CLI commands in JSON mode to guarantee machine-parseable errors.
+pub fn print_json_error(code: &str, message: &str, hint: Option<&str>) -> ! {
+    let resp = CliResponse::<()> {
+        ok: false,
+        data: None,
+        error: Some(CliErrorInfo {
+            code: code.to_string(),
+            message: message.to_string(),
+            hint: hint.map(|s| s.to_string()),
+        }),
+    };
+    if let Ok(s) = serde_json::to_string_pretty(&resp) {
+        eprintln!("{s}");
+    }
+    std::process::exit(1);
 }
 
 #[cfg(test)]

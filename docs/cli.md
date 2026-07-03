@@ -2,175 +2,299 @@
 
 `opencode2claude` provides a subcommand-based CLI for managing the bridge lifecycle and proxy pool.
 
+## Command Tree
+
+```
+opencode2claude [--json | --quiet] [--color <MODE>] <COMMAND> [OPTIONS]
+
+Commands:
+  server      Manage the bridge server (start, stop, status, etc.)
+  proxy       Manage WARP proxy pools
+  env         Display environment information
+  doctor      Diagnose common issues
+  completion  Generate shell completion scripts
+  update      Self-update to the latest release
+  init        Generate a default config file
+```
+
 ## Global Flags
 
-```
-opencode2claude [COMMAND] [OPTIONS]
-```
+| Flag | Description |
+|------|-------------|
+| `--json` | Output in JSON format (machine-readable) |
+| `--quiet` | Minimal output (errors/success only) |
+| `--color auto\|always\|never` | Color output (default: auto) |
 
-- `serve` (default): Start the API bridge server
-- `start`: Start the bridge as a background daemon (via supervisor)
-- `status`: Show bridge status
-- `stop`: Stop the bridge daemon
-- `restart`: Restart the bridge daemon
-- `logs`: View bridge logs
-- `env`: Display environment information
-- `proxy`: Manage proxy pool containers
+`--json` and `--quiet` are mutually exclusive.
 
----
+## `server` — Manage the Bridge Server
 
-## `serve` — Start the API Bridge Server
+### `server start`
 
-Runs the bridge in the foreground. Use `start` instead for background daemon mode.
+Start the bridge server. By default starts as a background daemon.
+Use `-f` or `--foreground` to run in the current terminal.
 
 ```
-opencode2claude serve [OPTIONS]
+opencode2claude server start [OPTIONS]
 ```
 
 | Flag | Env | Description |
 |------|-----|-------------|
-| `-p, --port` | `BRIDGE_PORT` | Listen port (default: `4000`) |
-| `--host` | `BRIDGE_HOST` | Bind address (default: `127.0.0.1`) |
-| `-m, --model` | `OPENCODE_MODEL` | Model override |
-| `-c, --config` | — | Custom TOML config path |
+| `-f, --foreground` | — | Run in foreground (don't daemonize) |
+| `-p, --port` | `BRIDGE_PORT` | Override bridge port |
+| `--host` | `BRIDGE_HOST` | Override bind address |
+| `-c, --config` | — | Path to custom TOML config file |
+| `-m, --model` | `OPENCODE_MODEL` | Override model |
 | `--shell-policy` | `BRIDGE_SHELL_POLICY` | `disabled` \| `allowlist` \| `unrestricted` |
-| `--tavily-api-key` | `TAVILY_API_KEY` | Tavily search API key |
-| `--exa-api-key` | `EXA_API_KEY` | Exa search API key |
-| `--serper-api-key` | `SERPER_API_KEY` | Serper API key |
-| `--searxng-url` | `SEARXNG_URL` | SearXNG instance URL |
-| `--searxng-api-key` | `SEARXNG_API_KEY` | SearXNG API key |
+| `--tavily-api-key` | `TAVILY_API_KEY` | Tavily search API key override |
+| `--exa-api-key` | `EXA_API_KEY` | Exa search API key override |
+| `--serper-api-key` | `SERPER_API_KEY` | Serper search API key override |
+| `--searxng-url` | `SEARXNG_URL` | SearXNG instance URL override |
+| `--searxng-api-key` | `SEARXNG_API_KEY` | SearXNG API key override |
+| `--tls-cert` | — | Path to TLS certificate (PEM, requires `--tls-key`) |
+| `--tls-key` | — | Path to TLS private key (PEM, requires `--tls-cert`) |
 
----
+### `server stop`
 
-## `start` — Start Background Daemon
+Stop the bridge daemon. Sends SIGTERM, waits briefly, then SIGKILL if needed.
+Cleans up PID file.
 
 ```
-opencode2claude start [OPTIONS]
+opencode2claude server stop [OPTIONS]
 ```
-
-Starts `serve` as a background child process, writes PID to `.runtime/`.
 
 | Flag | Description |
 |------|-------------|
 | `-p, --port` | Override bridge port for the daemon |
 | `--host` | Override bind address for the daemon |
 
+### `server status`
+
+Show bridge status (running or stopped).
+
+```
+opencode2claude server status [OPTIONS]
+```
+
+| Flag | Description |
+|------|-------------|
+| `-p, --port` | Override bridge port for the daemon |
+| `--host` | Override bind address for the daemon |
+
+**Output modes:**
+
+- Human (default): Dashboard with uptime, PID, model, auth, proxy pool
+- `--json`: Structured JSON (`status`, `pid`, `uptime`, `message`)
+- `--quiet`: Compact one-line output (`running pid=12345 port=4000` or `stopped`)
+
+### `server restart`
+
+Restart the bridge daemon (stop then start).
+
+```
+opencode2claude server restart
+```
+
+### `server logs`
+
+View bridge daemon logs (last 100 lines).
+
+```
+opencode2claude server logs
+```
+
+- Human (default): Colorized log output
+- `--json`: Structured JSON with line numbers
+- `--quiet`: Raw log lines without color
+
+### `server config`
+
+Show current server configuration.
+
+```
+opencode2claude server config
+```
+
+- Human (default): Table of config keys and values
+- `--json`: Structured JSON
+
 ---
 
-## `status` — Show Bridge Status
+## `proxy` — Manage Proxy Pool
+
+### `proxy ps`
+
+List proxy pool status with role and health.
 
 ```
-opencode2claude status [OPTIONS]
+opencode2claude proxy ps
 ```
 
-| Output | Meaning |
-|--------|---------|
-| `Bridge: Running (PID: 12345, port: 4000)` | Bridge is active |
-| `Bridge: Stopped` | Bridge is not running |
+- Human (default): Table view
+- `--json`: Structured JSON per container
+- `--quiet`: Compact one-line summary (`primary=3/3 standby=2/2`)
+
+### `proxy restart`
+
+Recreate primary managed proxy containers (40001–40003).
+
+```
+opencode2claude proxy restart
+```
+
+Warm-standby proxies (40004, 40005) are never modified.
+
+### `proxy purge`
+
+Remove and recreate all primary proxy containers.
+
+```
+opencode2claude proxy purge [OPTIONS]
+```
+
+| Flag | Description |
+|------|-------------|
+| `-y, --yes` | Skip confirmation prompt |
+
+### `proxy logs`
+
+View proxy container logs (last 50 lines).
+
+```
+opencode2claude proxy logs
+```
 
 ---
 
-## `stop` — Stop the Bridge
+## `env` — Display Environment Information
 
-```
-opencode2claude stop [OPTIONS]
-```
-
-Sends SIGTERM to the bridge process, waits briefly, then SIGKILL if needed. Cleans up PID file.
-
----
-
-## `restart` — Restart the Bridge
-
-```
-opencode2claude restart
-```
-
-Stops the daemon then starts it again.
-
----
-
-## `logs` — View Bridge Logs
-
-```
-opencode2claude logs
-```
-
-Displays recent bridge daemon logs from `.runtime/opencode2claude.log`.
-
----
-
-## `env` — Display Environment
+Shows environment variables needed by Claude Code.
 
 ```
 opencode2claude env
 ```
 
-Shows the current bridge configuration derived from all config sources (CLI > Env > TOML > Defaults).
+- Human (default): Formatted env output
+- `--json`: Structured JSON
 
 ---
 
-## `proxy` — Manage Proxy Pool Containers
+## `doctor` — Diagnose Common Issues
 
-### `proxy status` / `proxy ps`
-
-List all proxy containers with their role and health:
+Runs diagnostics on the bridge and its dependencies.
 
 ```
-$ opencode2claude proxy status
-Primary managed proxies:
-  40001  healthy  opencode-warp-1
-  40002  healthy  opencode-warp-2
-  40003  healthy  opencode-warp-3
-
-Warm-standby protected proxies:
-  40004  healthy  opencode-warp-4  protected
-  40005  healthy  opencode-warp-5  protected
-
-Protected warm-standby proxies (40004-40005) are never stopped, restarted,
-purged, or recreated by opencode2claude.
+opencode2claude doctor
 ```
 
-### `proxy restart`
+Exit code: `0` if no failures, `1` if failures detected.
 
-Recreates primary managed proxy containers (40001–40003):
+- Human (default): Colored report
+- `--json`: Structured JSON with summary
+- `--quiet`: Compact summary (`warnings=2 failures=0`)
 
-```
-$ opencode2claude proxy restart
-Restarting primary managed proxies:
-  40001... OK
-  40002... OK
-  40003... OK
+---
 
-Protected warm-standby proxies skipped: 40004, 40005 (always protected)
-```
+## `completion` — Generate Shell Completion Scripts
 
-### `proxy purge`
-
-Removes and recreates all primary proxy containers:
+Generate shell completion scripts for bash, zsh, fish, powershell, or elvish.
 
 ```
-$ opencode2claude proxy purge
-Purging primary managed proxies:
-  40001... removed
-  40002... removed
-  40003... removed
-  40001 recreate... OK
-  40002 recreate... OK
-  40003 recreate... OK
-
-Protected warm-standby proxies skipped: 40004, 40005 (always protected)
+opencode2claude completion <SHELL>
 ```
 
-### `proxy logs`
+Example:
+```bash
+opencode2claude completion bash > /etc/bash_completion.d/opencode2claude
+```
 
-Display last 50 log lines from each primary proxy container:
+---
+
+## `update` — Self-Update
+
+Check for and apply the latest release.
 
 ```
-$ opencode2claude proxy logs
-=== proxy 40001 (opencode-warp-1) ===
-...
+opencode2claude update [OPTIONS]
 ```
+
+| Flag | Description |
+|------|-------------|
+| `--check` | Check for updates without applying |
+| `--force` | Force reinstall even if up-to-date |
+
+---
+
+## `init` — Generate Config File
+
+Generate a default `opencode2claude.toml` config file.
+
+```
+opencode2claude init [OPTIONS]
+```
+
+| Flag | Description |
+|------|-------------|
+| `-o, --output` | Output path (default: `./opencode2claude.toml`) |
+| `-f, --force` | Overwrite existing file without prompting |
+
+---
+
+## Output Modes
+
+Every command supports three output modes via global flags:
+
+### Human (default)
+
+Readable, colored output with tables and spinners when appropriate.
+
+### JSON (`--json`)
+
+Machine-parseable JSON only — no ANSI, no spinners, no decorative output.
+
+Error responses follow a consistent schema:
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "already_running",
+    "message": "Bridge is already running (PID: 12345)",
+    "hint": "Run `opencode2claude server stop` first."
+  }
+}
+```
+
+### Quiet (`--quiet`)
+
+Compact, script-friendly one-line output:
+
+| Command | Running | Stopped |
+|---------|---------|---------|
+| `server status` | `running pid=12345 port=4000` | `stopped` |
+| `server stop` | — | `stopped` |
+| `server restart` | `running pid=12345 port=4000` | `stopped` |
+| `proxy ps` | `primary=3/3 standby=2/2` | — |
+| `doctor` | `warnings=2 failures=0` | — |
+
+---
+
+## Backward-Compatible Aliases
+
+The following legacy flat commands remain available for backward compatibility
+but are hidden from `--help`:
+
+| Legacy | Equivalent v2 |
+|--------|---------------|
+| `serve [OPTIONS]` | `server start -f [OPTIONS]` |
+| `start [OPTIONS]` | `server start [OPTIONS]` |
+| `status [OPTIONS]` | `server status [OPTIONS]` |
+| `stop [OPTIONS]` | `server stop [OPTIONS]` |
+| `restart` | `server restart` |
+| `logs` | `server logs` |
+| `proxy status` | `proxy ps` |
+
+Legacy commands emit a deprecation hint and redirect to the equivalent v2 command.
+They may still appear in generated shell completions for compatibility.
 
 ---
 
@@ -180,5 +304,5 @@ $ opencode2claude proxy logs
 CLI args  >  Environment variables  >  TOML file  >  Hardcoded defaults
 ```
 
-All `serve` flags have a corresponding environment variable (see table above).
+All `server start` flags have a corresponding environment variable (see above).
 TOML file defaults to `opencode2claude.toml` in the current directory.

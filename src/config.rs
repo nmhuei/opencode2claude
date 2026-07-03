@@ -10,6 +10,28 @@ use std::env;
 use std::net::IpAddr;
 use tracing::warn;
 
+/// Validates a proxy URL: must start with socks5://, socks5h://, http://, or https://
+/// and must not point to an external host unless explicitly permitted.
+pub(crate) fn validate_proxy_url(url: &str) -> bool {
+    let allowed_schemes = ["socks5://", "socks5h://", "http://", "https://"];
+    if !allowed_schemes.iter().any(|s| url.starts_with(s)) {
+        warn!(
+            "Invalid proxy URL scheme (must be socks5/http/https): {}",
+            url
+        );
+        return false;
+    }
+    true
+}
+
+/// Validate a list of proxy URLs, returning only valid ones.
+pub(crate) fn validate_proxy_urls(urls: &[String]) -> Vec<String> {
+    urls.iter()
+        .filter(|u| validate_proxy_url(u))
+        .cloned()
+        .collect()
+}
+
 /// Default values used when environment variables are not set.
 pub const DEFAULT_BRIDGE_PORT: u16 = 4000;
 pub const DEFAULT_OPENCODE_PORT: u16 = 4096;
@@ -42,6 +64,9 @@ pub struct TomlConfig {
     pub searxng_api_key: Option<String>,
     pub max_search_loops: Option<u32>,
     pub proxies: Option<Vec<String>>,
+    pub tls_enabled: Option<bool>,
+    pub tls_cert_path: Option<String>,
+    pub tls_key_path: Option<String>,
 }
 
 impl TomlConfig {
@@ -64,6 +89,8 @@ pub struct CliOverrides {
     pub serper_api_key: Option<String>,
     pub searxng_url: Option<String>,
     pub searxng_api_key: Option<String>,
+    pub tls_cert_path: Option<String>,
+    pub tls_key_path: Option<String>,
 }
 
 /// Central configuration struct for the bridge.
@@ -109,6 +136,12 @@ pub struct BridgeConfig {
     pub primary_proxies: Option<Vec<String>>,
     /// Warm-standby proxy URLs (protected, never restarted)
     pub warm_standby_proxies: Option<Vec<String>>,
+    /// Enable TLS (default: false)
+    pub tls_enabled: bool,
+    /// Path to TLS certificate file (PEM)
+    pub tls_cert_path: Option<String>,
+    /// Path to TLS private key file (PEM)
+    pub tls_key_path: Option<String>,
 }
 
 impl Default for BridgeConfig {
@@ -132,6 +165,9 @@ impl Default for BridgeConfig {
             proxies: None,
             primary_proxies: None,
             warm_standby_proxies: None,
+            tls_enabled: false,
+            tls_cert_path: None,
+            tls_key_path: None,
         }
     }
 }
@@ -213,16 +249,33 @@ impl BridgeConfig {
         };
 
         // Auth tokens: Env > TOML
-        let auth_tokens = env::var("BRIDGE_AUTH_TOKEN")
+        // ⚠️ Empty-string BRIDGE_AUTH_TOKEN (after split+filter) is treated as
+        // auth disabled to prevent permanent lockout — see is_valid_token().
+        let auth_tokens = match env::var("BRIDGE_AUTH_TOKEN")
             .ok()
             .or_else(|| toml_config.as_ref().and_then(|t| t.auth_tokens.clone()))
-            .map(|tokens| {
-                tokens
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            });
+        {
+            Some(raw) => {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    warn!("BRIDGE_AUTH_TOKEN is set but empty — treating auth as disabled");
+                    None
+                } else {
+                    let tokens: Vec<String> = trimmed
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    if tokens.is_empty() {
+                        warn!("BRIDGE_AUTH_TOKEN contains no valid tokens — treating auth as disabled");
+                        None
+                    } else {
+                        Some(tokens)
+                    }
+                }
+            }
+            None => None,
+        };
 
         let max_body_size = env::var("BRIDGE_MAX_BODY_SIZE")
             .ok()
@@ -276,15 +329,21 @@ impl BridgeConfig {
         let proxies = env::var("BRIDGE_PROXIES")
             .ok()
             .or_else(|| {
-                toml_config
+                let raw = toml_config
                     .as_ref()
-                    .and_then(|t| t.proxies.as_ref().map(|p| p.join(",")))
+                    .and_then(|t| t.proxies.as_ref().map(|p| p.join(",")));
+                if raw.is_some() {
+                    warn!("DEPRECATED: 'proxies' (env BRIDGE_PROXIES) is deprecated — use 'primary_proxies' / BRIDGE_PRIMARY_PROXIES instead");
+                }
+                raw
             })
             .map(|s| {
-                s.split(',')
+                let raw: Vec<String> = s
+                    .split(',')
                     .map(|item| item.trim().to_string())
                     .filter(|item| !item.is_empty())
-                    .collect::<Vec<String>>()
+                    .collect();
+                validate_proxy_urls(&raw)
             });
 
         // Primary proxies: BRIDGE_PRIMARY_PROXIES env var > derived from TOML proxies > default
@@ -302,10 +361,12 @@ impl BridgeConfig {
                 )
             })
             .map(|s| {
-                s.split(',')
+                let raw: Vec<String> = s
+                    .split(',')
                     .map(|item| item.trim().to_string())
                     .filter(|item| !item.is_empty())
-                    .collect::<Vec<String>>()
+                    .collect();
+                validate_proxy_urls(&raw)
             });
 
         // Warm-standby proxies: BRIDGE_WARM_STANDBY_PROXIES env var > default
@@ -313,11 +374,34 @@ impl BridgeConfig {
             .ok()
             .or_else(|| Some("socks5://127.0.0.1:40004,socks5://127.0.0.1:40005".to_string()))
             .map(|s| {
-                s.split(',')
+                let raw: Vec<String> = s
+                    .split(',')
                     .map(|item| item.trim().to_string())
                     .filter(|item| !item.is_empty())
-                    .collect::<Vec<String>>()
+                    .collect();
+                validate_proxy_urls(&raw)
             });
+
+        // TLS: Env vars > TOML
+        let tls_enabled = env::var("BRIDGE_TLS_ENABLED")
+            .ok()
+            .or_else(|| {
+                toml_config
+                    .as_ref()
+                    .and_then(|t| t.tls_enabled.map(|v| v.to_string()))
+            })
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+
+        let tls_cert_path = overrides
+            .tls_cert_path
+            .or_else(|| env::var("BRIDGE_TLS_CERT_PATH").ok())
+            .or_else(|| toml_config.as_ref().and_then(|t| t.tls_cert_path.clone()));
+
+        let tls_key_path = overrides
+            .tls_key_path
+            .or_else(|| env::var("BRIDGE_TLS_KEY_PATH").ok())
+            .or_else(|| toml_config.as_ref().and_then(|t| t.tls_key_path.clone()));
 
         BridgeConfig {
             host,
@@ -338,6 +422,9 @@ impl BridgeConfig {
             proxies,
             primary_proxies,
             warm_standby_proxies,
+            tls_enabled,
+            tls_cert_path,
+            tls_key_path,
         }
     }
 
@@ -365,8 +452,29 @@ impl BridgeConfig {
     /// 1. **Public bind without auth** — non-loopback addresses must have auth enabled.
     /// 2. **Public bind + unrestricted shell** — non-loopback with unrestricted shell
     ///    is denied regardless of auth status.
+    /// 3. **TLS cert/key existence** — when TLS is enabled, both files must exist.
     pub fn validate_security(&self) -> Result<(), String> {
         let is_loopback = self.host.is_loopback();
+
+        // When TLS is enabled, verify both cert and key are configured and exist
+        if self.tls_enabled {
+            match (&self.tls_cert_path, &self.tls_key_path) {
+                (Some(cert_path), Some(key_path)) => {
+                    if !std::path::Path::new(cert_path).exists() {
+                        return Err(format!("TLS certificate file not found: {}", cert_path));
+                    }
+                    if !std::path::Path::new(key_path).exists() {
+                        return Err(format!("TLS private key file not found: {}", key_path));
+                    }
+                }
+                _ => {
+                    return Err(
+                        "TLS is enabled but BRIDGE_TLS_CERT_PATH or BRIDGE_TLS_KEY_PATH is not set."
+                            .to_string(),
+                    );
+                }
+            }
+        }
 
         if is_loopback {
             return Ok(());

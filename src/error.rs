@@ -11,15 +11,6 @@ use serde_json::json;
 /// Central error type for the OpenCode2Claude bridge.
 #[derive(Debug, thiserror::Error)]
 pub enum BridgeError {
-    #[allow(dead_code)] // kept for planned use in CLI & daemon startup
-    #[error("Failed to bind to address: {0}")]
-    BindFailed(#[source] std::io::Error),
-
-    #[allow(dead_code)] // kept for planned use in supervisor
-    #[error("Failed to spawn process: {0}")]
-    ProcessSpawnFailed(#[source] std::io::Error),
-
-    #[allow(dead_code)] // kept for structured error responses
     #[error("Shell commands are disabled by policy. Set BRIDGE_SHELL_POLICY=allowlist or unrestricted to enable.")]
     ShellDisabled,
 
@@ -32,58 +23,25 @@ pub enum BridgeError {
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
 
-    #[allow(dead_code)] // kept for health-check error paths
-    #[error("OpenCode daemon unavailable on port {0}")]
-    DaemonUnavailable(u16),
-
     #[error("Upstream API error: {0}")]
     UpstreamError(String),
 }
 
 impl IntoResponse for BridgeError {
     fn into_response(self) -> Response {
-        let (status, error_type, message) = match &self {
-            BridgeError::BindFailed(_) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
-                self.to_string(),
-            ),
-            BridgeError::ProcessSpawnFailed(_) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
-                self.to_string(),
-            ),
-            BridgeError::ShellDisabled => {
-                (StatusCode::FORBIDDEN, "permission_error", self.to_string())
-            }
-            BridgeError::ShellBlocked { .. } => {
-                (StatusCode::FORBIDDEN, "permission_error", self.to_string())
-            }
-            BridgeError::InvalidRequest(_) => (
-                StatusCode::BAD_REQUEST,
-                "invalid_request_error",
-                self.to_string(),
-            ),
-            BridgeError::Unauthorized(_) => (
-                StatusCode::UNAUTHORIZED,
-                "authentication_error",
-                self.to_string(),
-            ),
-            BridgeError::DaemonUnavailable(_) => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "server_error",
-                self.to_string(),
-            ),
-            BridgeError::UpstreamError(_) => {
-                (StatusCode::BAD_GATEWAY, "api_error", self.to_string())
-            }
+        let (status, error_type) = match &self {
+            BridgeError::ShellDisabled => (StatusCode::FORBIDDEN, "permission_error"),
+            BridgeError::ShellBlocked { .. } => (StatusCode::FORBIDDEN, "permission_error"),
+            BridgeError::InvalidRequest(_) => (StatusCode::BAD_REQUEST, "invalid_request_error"),
+            BridgeError::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "authentication_error"),
+            BridgeError::UpstreamError(_) => (StatusCode::BAD_GATEWAY, "api_error"),
         };
 
         let body = json!({
             "type": "error",
             "error": {
                 "type": error_type,
-                "message": message,
+                "message": self.to_string(),
             }
         });
 

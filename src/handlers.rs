@@ -6,6 +6,7 @@ use crate::opencode;
 use crate::sse::SseEventBuilder;
 use crate::state::AppState;
 use futures_util::StreamExt;
+use std::time::Duration;
 
 use axum::extract::State;
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -41,6 +42,9 @@ pub struct MessageContent {
     /// Result content of the tool execution.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<serde_json::Value>,
+    /// Thinking content when `content_type` is "thinking".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
 }
 
 /// Message content can be either a plain string or a structured array of content blocks.
@@ -180,10 +184,16 @@ pub async fn handle_messages(
     // Acquire rate limiter permit if configured — must live for the full handler
     let _rate_permit = match state.rate_limiter {
         Some(ref limiter) => Some(
-            limiter
-                .acquire()
+            tokio::time::timeout(Duration::from_secs(30), limiter.acquire())
                 .await
-                .map_err(|_| BridgeError::InvalidRequest("Rate limit exceeded".to_string()))?,
+                .map_err(|_| {
+                    BridgeError::InvalidRequest(
+                        "Rate limit: timeout waiting for permit (30s)".to_string(),
+                    )
+                })?
+                .map_err(|_| {
+                    BridgeError::InvalidRequest("Rate limit semaphore closed".to_string())
+                })?,
         ),
         None => None,
     };
@@ -249,10 +259,10 @@ pub async fn handle_messages(
             let output_tk = (output.len() as f32 / 3.5).round() as u32 + 10;
             tokio::spawn(async move {
                 let _ = tx.send(builder.message_start(10)).await;
-                let _ = tx.send(builder.content_block_start()).await;
-                let _ = tx.send(builder.text_delta(&output)).await;
-                let _ = tx.send(builder.content_block_stop()).await;
-                let _ = tx.send(builder.message_delta(output_tk)).await;
+                let _ = tx.send(builder.content_block_start_simple()).await;
+                let _ = tx.send(builder.text_delta_simple(&output)).await;
+                let _ = tx.send(builder.content_block_stop_simple()).await;
+                let _ = tx.send(builder.message_delta_simple(output_tk)).await;
                 let _ = tx.send(builder.message_stop()).await;
             });
             let response = Sse::new(

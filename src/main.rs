@@ -11,11 +11,11 @@ use opencode2claude::docker;
 use opencode2claude::doctor;
 use opencode2claude::handlers;
 use opencode2claude::middleware;
-use opencode2claude::output::{setup_color, OutputFormat};
+use opencode2claude::output::{self, print_json_error, setup_color, OutputFormat};
 use opencode2claude::proxy_pool;
 use opencode2claude::runtime::RuntimePaths;
 use opencode2claude::state::AppState;
-use opencode2claude::supervisor::{Supervisor, SupervisorStatus};
+use opencode2claude::supervisor::{DaemonSpawnOptions, Supervisor, SupervisorStatus};
 
 use clap::CommandFactory;
 use clap::Parser;
@@ -23,6 +23,7 @@ use clap_complete::generate;
 
 use axum::routing::{get, post};
 use axum::Router;
+use axum_server::tls_rustls::RustlsConfig;
 use comfy_table::{presets, Cell as CtCell, Color as CtColor, ContentArrangement, Table};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::net::SocketAddr;
@@ -122,42 +123,76 @@ async fn cmd_server(cmd: ServerCommand, fmt: OutputFormat) {
                     host: args.host,
                     config: args.config,
                     model: args.model,
-                    shell_policy: args.shell_policy,
+                    shell_policy: args.shell_policy.map(|p| p.to_string()),
                     tavily_api_key: args.tavily_api_key,
                     exa_api_key: args.exa_api_key,
                     serper_api_key: args.serper_api_key,
                     searxng_url: args.searxng_url,
                     searxng_api_key: args.searxng_api_key,
+                    tls_cert: args.tls_cert,
+                    tls_key: args.tls_key,
                 };
                 cmd_run_server(bridge_args).await;
             } else {
-                start_daemon(args.port, args.host, fmt).await;
+                let bridge_args = ServeArgsBridge {
+                    port: args.port,
+                    host: args.host,
+                    config: args.config.clone(),
+                    model: args.model.clone(),
+                    shell_policy: args.shell_policy.map(|p| p.to_string()),
+                    tavily_api_key: args.tavily_api_key.clone(),
+                    exa_api_key: args.exa_api_key.clone(),
+                    serper_api_key: args.serper_api_key.clone(),
+                    searxng_url: args.searxng_url.clone(),
+                    searxng_api_key: args.searxng_api_key.clone(),
+                    tls_cert: args.tls_cert.clone(),
+                    tls_key: args.tls_key.clone(),
+                };
+                start_daemon(bridge_args, fmt).await;
             }
         }
         ServerCommand::Stop(args) => {
             let sup = resolve_runtime(args.port, args.host);
             match sup.stop() {
-                Ok(()) => println!("Bridge stopped."),
+                Ok(()) => {
+                    if fmt == OutputFormat::Quiet {
+                        println!("stopped");
+                    } else {
+                        println!("Bridge stopped.");
+                    }
+                }
                 Err(e) => {
-                    eprintln!("{} bridge: stop failed — {}", "✗".red().bold(), e);
-                    eprintln!(
-                        "   Hint: Is the bridge running? Try `opencode2claude server status`"
-                    );
+                    if fmt == OutputFormat::Json {
+                        print_json_error("stop_failed", &e.to_string(), None);
+                    } else {
+                        eprintln!("{} bridge: stop failed — {}", "✗".red().bold(), e);
+                        eprintln!(
+                            "   Hint: Is the bridge running? Try `opencode2claude server status`"
+                        );
+                    }
                     std::process::exit(1);
                 }
             }
         }
         ServerCommand::Status(args) => {
             let sup = resolve_runtime(args.port, args.host);
-            if fmt == OutputFormat::Json {
-                let status_info = ServerStatusInfo::from(sup.status().map_err(|e| e.to_string()));
-                if let Ok(s) = serde_json::to_string_pretty(&status_info) {
-                    println!("{s}");
+            match sup.status() {
+                Ok(status) => {
+                    if fmt == OutputFormat::Json {
+                        let status_info = ServerStatusInfo::from(Ok(status));
+                        if let Ok(s) = serde_json::to_string_pretty(&status_info) {
+                            println!("{s}");
+                        }
+                    } else {
+                        cmd_print_status(status, fmt).await;
+                    }
                 }
-            } else {
-                match sup.status() {
-                    Ok(status) => cmd_print_status(status, fmt).await,
-                    Err(e) => eprintln!("{} bridge: status failed — {}.", "✗".red().bold(), e),
+                Err(e) => {
+                    if fmt == OutputFormat::Json {
+                        print_json_error("status_failed", &e.to_string(), None);
+                    } else {
+                        eprintln!("{} bridge: status failed — {}.", "✗".red().bold(), e);
+                    }
                 }
             }
         }
@@ -167,19 +202,34 @@ async fn cmd_server(cmd: ServerCommand, fmt: OutputFormat) {
             match sup.start() {
                 Ok(()) => {
                     let status = sup.status().unwrap_or(SupervisorStatus::Stopped);
-                    if fmt == OutputFormat::Json {
-                        let info = ServerStatusInfo::from(Ok(status));
-                        if let Ok(s) = serde_json::to_string_pretty(&info) {
-                            println!("{s}");
+                    match fmt {
+                        OutputFormat::Json => {
+                            let info = ServerStatusInfo::from(Ok(status));
+                            if let Ok(s) = serde_json::to_string_pretty(&info) {
+                                println!("{s}");
+                            }
                         }
-                    } else {
-                        println!("{} Bridge restarted. {}", "✓".green().bold(), status);
-                        maybe_print_proxy_table(fmt).await;
+                        OutputFormat::Quiet => match status {
+                            SupervisorStatus::Running { pid, port, .. } => {
+                                println!("running pid={} port={}", pid, port);
+                            }
+                            _ => println!("stopped"),
+                        },
+                        OutputFormat::Human => {
+                            println!("{} Bridge restarted. {}", "✓".green().bold(), status);
+                            maybe_print_proxy_table(fmt).await;
+                        }
                     }
                 }
                 Err(e) => {
-                    eprintln!("{} restart: {}", "✗".red().bold(), e);
-                    eprintln!("   Hint: Check the PID file or run `opencode2claude server start`");
+                    if fmt == OutputFormat::Json {
+                        print_json_error("restart_failed", &e.to_string(), None);
+                    } else {
+                        eprintln!("{} restart: {}", "✗".red().bold(), e);
+                        eprintln!(
+                            "   Hint: Check the PID file or run `opencode2claude server start`"
+                        );
+                    }
                     std::process::exit(1);
                 }
             }
@@ -217,8 +267,19 @@ async fn cmd_server(cmd: ServerCommand, fmt: OutputFormat) {
     }
 }
 
-async fn start_daemon(port: Option<u16>, host: Option<String>, fmt: OutputFormat) {
-    let sup = resolve_runtime(port, host);
+async fn start_daemon(args: ServeArgsBridge, fmt: OutputFormat) {
+    let sup = resolve_runtime(args.port, args.host).with_spawn_options(DaemonSpawnOptions {
+        config: args.config.clone(),
+        model: args.model.clone(),
+        shell_policy: args.shell_policy.clone(),
+        tavily_api_key: args.tavily_api_key.clone(),
+        exa_api_key: args.exa_api_key.clone(),
+        serper_api_key: args.serper_api_key.clone(),
+        searxng_url: args.searxng_url.clone(),
+        searxng_api_key: args.searxng_api_key.clone(),
+        tls_cert: args.tls_cert.clone(),
+        tls_key: args.tls_key.clone(),
+    });
 
     if fmt == OutputFormat::Json {
         // No spinner in JSON mode — output structured data only
@@ -231,9 +292,17 @@ async fn start_daemon(port: Option<u16>, host: Option<String>, fmt: OutputFormat
                 }
             }
             Err(e) => {
-                eprintln!("{} start: {}", "✗".red().bold(), e);
-                eprintln!("   Hint: Check if the bridge is already running. Try: `opencode2claude server stop`");
-                std::process::exit(1);
+                let msg = format!("{}", e);
+                let hint = if msg.contains("already running") {
+                    Some("Run `opencode2claude server stop` first.")
+                } else {
+                    None
+                };
+                if msg.contains("already running") {
+                    print_json_error("already_running", &msg, hint);
+                } else {
+                    print_json_error("start_failed", &msg, hint);
+                }
             }
         }
         return;
@@ -353,7 +422,7 @@ async fn cmd_update(args: UpdateArgs) {
                 asset.name
             );
 
-            match update::apply_update(&client, asset).await {
+            match update::apply_update(&client, asset, &release).await {
                 Ok(path) => {
                     eprintln!(
                         "{} Updated to {} — binary replaced at {}",
@@ -643,28 +712,9 @@ async fn cmd_proxy(cmd: ProxyCommand, fmt: OutputFormat) {
             }
 
             // Human mode: confirm + MultiProgress
-            if !yes {
-                let ports = proxy_pool::get_primary_ports();
-                eprintln!(
-                    "{} About to purge and recreate {} primary proxies: {:?}",
-                    "⚠".yellow().bold(),
-                    ports.len(),
-                    ports
-                );
-                eprintln!(
-                    "{} This will reset all WARP connections.",
-                    "⚠".yellow().bold()
-                );
-                eprint!("Continue? [y/N] ");
-                use std::io::Write;
-                std::io::stdout().flush().ok();
-                let mut input = String::new();
-                std::io::stdin().read_line(&mut input).ok();
-                let input = input.trim().to_lowercase();
-                if input != "y" && input != "yes" {
-                    println!("Aborted.");
-                    return;
-                }
+            if !yes && !output::confirm_action("purge all primary proxies").await {
+                eprintln!("Aborted.");
+                return;
             }
 
             let ports = proxy_pool::get_primary_ports();
@@ -744,7 +794,7 @@ async fn cmd_proxy(cmd: ProxyCommand, fmt: OutputFormat) {
 
 // ── Legacy backward-compat commands ──
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct ServeArgsBridge {
     pub port: Option<u16>,
     pub host: Option<String>,
@@ -756,6 +806,8 @@ struct ServeArgsBridge {
     pub serper_api_key: Option<String>,
     pub searxng_url: Option<String>,
     pub searxng_api_key: Option<String>,
+    pub tls_cert: Option<String>,
+    pub tls_key: Option<String>,
 }
 
 async fn cmd_serve_legacy(args: cli::ServeArgs) {
@@ -764,31 +816,49 @@ async fn cmd_serve_legacy(args: cli::ServeArgs) {
         host: args.host,
         config: args.config,
         model: args.model,
-        shell_policy: args.shell_policy,
+        shell_policy: args.shell_policy.map(|p| p.to_string()),
         tavily_api_key: args.tavily_api_key,
         exa_api_key: args.exa_api_key,
         serper_api_key: args.serper_api_key,
         searxng_url: args.searxng_url,
         searxng_api_key: args.searxng_api_key,
+        tls_cert: args.tls_cert,
+        tls_key: args.tls_key,
     };
     cmd_run_server(bridge_args).await;
 }
 
 async fn cmd_start_legacy(args: cli::StartArgs, fmt: OutputFormat) {
-    start_daemon(args.port, args.host, fmt).await;
+    start_daemon(
+        ServeArgsBridge {
+            port: args.port,
+            host: args.host,
+            ..Default::default()
+        },
+        fmt,
+    )
+    .await;
 }
 
 async fn cmd_status_legacy(args: cli::StatusArgs, fmt: OutputFormat) {
     let sup = resolve_runtime(args.port, args.host);
-    if fmt == OutputFormat::Json {
-        let status_info = ServerStatusInfo::from(sup.status().map_err(|e| e.to_string()));
-        if let Ok(s) = serde_json::to_string_pretty(&status_info) {
-            println!("{s}");
+    match sup.status() {
+        Ok(status) => {
+            if fmt == OutputFormat::Json {
+                let status_info = ServerStatusInfo::from(Ok(status));
+                if let Ok(s) = serde_json::to_string_pretty(&status_info) {
+                    println!("{s}");
+                }
+            } else {
+                cmd_print_status(status, fmt).await;
+            }
         }
-    } else {
-        match sup.status() {
-            Ok(status) => cmd_print_status(status, fmt).await,
-            Err(e) => eprintln!("{} bridge: status failed — {}.", "✗".red().bold(), e),
+        Err(e) => {
+            if fmt == OutputFormat::Json {
+                print_json_error("status_failed", &e.to_string(), None);
+            } else {
+                eprintln!("{} bridge: status failed — {}.", "✗".red().bold(), e);
+            }
         }
     }
 }
@@ -813,14 +883,23 @@ async fn cmd_restart_legacy(fmt: OutputFormat) {
     match sup.start() {
         Ok(()) => {
             let status = sup.status().unwrap_or(SupervisorStatus::Stopped);
-            if fmt == OutputFormat::Json {
-                let info = ServerStatusInfo::from(Ok(status));
-                if let Ok(s) = serde_json::to_string_pretty(&info) {
-                    println!("{s}");
+            match fmt {
+                OutputFormat::Json => {
+                    let info = ServerStatusInfo::from(Ok(status));
+                    if let Ok(s) = serde_json::to_string_pretty(&info) {
+                        println!("{s}");
+                    }
                 }
-            } else {
-                println!("{} Bridge restarted. {}", "✓".green().bold(), status);
-                maybe_print_proxy_table(fmt).await;
+                OutputFormat::Quiet => match status {
+                    SupervisorStatus::Running { pid, port, .. } => {
+                        println!("running pid={} port={}", pid, port);
+                    }
+                    _ => println!("stopped"),
+                },
+                OutputFormat::Human => {
+                    println!("{} Bridge restarted. {}", "✓".green().bold(), status);
+                    maybe_print_proxy_table(fmt).await;
+                }
             }
         }
         Err(e) => {
@@ -905,45 +984,62 @@ async fn maybe_print_proxy_table(fmt: OutputFormat) {
 
 /// Bridge status dashboard with uptime and proxy pool table.
 async fn cmd_print_status(status: SupervisorStatus, fmt: OutputFormat) {
-    println!();
-    match status {
-        SupervisorStatus::Running {
-            pid,
-            port,
-            started_at,
-        } => {
-            let uptime = uptime_str(started_at);
-            let model = std::env::var("OPENCODE_MODEL").unwrap_or_else(|_| "auto".into());
-            let auth = if std::env::var("BRIDGE_AUTH_TOKEN")
-                .ok()
-                .filter(|t| !t.is_empty())
-                .is_some()
-            {
-                "enabled".green().bold().to_string()
-            } else {
-                "disabled".yellow().bold().to_string()
-            };
-
-            // Bridge dashboard header
-            println!(
-                " {}            PID: {:<10} Uptime: {}",
-                "● Online".green().bold(),
-                pid.to_string().yellow().bold(),
-                uptime.cyan().bold()
-            );
-            println!(
-                "  Port: {:<14} Model: {}",
-                port.to_string().cyan().bold(),
-                model.blue().bold()
-            );
-            println!("  Auth: {}", auth);
-            maybe_print_proxy_table(fmt).await;
+    match fmt {
+        OutputFormat::Quiet => match status {
+            SupervisorStatus::Running { pid, port, .. } => {
+                println!("running pid={} port={}", pid, port);
+            }
+            SupervisorStatus::Stopped => {
+                println!("stopped");
+            }
+        },
+        OutputFormat::Json => {
+            let info = ServerStatusInfo::from(Ok(status));
+            if let Ok(s) = serde_json::to_string_pretty(&info) {
+                println!("{s}");
+            }
         }
-        SupervisorStatus::Stopped => {
-            println!(" {}  Bridge is not running", "● Stopped".red().bold());
+        OutputFormat::Human => {
+            println!();
+            match status {
+                SupervisorStatus::Running {
+                    pid,
+                    port,
+                    started_at,
+                } => {
+                    let uptime = uptime_str(started_at);
+                    let model = std::env::var("OPENCODE_MODEL").unwrap_or_else(|_| "auto".into());
+                    let auth = if std::env::var("BRIDGE_AUTH_TOKEN")
+                        .ok()
+                        .filter(|t| !t.is_empty())
+                        .is_some()
+                    {
+                        "enabled".green().bold().to_string()
+                    } else {
+                        "disabled".yellow().bold().to_string()
+                    };
+
+                    println!(
+                        " {}            PID: {:<10} Uptime: {}",
+                        "● Online".green().bold(),
+                        pid.to_string().yellow().bold(),
+                        uptime.cyan().bold()
+                    );
+                    println!(
+                        "  Port: {:<14} Model: {}",
+                        port.to_string().cyan().bold(),
+                        model.blue().bold()
+                    );
+                    println!("  Auth: {}", auth);
+                    maybe_print_proxy_table(fmt).await;
+                }
+                SupervisorStatus::Stopped => {
+                    println!(" {}  Bridge is not running", "● Stopped".red().bold());
+                }
+            }
+            println!();
         }
     }
-    println!();
 }
 
 #[derive(serde::Serialize)]
@@ -1138,6 +1234,8 @@ async fn cmd_run_server(args: ServeArgsBridge) {
         serper_api_key: args.serper_api_key,
         searxng_url: args.searxng_url,
         searxng_api_key: args.searxng_api_key,
+        tls_cert_path: args.tls_cert,
+        tls_key_path: args.tls_key,
     };
     let config = BridgeConfig::from_env_and_cli(overrides);
     let addr = SocketAddr::from((config.host, config.bridge_port));
@@ -1156,9 +1254,12 @@ async fn cmd_run_server(args: ServeArgsBridge) {
     );
     info!("╠══════════════════════════════════════════════╣");
     info!(
-        "║  Bridge:  http://{}{}║",
+        "║  Bridge:  http{}://{}{}║",
+        if config.tls_enabled { "s" } else { "" },
         addr,
-        " ".repeat(27usize.saturating_sub(addr.to_string().len()))
+        " ".repeat(
+            25usize.saturating_sub(addr.to_string().len() + if config.tls_enabled { 1 } else { 0 })
+        )
     );
     info!(
         "║  Daemon:  port {}                          ║",
@@ -1193,9 +1294,13 @@ async fn cmd_run_server(args: ServeArgsBridge) {
         )
     );
     info!("╚══════════════════════════════════════════════╝");
-    info!("To use: export ANTHROPIC_BASE_URL=\"http://{}/v1\"", addr);
+    let scheme = if config.tls_enabled { "https" } else { "http" };
+    info!(
+        "To use: export ANTHROPIC_BASE_URL=\"{scheme}://{}/v1\"",
+        addr
+    );
 
-    let state = AppState::new(config);
+    let state = AppState::new(config.clone());
 
     let app = Router::new()
         .route("/v1/messages", post(handlers::handle_messages))
@@ -1212,28 +1317,53 @@ async fn cmd_run_server(args: ServeArgsBridge) {
         .layer(RequestBodyLimitLayer::new(max_body))
         .with_state(state);
 
-    let listener = match tokio::net::TcpListener::bind(addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("{} Failed to bind to {}: {}", "✗".red().bold(), addr, e);
-            eprintln!(
-                "   Hint: Is another process using port {}? Try: lsof -i :{}",
-                addr.port(),
-                addr.port()
-            );
-            std::process::exit(1);
-        }
-    };
-
-    info!("Server started successfully. Waiting for requests...");
-
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+    if config.tls_enabled {
+        let tls_config = match RustlsConfig::from_pem_file(
+            config.tls_cert_path.as_ref().unwrap(),
+            config.tls_key_path.as_ref().unwrap(),
+        )
         .await
-        .unwrap_or_else(|e| {
-            eprintln!("{} Server error: {}", "✗".red().bold(), e);
-            std::process::exit(1);
-        });
+        {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("{} Failed to load TLS config: {}", "✗".red().bold(), e);
+                std::process::exit(1);
+            }
+        };
+
+        info!("Server started successfully. Waiting for requests...");
+
+        axum_server::bind_rustls(addr, tls_config)
+            .serve(app.into_make_service())
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("{} Server error: {}", "✗".red().bold(), e);
+                std::process::exit(1);
+            });
+    } else {
+        let listener = match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("{} Failed to bind to {}: {}", "✗".red().bold(), addr, e);
+                eprintln!(
+                    "   Hint: Is another process using port {}? Try: lsof -i :{}",
+                    addr.port(),
+                    addr.port()
+                );
+                std::process::exit(1);
+            }
+        };
+
+        info!("Server started successfully. Waiting for requests...");
+
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown_signal())
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("{} Server error: {}", "✗".red().bold(), e);
+                std::process::exit(1);
+            });
+    }
 
     info!("Server shut down gracefully.");
 }

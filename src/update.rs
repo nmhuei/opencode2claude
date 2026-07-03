@@ -1,10 +1,11 @@
 //! Self-update module — checks GitHub releases and replaces the current binary.
 //!
 //! Uses the GitHub Releases API to fetch the latest version, compares it
-//! to the current build, and replaces the binary on disk if an update is
-//! needed or requested.
+//! to the current build, verifies the binary SHA-256 checksum, and replaces
+//! the binary on disk if an update is needed or requested.
 
 use anyhow::{anyhow, Context, Result};
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
 /// Info about a single release asset (binary for a specific platform).
@@ -133,11 +134,87 @@ pub fn find_matching_asset(release: &ReleaseInfo) -> Option<&AssetInfo> {
     release.assets.iter().find(|a| a.name == asset_name)
 }
 
+/// Find the SHA256SUMS asset in a release, if present.
+fn find_checksums_asset(release: &ReleaseInfo) -> Option<&AssetInfo> {
+    release
+        .assets
+        .iter()
+        .find(|a| a.name.starts_with("SHA256SUMS") || a.name.contains("sha256"))
+}
+
+/// Compute SHA-256 hex digest of a byte slice.
+pub fn sha256_digest(data: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hex::encode(hasher.finalize())
+}
+
+/// Parse a SHA256SUMS file and return the expected hash for the given filename.
+///
+/// Format: each line is `<sha256>  <filename>` (two spaces) or `<sha256> <filename>`.
+fn parse_checksum(checksums_data: &str, filename: &str) -> Option<String> {
+    for line in checksums_data.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // Split on whitespace and look for two parts
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 2 && parts[1] == filename {
+            return Some(parts[0].to_string());
+        }
+    }
+    None
+}
+
+/// Verify downloaded binary integrity against SHA256SUMS from the release.
+///
+/// Returns `Ok(())` if checksums match, `Err` with details if verification fails,
+/// or `None` if no checksums file is available (backward compatibility).
+async fn verify_checksum(
+    client: &reqwest::Client,
+    release: &ReleaseInfo,
+    binary_bytes: &[u8],
+    binary_name: &str,
+) -> Option<anyhow::Result<()>> {
+    let checksums_asset = find_checksums_asset(release)?;
+
+    let resp = client
+        .get(&checksums_asset.download_url)
+        .header("User-Agent", user_agent())
+        .send()
+        .await;
+
+    let text = match resp {
+        Ok(r) if r.status().is_success() => r.text().await.ok()?,
+        _ => return None,
+    };
+
+    let expected_hash = parse_checksum(&text, binary_name)?;
+    let actual_hash = sha256_digest(binary_bytes);
+
+    if actual_hash == expected_hash {
+        Some(Ok(()))
+    } else {
+        Some(Err(anyhow!(
+            "SHA-256 checksum mismatch for {}: expected {} but computed {}",
+            binary_name,
+            expected_hash,
+            actual_hash
+        )))
+    }
+}
+
 /// Replace the current binary by downloading the new one.
 ///
-/// Downloads into a temp file next to the current binary, then renames
-/// atomically (POSIX: rename works even while the binary is running).
-pub async fn apply_update(client: &reqwest::Client, asset: &AssetInfo) -> Result<PathBuf> {
+/// Downloads into a temp file next to the current binary, verifies the
+/// SHA-256 checksum (if available), then renames atomically
+/// (POSIX: rename works even while the binary is running).
+pub async fn apply_update(
+    client: &reqwest::Client,
+    asset: &AssetInfo,
+    release: &ReleaseInfo,
+) -> Result<PathBuf> {
     let current_exe = std::env::current_exe().context("cannot determine current binary path")?;
     let parent = current_exe
         .parent()
@@ -161,6 +238,23 @@ pub async fn apply_update(client: &reqwest::Client, asset: &AssetInfo) -> Result
         .bytes()
         .await
         .context("failed to read download stream")?;
+
+    // Verify SHA-256 checksum if SHA256SUMS file exists in release
+    let asset_name_for_checksum = &asset.name;
+    match verify_checksum(client, release, &bytes, asset_name_for_checksum).await {
+        Some(Ok(())) => tracing::info!("SHA-256 checksum verified for {}", asset_name_for_checksum),
+        Some(Err(e)) => {
+            // Mismatch — don't apply the update
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(e).context("integrity check failed — refusing to apply update");
+        }
+        None => {
+            tracing::warn!(
+                "No SHA256SUMS found for release {} — skipping integrity check",
+                release.version
+            );
+        }
+    }
 
     tokio::fs::write(&tmp_path, &bytes)
         .await

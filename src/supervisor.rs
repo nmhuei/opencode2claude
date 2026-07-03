@@ -68,11 +68,30 @@ pub enum SupervisorError {
     SpawnFailed(String),
 }
 
+/// Optional spawn arguments for the embedded `serve` subcommand.
+///
+/// Only `Some` values are forwarded as CLI flags; `None` values are omitted
+/// so the child falls through to its own config chain (env → toml → default).
+#[derive(Debug, Clone, Default)]
+pub struct DaemonSpawnOptions {
+    pub config: Option<String>,
+    pub model: Option<String>,
+    pub shell_policy: Option<String>,
+    pub tavily_api_key: Option<String>,
+    pub exa_api_key: Option<String>,
+    pub serper_api_key: Option<String>,
+    pub searxng_url: Option<String>,
+    pub searxng_api_key: Option<String>,
+    pub tls_cert: Option<String>,
+    pub tls_key: Option<String>,
+}
+
 /// Supervisor orchestrates the bridge lifecycle.
 pub struct Supervisor {
     paths: RuntimePaths,
     port: u16,
     host: String,
+    spawn_opts: DaemonSpawnOptions,
 }
 
 impl Supervisor {
@@ -82,7 +101,14 @@ impl Supervisor {
             paths,
             port,
             host: host.into(),
+            spawn_opts: DaemonSpawnOptions::default(),
         }
+    }
+
+    /// Set optional spawn arguments forwarded to the `serve` child subcommand.
+    pub fn with_spawn_options(mut self, opts: DaemonSpawnOptions) -> Self {
+        self.spawn_opts = opts;
+        self
     }
 
     /// Start the bridge: create `~/.opencode2claude/`, spawn `serve` as background child, write PID.
@@ -109,14 +135,45 @@ impl Supervisor {
             .map_err(|e| SupervisorError::SpawnFailed(format!("Cannot get binary path: {}", e)))?;
 
         use std::os::unix::process::CommandExt;
-        let child = unsafe {
-            Command::new(&exe)
-                .arg("serve")
-                .arg("--port")
-                .arg(self.port.to_string())
-                .arg("--host")
-                .arg(&self.host)
-                .pre_exec(|| {
+        let mut cmd = Command::new(&exe);
+        cmd.arg("serve")
+            .arg("--port")
+            .arg(self.port.to_string())
+            .arg("--host")
+            .arg(&self.host);
+
+        // Forward all optional spawn options to the child
+        push_optional_arg(&mut cmd, "--config", &self.spawn_opts.config);
+        push_optional_arg(&mut cmd, "--model", &self.spawn_opts.model);
+        push_optional_arg(&mut cmd, "--shell-policy", &self.spawn_opts.shell_policy);
+        push_optional_arg(
+            &mut cmd,
+            "--tavily-api-key",
+            &self.spawn_opts.tavily_api_key,
+        );
+        push_optional_arg(&mut cmd, "--exa-api-key", &self.spawn_opts.exa_api_key);
+        push_optional_arg(
+            &mut cmd,
+            "--serper-api-key",
+            &self.spawn_opts.serper_api_key,
+        );
+        push_optional_arg(&mut cmd, "--searxng-url", &self.spawn_opts.searxng_url);
+        push_optional_arg(
+            &mut cmd,
+            "--searxng-api-key",
+            &self.spawn_opts.searxng_api_key,
+        );
+        push_optional_arg(&mut cmd, "--tls-cert", &self.spawn_opts.tls_cert);
+        push_optional_arg(&mut cmd, "--tls-key", &self.spawn_opts.tls_key);
+
+        let child =
+            unsafe {
+                cmd.pre_exec(|| {
+                    // SAFETY: setsid() in pre_exec:
+                    // 1. Fork has happened — we are in the child.
+                    // 2. No threads yet in child.
+                    // 3. child is not a process group leader, so setsid() succeeds.
+                    // 4. Both are async-signal-safe per POSIX.
                     extern "C" {
                         fn setsid() -> i32;
                     }
@@ -128,8 +185,8 @@ impl Supervisor {
                 })?)
                 .stderr(log_file)
                 .spawn()
-        }
-        .map_err(|e| SupervisorError::SpawnFailed(format!("Cannot spawn serve: {}", e)))?;
+            }
+            .map_err(|e| SupervisorError::SpawnFailed(format!("Cannot spawn serve: {}", e)))?;
 
         let pid = child.id();
 
@@ -150,21 +207,15 @@ impl Supervisor {
         let pidfile = PidFile::read(&pidfile_path)?;
         let pid = pidfile.pid;
 
-        // Send SIGTERM
-        let _ = Command::new("kill")
-            .arg("-TERM")
-            .arg(pid.to_string())
-            .status();
+        // Send SIGTERM via direct syscall to avoid TOCTOU race with PID reuse
+        let _ = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
 
         // Wait briefly for graceful shutdown
         std::thread::sleep(Duration::from_millis(500));
 
         // Force kill if still alive (check /proc/{pid})
         if process_exists(pid) {
-            let _ = Command::new("kill")
-                .arg("-KILL")
-                .arg(pid.to_string())
-                .status();
+            let _ = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
         }
 
         // Remove PID file
@@ -194,6 +245,13 @@ impl Supervisor {
             PidFile::remove(&pidfile_path)?;
             Ok(SupervisorStatus::Stopped)
         }
+    }
+}
+
+/// Append an optional flag+value pair to `cmd` when the value is `Some`.
+pub(crate) fn push_optional_arg(cmd: &mut Command, flag: &str, value: &Option<String>) {
+    if let Some(v) = value {
+        cmd.arg(flag).arg(v);
     }
 }
 

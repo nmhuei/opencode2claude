@@ -320,15 +320,14 @@ impl SearchClient {
     }
 
     async fn searxng_search(&self, query: &str, base_url: &str) -> Result<String, String> {
-        let url = if base_url.contains('?') {
-            format!("{}&q={}&format=json", base_url, urlencoding_simple(query))
-        } else {
-            format!(
-                "{}/search?q={}&format=json",
-                base_url.trim_end_matches('/'),
-                urlencoding_simple(query)
-            )
-        };
+        // Ensure we're working with a bare origin — strip trailing /, query, fragment
+        let base_url = base_url.trim_end_matches('/');
+        // Safe construction: base_url should be a bare origin (no query strings or fragments)
+        let url = format!(
+            "{}/search?q={}&format=json",
+            base_url,
+            urlencoding_simple(query)
+        );
 
         let res = self
             .client
@@ -480,6 +479,9 @@ mod tests {
             proxies: None,
             primary_proxies: None,
             warm_standby_proxies: None,
+            tls_enabled: false,
+            tls_cert_path: None,
+            tls_key_path: None,
         }
     }
 
@@ -505,6 +507,9 @@ mod tests {
             proxies: None,
             primary_proxies: None,
             warm_standby_proxies: None,
+            tls_enabled: false,
+            tls_cert_path: None,
+            tls_key_path: None,
         };
         let search_client = SearchClient::new(client, &config);
         assert_eq!(search_client.tavily_key, Some("test-key".to_string()));

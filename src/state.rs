@@ -112,6 +112,9 @@ mod tests {
             proxies: None,
             primary_proxies: None,
             warm_standby_proxies: None,
+            tls_enabled: false,
+            tls_cert_path: None,
+            tls_key_path: None,
         };
         let state = AppState::new(config);
         assert_eq!(state.config.bridge_port, 0);

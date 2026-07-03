@@ -43,51 +43,123 @@ impl SseEventBuilder {
             .unwrap_or_else(|_| Event::default().data("{}"))
     }
 
-    /// Generate the `content_block_start` event — marks the start of a text block.
-    pub fn content_block_start(&self) -> Event {
+    /// Generate a `content_block_start` event at the given index.
+    ///
+    /// `block_type` is one of `"text"`, `"thinking"`, `"tool_use"`.
+    /// `id` and `name` are only used for `tool_use` blocks.
+    pub fn content_block_start(
+        &self,
+        index: usize,
+        block_type: &str,
+        id: Option<&str>,
+        name: Option<&str>,
+    ) -> Event {
+        let mut block = serde_json::Map::new();
+        block.insert("type".to_string(), json!(block_type));
+        if block_type == "text" {
+            block.insert("text".to_string(), json!(""));
+        } else if block_type == "thinking" {
+            block.insert("thinking".to_string(), json!(""));
+        } else if block_type == "tool_use" {
+            if let Some(tool_id) = id {
+                block.insert("id".to_string(), json!(tool_id));
+            }
+            if let Some(tool_name) = name {
+                block.insert("name".to_string(), json!(tool_name));
+            }
+            block.insert("input".to_string(), json!({}));
+        }
+
         Event::default()
             .event("content_block_start")
             .json_data(json!({
                 "type": "content_block_start",
-                "index": 0,
-                "content_block": {"type": "text", "text": ""}
+                "index": index,
+                "content_block": block
             }))
             .unwrap_or_else(|_| Event::default().data("{}"))
     }
 
-    /// Generate a `content_block_delta` event — a chunk of streamed text.
-    pub fn text_delta(&self, text: &str) -> Event {
+    /// Legacy `content_block_start` with index=0, type="text" (single-block shell use).
+    pub fn content_block_start_simple(&self) -> Event {
+        self.content_block_start(0, "text", None, None)
+    }
+
+    /// Generate a `content_block_delta` event for text at the given index.
+    pub fn text_delta(&self, index: usize, text: &str) -> Event {
         Event::default()
             .event("content_block_delta")
             .json_data(json!({
                 "type": "content_block_delta",
-                "index": 0,
+                "index": index,
                 "delta": {"type": "text_delta", "text": text}
             }))
             .unwrap_or_else(|_| Event::default().data("{}"))
     }
 
-    /// Generate the `content_block_stop` event — marks the end of a text block.
-    pub fn content_block_stop(&self) -> Event {
+    /// Legacy `text_delta` at index 0 (single-block shell use).
+    pub fn text_delta_simple(&self, text: &str) -> Event {
+        self.text_delta(0, text)
+    }
+
+    /// Generate a `content_block_delta` event for thinking at the given index.
+    pub fn thinking_delta(&self, index: usize, thinking: &str) -> Event {
         Event::default()
-            .event("content_block_stop")
+            .event("content_block_delta")
             .json_data(json!({
-                "type": "content_block_stop",
-                "index": 0
+                "type": "content_block_delta",
+                "index": index,
+                "delta": {"type": "thinking_delta", "thinking": thinking}
             }))
             .unwrap_or_else(|_| Event::default().data("{}"))
     }
 
+    /// Generate a `content_block_delta` event for JSON tool input at the given index.
+    pub fn input_json_delta(&self, index: usize, partial_json: &str) -> Event {
+        Event::default()
+            .event("content_block_delta")
+            .json_data(json!({
+                "type": "content_block_delta",
+                "index": index,
+                "delta": {
+                    "type": "input_json_delta",
+                    "partial_json": partial_json
+                }
+            }))
+            .unwrap_or_else(|_| Event::default().data("{}"))
+    }
+
+    /// Generate a `content_block_stop` event at the given index.
+    pub fn content_block_stop(&self, index: usize) -> Event {
+        Event::default()
+            .event("content_block_stop")
+            .json_data(json!({
+                "type": "content_block_stop",
+                "index": index
+            }))
+            .unwrap_or_else(|_| Event::default().data("{}"))
+    }
+
+    /// Legacy `content_block_stop` at index 0 (single-block shell use).
+    pub fn content_block_stop_simple(&self) -> Event {
+        self.content_block_stop(0)
+    }
+
     /// Generate the `message_delta` event — sent with stop reason at end of message.
-    pub fn message_delta(&self, output_tokens: u32) -> Event {
+    pub fn message_delta(&self, stop_reason: &str, output_tokens: u32) -> Event {
         Event::default()
             .event("message_delta")
             .json_data(json!({
                 "type": "message_delta",
-                "delta": {"stop_reason": "end_turn", "stop_sequence": null},
+                "delta": {"stop_reason": stop_reason, "stop_sequence": null},
                 "usage": {"output_tokens": output_tokens}
             }))
             .unwrap_or_else(|_| Event::default().data("{}"))
+    }
+
+    /// Legacy `message_delta` with stop_reason "end_turn" (single-block shell use).
+    pub fn message_delta_simple(&self, output_tokens: u32) -> Event {
+        self.message_delta("end_turn", output_tokens)
     }
 
     /// Generate the `message_stop` event — final event in the stream.
@@ -120,6 +192,17 @@ impl SseEventBuilder {
     }
 }
 
+/// Helper: build a content_block_stop event without needing a builder.
+pub fn emit_block_stop(index: usize) -> Event {
+    Event::default()
+        .event("content_block_stop")
+        .json_data(json!({
+            "type": "content_block_stop",
+            "index": index
+        }))
+        .unwrap_or_else(|_| Event::default().data("{}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,10 +213,13 @@ mod tests {
 
         // All event builder methods should succeed without panic
         let _ = builder.message_start(10);
-        let _ = builder.content_block_start();
-        let _ = builder.text_delta("hello");
-        let _ = builder.content_block_stop();
-        let _ = builder.message_delta(20);
+        let _ = builder.content_block_start(0, "text", None, None);
+        let _ = builder.content_block_start(7, "tool_use", Some("toolu_abc"), Some("bash"));
+        let _ = builder.text_delta(0, "hello");
+        let _ = builder.thinking_delta(0, "thinking...");
+        let _ = builder.input_json_delta(0, "{}");
+        let _ = builder.content_block_stop(0);
+        let _ = builder.message_delta("end_turn", 20);
         let _ = builder.message_stop();
     }
 
@@ -150,5 +236,12 @@ mod tests {
         assert_eq!(resp["stop_reason"], "end_turn");
         assert_eq!(resp["usage"]["input_tokens"], 15);
         assert_eq!(resp["usage"]["output_tokens"], 25);
+    }
+
+    #[test]
+    fn test_emit_block_stop() {
+        let ev = emit_block_stop(3);
+        // Event builds without panic
+        let _ = ev;
     }
 }

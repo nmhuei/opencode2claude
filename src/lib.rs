@@ -20,5 +20,6 @@ pub mod runtime;
 pub mod shell;
 pub mod sse;
 pub mod state;
+pub mod stream_tracker;
 pub mod supervisor;
 pub mod update;

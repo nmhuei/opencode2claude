@@ -25,9 +25,8 @@ pub fn strip_system_tags(text: &str) -> String {
         "&lt;think&gt;",
     ];
     for tag in &tags {
-        if cleaned.contains(tag) {
-            cleaned = cleaned.replace(tag, "");
-        }
+        // replace() is a no-op when no match is found — no need for contains() guard
+        cleaned = cleaned.replace(tag, "");
     }
     // Trim leading newlines and whitespace if we stripped tags from the beginning
     if cleaned.trim_start() != text.trim_start() {

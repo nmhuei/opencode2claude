@@ -3,6 +3,7 @@
 //! All operations guard against protected warm-standby proxies (40004-40005).
 
 use crate::proxy_pool::is_protected_proxy_port;
+use std::time::Duration;
 
 const WARP_IMAGE: &str = "ghcr.io/mon-ius/docker-warp-socks:latest";
 
@@ -54,19 +55,19 @@ fn validate_read_only_port(port: u16) -> DockerResult<()> {
     Ok(())
 }
 
-/// Create or recreate a Docker WARP container.
+/// Create or recreate a Docker WARP container and verify it's reachable.
 pub async fn create_container(port: u16) -> DockerResult<()> {
     validate_destructive_port(port)?;
     let name = container_name(port);
 
     // docker rm -f (ignore error if not exists)
-    let _ = tokio::process::Command::new("docker")
+    let _ = tokio::process::Command::new("/usr/bin/docker")
         .args(["rm", "-f", &name])
         .output()
         .await;
 
     // docker run -d --name ...
-    let output = tokio::process::Command::new("docker")
+    let output = tokio::process::Command::new("/usr/bin/docker")
         .args([
             "run",
             "-d",
@@ -93,7 +94,24 @@ pub async fn create_container(port: u16) -> DockerResult<()> {
         )));
     }
 
-    Ok(())
+    // Verify container is reachable via TCP
+    let max_attempts = 6u32;
+    for attempt in 1..=max_attempts {
+        if tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .is_ok()
+        {
+            return Ok(());
+        }
+        if attempt < max_attempts {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    }
+
+    Err(DockerError::CommandFailed(format!(
+        "Container {} started on port {} but is not reachable after {} attempts",
+        name, port, max_attempts
+    )))
 }
 
 /// Remove a Docker WARP container (primary only).
@@ -101,7 +119,7 @@ pub async fn remove_container(port: u16) -> DockerResult<()> {
     validate_destructive_port(port)?;
     let name = container_name(port);
 
-    let output = tokio::process::Command::new("docker")
+    let output = tokio::process::Command::new("/usr/bin/docker")
         .args(["rm", "-f", &name])
         .output()
         .await
@@ -126,7 +144,7 @@ pub async fn list_containers(ports: &[u16]) -> Vec<(u16, String, bool)> {
     let mut result = Vec::new();
     for &port in ports {
         let name = container_name(port);
-        let output = tokio::process::Command::new("docker")
+        let output = tokio::process::Command::new("/usr/bin/docker")
             .args([
                 "ps",
                 "--filter",
@@ -147,7 +165,7 @@ pub async fn list_containers(ports: &[u16]) -> Vec<(u16, String, bool)> {
 
 /// Check if the Docker daemon is reachable and return its version string.
 pub async fn check_daemon() -> DockerResult<String> {
-    let output = tokio::process::Command::new("docker")
+    let output = tokio::process::Command::new("/usr/bin/docker")
         .args(["version", "--format", "{{.Server.Version}}"])
         .output()
         .await
@@ -174,7 +192,7 @@ pub async fn container_logs(port: u16, tail: usize) -> DockerResult<String> {
     validate_read_only_port(port)?;
     let name = container_name(port);
 
-    let output = tokio::process::Command::new("docker")
+    let output = tokio::process::Command::new("/usr/bin/docker")
         .args(["logs", "--tail", &tail.to_string(), &name])
         .output()
         .await

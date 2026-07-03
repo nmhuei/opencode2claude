@@ -150,15 +150,66 @@ impl ProxyPool {
     }
 
     /// Select a proxy excluding a specific index (for retry failover).
-    /// Uses the same primary-first, WarmStandby-failover policy but skips
-    /// the excluded index.
+    /// Actively skips the excluded proxy, picking the next-best alternative:
+    /// 1. If excluded index == rendezvous primary → try a different primary, then WarmStandby, then degraded
+    /// 2. If excluded index != rendezvous primary → standard selection
     pub fn get_client_excluding(
         &mut self,
         api_key: &str,
-        _exclude_idx: usize,
+        exclude_idx: usize,
     ) -> Option<(reqwest::Client, String, usize)> {
-        // Falls through to WarmStandby or degraded if excluded index
-        // happens to be the rendezvous primary.
-        self.select_proxy_for_key(api_key)
+        if self.proxies.is_empty() || exclude_idx >= self.proxies.len() {
+            return None;
+        }
+
+        // Get the rendezvous-assigned primary for this key
+        let assigned = self.rendezvous_assigned_primary(api_key);
+
+        match assigned {
+            Some(primary_idx) if primary_idx == exclude_idx => {
+                // The excluded proxy is our assigned primary.
+                // Check if another primary is available (not the excluded one and healthy).
+                let alt_primary = self.proxies.iter().enumerate().find(|(i, p)| {
+                    *i != exclude_idx
+                        && p.role == ProxyRole::Primary
+                        && matches!(p.status, ProxyStatus::Active)
+                });
+
+                if let Some((idx, entry)) = alt_primary {
+                    return Some((entry.client.clone(), entry.url.clone(), idx));
+                }
+
+                // No healthy alternative primary → try WarmStandby
+                if let Some(standby_idx) = self.rendezvous_warm_standby(api_key) {
+                    let entry = &self.proxies[standby_idx];
+                    if matches!(entry.status, ProxyStatus::Active) {
+                        info!(
+                            "Excluded proxy #{} is the rendezvous primary for key '{}'. Failing over to WarmStandby #{}.",
+                            exclude_idx, api_key, standby_idx
+                        );
+                        return Some((entry.client.clone(), entry.url.clone(), standby_idx));
+                    }
+                }
+
+                // Last resort: degraded mode (any usable proxy)
+                if let Some(idx) = self.select_degraded() {
+                    warn!(
+                        "CRITICAL: No healthy alternative to excluded proxy #{} for key '{}'. Using degraded proxy #{}.",
+                        exclude_idx, api_key, idx
+                    );
+                    return Some((
+                        self.proxies[idx].client.clone(),
+                        self.proxies[idx].url.clone(),
+                        idx,
+                    ));
+                }
+
+                None
+            }
+            _ => {
+                // Excluded index is not our primary — use standard selection
+                self.select_proxy_for_key(api_key)
+            }
+        }
     }
 }

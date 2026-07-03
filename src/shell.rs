@@ -21,7 +21,12 @@ pub enum ShellPolicy {
 /// bypass the allowlist by chaining multiple commands or performing
 /// command substitution/redirection.
 fn has_shell_metacharacters(cmd_str: &str) -> bool {
-    let metachars = [';', '&', '|', '`', '$', '>', '<', '\n'];
+    // Check for shell metacharacters that could bypass the allowlist.
+    // This is defense-in-depth: the bridge never executes these commands,
+    // but metacharacters could let a user chain commands in the shell tool.
+    let metachars = [
+        ';', '&', '|', '`', '$', '>', '<', '\n', '~', '(', ')', '{', '}', '\\',
+    ];
     cmd_str.contains(metachars)
 }
 

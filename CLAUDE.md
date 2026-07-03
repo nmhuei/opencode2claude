@@ -14,9 +14,9 @@ cargo run
 RUST_LOG=debug cargo run
 
 # Run (background daemon via supervisor)
-cargo build && ./target/debug/opencode2claude start
-./target/debug/opencode2claude status
-./target/debug/opencode2claude stop
+cargo build && ./target/debug/opencode2claude server start
+./target/debug/opencode2claude server status
+./target/debug/opencode2claude server stop
 
 # Quick start with Docker proxy pool (legacy wrapper)
 cargo build && source start.sh
@@ -149,6 +149,8 @@ tests/
 
 10. **Supervisor daemon** — The `start`/`stop`/`status` subcommands use a process supervisor with PID file tracking in `.runtime/`. `start` spawns `serve` as a detached child via `setsid()`. `stop` sends SIGTERM, waits, then SIGKILL if needed.
 
+11. **TLS/HTTPS support** — When `--tls-cert` and `--tls-key` are provided, the server binds via `axum_server::bind_rustls` with PEM-based RustlsConfig. TLS config propagates through the supervisor to the `serve` child. The startup banner and usage instructions automatically show `https://` when TLS is enabled. Non-TLS paths retain graceful shutdown via `axum::serve().with_graceful_shutdown()`.
+
 ### Configuration
 
 | Variable | Default | Description |
@@ -172,21 +174,21 @@ tests/
 | `EXA_API_KEY` | (none) | Exa search API key (2nd priority) |
 | `SERPER_API_KEY` | (none) | Serper.dev search API key (3rd priority) |
 | `SEARXNG_URL` | (none) | Self-hosted SearXNG instance URL (4th priority) |
+| `SEARXNG_API_KEY` | (none) | SearXNG API key |
+| `BRIDGE_TLS_ENABLED` | `false` | Enable TLS/HTTPS |
+| `BRIDGE_TLS_CERT_PATH` | (none) | Path to TLS certificate (PEM) |
+| `BRIDGE_TLS_KEY_PATH` | (none) | Path to TLS private key (PEM) |
 
 ### CLI Subcommands
 
 ```
-opencode2claude serve [OPTIONS]   Start API bridge server (foreground)
-opencode2claude start [OPTIONS]   Start bridge as background daemon
-opencode2claude status [OPTIONS]  Show bridge status
-opencode2claude stop [OPTIONS]    Stop the bridge
-opencode2claude restart           Restart the bridge
-opencode2claude logs              View bridge logs
-opencode2claude env               Display environment information
-opencode2claude proxy status/ps   List proxy pool with roles and health
-opencode2claude proxy restart     Recreate primary proxy containers (40001-40003)
-opencode2claude proxy purge       Remove + recreate primary proxy containers
-opencode2claude proxy logs        View proxy container logs
+server start|stop|status|restart|logs|config   Manage the bridge server
+proxy ps|restart|purge|logs                     Manage proxy pools
+env                                              Display environment information
+doctor                                           Diagnose common issues
+completion <SHELL>                               Generate shell completions
+update                                           Self-update binary
+init                                             Generate default config
 ```
 
 ### CLI Flags (override all config sources)
@@ -202,6 +204,8 @@ opencode2claude proxy logs        View proxy container logs
 --serper-api-key        Serper.dev search API key
 --searxng-url           SearXNG instance URL
 --searxng-api-key       SearXNG API key
+--tls-cert              Path to TLS certificate (PEM)
+--tls-key               Path to TLS private key (PEM)
 -v, --version           Print version
 ```
 
@@ -218,6 +222,11 @@ primary_proxies = ["socks5://127.0.0.1:40001", "socks5://127.0.0.1:40002", "sock
 warm_standby_proxies = ["socks5://127.0.0.1:40004", "socks5://127.0.0.1:40005"]
 tavily_api_key = "tvly-..."
 max_search_loops = 5
+
+# TLS / HTTPS
+# tls_enabled = true
+# tls_cert_path = "/path/to/cert.pem"
+# tls_key_path = "/path/to/key.pem"
 ```
 
 ## Testing
