@@ -12,6 +12,11 @@ All notable changes to opencode2claude will be documented in this file.
 - Made `--shell-policy` a typed CLI enum — invalid values now fail at parse time (exit code 2).
 - Added `--tls-cert` / `--tls-key` mutual dependency validation at parse time.
 - Aligned CLI docs with v2 command tree (`server start/stop/status`, etc.).
+- Fixed legacy `stop` alias missing `--json`/`--quiet` output dispatch.
+- Fixed `doctor --quiet` suppressing diagnostic report output.
+- Fixed `proxy ps --quiet` suppressing proxy pool table output.
+- Fixed shell completions excluding hidden legacy aliases (serve, start, stop, status, restart, logs).
+- Fixed README.md CLI reference showing phantom commands (config, estimate) and missing v2 commands (server, doctor, completion, update, init).
 
 ### Added
 - CLI v2 regression tests (8 tests: JSON/quiet conflict, shell-policy validation, TLS pairing, help output, JSON parseability, completion).

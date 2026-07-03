@@ -17,6 +17,7 @@ use opencode2claude::runtime::RuntimePaths;
 use opencode2claude::state::AppState;
 use opencode2claude::supervisor::{DaemonSpawnOptions, Supervisor, SupervisorStatus};
 
+use clap::Command as ClapCommand;
 use clap::CommandFactory;
 use clap::Parser;
 use clap_complete::generate;
@@ -89,7 +90,7 @@ async fn main() {
                 "{} `stop` is deprecated, use `server stop` instead",
                 "ℹ".cyan().dim()
             );
-            cmd_stop_legacy(args)
+            cmd_stop_legacy(args, fmt)
         }
         Some(Command::Restart) => {
             eprintln!(
@@ -346,7 +347,10 @@ async fn cmd_doctor(fmt: OutputFormat) {
                 println!("{s}");
             }
         }
-        _ => {
+        OutputFormat::Quiet => {
+            // Quiet: only exit code, no output on success
+        }
+        OutputFormat::Human => {
             println!("{}", report);
         }
     }
@@ -354,9 +358,31 @@ async fn cmd_doctor(fmt: OutputFormat) {
 }
 
 fn cmd_completion(args: CompletionArgs) {
-    let mut cmd = cli::Cli::command();
-    let name = cmd.get_name().to_string();
-    generate(args.shell, &mut cmd, name, &mut std::io::stdout());
+    let original = cli::Cli::command();
+    let name = original.get_name().to_string();
+
+    // Strip hidden (legacy alias) subcommands from completions so users
+    // discover the v2 subcommand tree instead of hidden backward-compat aliases.
+    let version = original.get_version().unwrap_or_default().to_owned();
+    let about = original.get_about().unwrap_or_default().to_owned();
+    drop(original);
+
+    let mut filtered = ClapCommand::new(name.clone()).version(version).about(about);
+
+    // Only add non-hidden subcommands
+    let original = cli::Cli::command();
+    for sub in original.get_subcommands() {
+        if !sub.is_hide_set() {
+            filtered = filtered.subcommand(sub.clone());
+        }
+    }
+
+    // Copy all global args
+    for arg in original.get_arguments() {
+        filtered = filtered.arg(arg.clone());
+    }
+
+    generate(args.shell, &mut filtered, name, &mut std::io::stdout());
 }
 
 async fn cmd_update(args: UpdateArgs) {
@@ -531,6 +557,11 @@ async fn cmd_proxy(cmd: ProxyCommand, fmt: OutputFormat) {
                 if let Ok(s) = serde_json::to_string_pretty(&nodes) {
                     println!("{s}");
                 }
+                return;
+            }
+
+            if fmt == OutputFormat::Quiet {
+                // Quiet: no output for proxy ps
                 return;
             }
 
@@ -863,15 +894,23 @@ async fn cmd_status_legacy(args: cli::StatusArgs, fmt: OutputFormat) {
     }
 }
 
-fn cmd_stop_legacy(args: cli::StopArgs) {
+fn cmd_stop_legacy(args: cli::StopArgs, fmt: OutputFormat) {
     let sup = resolve_runtime(args.port, args.host);
     match sup.stop() {
-        Ok(()) => println!("Bridge stopped."),
+        Ok(()) => {
+            if fmt == OutputFormat::Quiet {
+                println!("stopped");
+            } else {
+                println!("Bridge stopped.");
+            }
+        }
         Err(e) => {
-            eprintln!("{} bridge: stop failed — {}", "✗".red().bold(), e);
-            eprintln!(
-                "   Hint: Try `opencode2claude server status` to check if the bridge is running."
-            );
+            if fmt == OutputFormat::Json {
+                print_json_error("stop_failed", &e.to_string(), None);
+            } else {
+                eprintln!("{} bridge: stop failed — {}", "✗".red().bold(), e);
+                eprintln!("   Hint: Is the bridge running? Try `opencode2claude server status`");
+            }
             std::process::exit(1);
         }
     }

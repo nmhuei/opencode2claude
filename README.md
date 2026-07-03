@@ -423,29 +423,44 @@ opencode2claude server start -f \
 ```bash
 opencode2claude <COMMAND> [OPTIONS]
 
+Global flags (apply to all commands):
+  --json         Machine-readable JSON output
+  --quiet        Minimal output (errors/success only)
+  --color <MODE> Color output: auto (default), always, never
+
 COMMANDS:
-  serve          Run bridge server (foreground)
-  start          Start bridge daemon (background)
-  stop           Stop bridge daemon
-  restart        Restart bridge daemon
-  status         Show bridge + proxy pool status
+  server         Manage the bridge daemon (start, stop, status, ...)
   proxy          Manage WARP proxy pool
-  config         Manage configuration
-  estimate       Estimate tokens for a prompt
-  env            Print resolved configuration
+  env            Display environment information for Claude Code
+  doctor         Diagnose common issues with the bridge
+  completion     Generate shell completion scripts
+  update         Self-update to the latest release
+  init           Generate a default config file
   --help         Show help
   --version      Show version
 
-# Proxy subcommands:
-opencode2claude proxy status      # List proxies with roles + health
-opencode2claude proxy restart     # Recreate primary proxies only
-opencode2claude proxy purge       # Remove + recreate primary proxies
-opencode2claude proxy logs        # View proxy container logs
+# Server subcommands:
+opencode2claude server start          # Start as background daemon
+opencode2claude server start -f       # Run in foreground (no daemon)
+opencode2claude server stop           # Stop the daemon
+opencode2claude server status         # Show bridge status
+opencode2claude server restart        # Restart the daemon
+opencode2claude server logs           # View daemon logs
+opencode2claude server config         # Show current configuration
 
-# Config subcommands:
-opencode2claude config init       # Create default config.toml
-opencode2claude config show       # Print resolved config
-opencode2claude config path       # Show config file path
+# Proxy subcommands:
+opencode2claude proxy ps              # List proxies with roles + health
+opencode2claude proxy restart         # Recreate primary proxies only
+opencode2claude proxy purge           # Remove + recreate primary proxies
+opencode2claude proxy logs            # View proxy container logs
+
+# Backward-compatible aliases (deprecated):
+serve  -> server start -f
+start  -> server start
+stop   -> server stop
+status -> server status
+restart-> server restart
+logs   -> server logs
 ```
 
 ---
