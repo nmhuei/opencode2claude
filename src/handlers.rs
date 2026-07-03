@@ -575,15 +575,13 @@ mod tests {
     fn test_extract_prompt_tool_result_blocks() {
         let msgs = vec![make_msg(
             "user",
-            ContentVal::Multiple(vec![
-                MessageContent {
-                    content_type: "tool_result".into(),
-                    text: None,
-                    tool_use_id: Some("toolu_abc".into()),
-                    content: Some(serde_json::json!("tool output")),
-                    ..Default::default()
-                },
-            ]),
+            ContentVal::Multiple(vec![MessageContent {
+                content_type: "tool_result".into(),
+                text: None,
+                tool_use_id: Some("toolu_abc".into()),
+                content: Some(serde_json::json!("tool output")),
+                ..Default::default()
+            }]),
         )];
         assert_eq!(extract_prompt(&msgs), "");
     }
@@ -592,16 +590,14 @@ mod tests {
     fn test_extract_prompt_tool_use_blocks() {
         let msgs = vec![make_msg(
             "user",
-            ContentVal::Multiple(vec![
-                MessageContent {
-                    content_type: "tool_use".into(),
-                    id: Some("toolu_1".into()),
-                    name: Some("bash".into()),
-                    input: Some(serde_json::json!({"command": "ls"})),
-                    text: None,
-                    ..Default::default()
-                },
-            ]),
+            ContentVal::Multiple(vec![MessageContent {
+                content_type: "tool_use".into(),
+                id: Some("toolu_1".into()),
+                name: Some("bash".into()),
+                input: Some(serde_json::json!({"command": "ls"})),
+                text: None,
+                ..Default::default()
+            }]),
         )];
         assert_eq!(extract_prompt(&msgs), "");
     }
@@ -788,8 +784,7 @@ mod tests {
 
     #[test]
     fn test_message_deserialize_multiple() {
-        let json =
-            r#"{"role": "user", "content": [{"type": "text", "text": "hello"}]}"#;
+        let json = r#"{"role": "user", "content": [{"type": "text", "text": "hello"}]}"#;
         let msg: Message = serde_json::from_str(json).unwrap();
         assert_eq!(msg.role, "user");
         match msg.content {

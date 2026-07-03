@@ -278,7 +278,6 @@ pub(super) async fn execute_with_warp_retry(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,8 +328,7 @@ mod tests {
 
     #[test]
     fn test_detects_json_error_payload() {
-        let body =
-            r#"{"error":{"message":"rate limit exceeded","type":"rate_limit_error"}}"#;
+        let body = r#"{"error":{"message":"rate limit exceeded","type":"rate_limit_error"}}"#;
         assert!(is_rate_limit_body(body));
     }
 
