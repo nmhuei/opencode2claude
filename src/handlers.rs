@@ -548,4 +548,256 @@ mod tests {
         ];
         assert_eq!(extract_prompt(&msgs), "first\nsecond");
     }
+
+    // ── extract_prompt edge cases ──
+
+    #[test]
+    fn test_extract_prompt_image_only_blocks() {
+        let msgs = vec![make_msg(
+            "user",
+            ContentVal::Multiple(vec![
+                MessageContent {
+                    content_type: "image".into(),
+                    text: None,
+                    ..Default::default()
+                },
+                MessageContent {
+                    content_type: "image".into(),
+                    text: None,
+                    ..Default::default()
+                },
+            ]),
+        )];
+        assert_eq!(extract_prompt(&msgs), "");
+    }
+
+    #[test]
+    fn test_extract_prompt_tool_result_blocks() {
+        let msgs = vec![make_msg(
+            "user",
+            ContentVal::Multiple(vec![
+                MessageContent {
+                    content_type: "tool_result".into(),
+                    text: None,
+                    tool_use_id: Some("toolu_abc".into()),
+                    content: Some(serde_json::json!("tool output")),
+                    ..Default::default()
+                },
+            ]),
+        )];
+        assert_eq!(extract_prompt(&msgs), "");
+    }
+
+    #[test]
+    fn test_extract_prompt_tool_use_blocks() {
+        let msgs = vec![make_msg(
+            "user",
+            ContentVal::Multiple(vec![
+                MessageContent {
+                    content_type: "tool_use".into(),
+                    id: Some("toolu_1".into()),
+                    name: Some("bash".into()),
+                    input: Some(serde_json::json!({"command": "ls"})),
+                    text: None,
+                    ..Default::default()
+                },
+            ]),
+        )];
+        assert_eq!(extract_prompt(&msgs), "");
+    }
+
+    #[test]
+    fn test_extract_prompt_mixed_content_types() {
+        let msgs = vec![make_msg(
+            "user",
+            ContentVal::Multiple(vec![
+                MessageContent {
+                    content_type: "text".into(),
+                    text: Some("hello".into()),
+                    ..Default::default()
+                },
+                MessageContent {
+                    content_type: "image".into(),
+                    text: None,
+                    ..Default::default()
+                },
+                MessageContent {
+                    content_type: "tool_result".into(),
+                    tool_use_id: Some("toolu_1".into()),
+                    content: Some(serde_json::json!("result")),
+                    text: None,
+                    ..Default::default()
+                },
+                MessageContent {
+                    content_type: "text".into(),
+                    text: Some("world".into()),
+                    ..Default::default()
+                },
+                MessageContent {
+                    content_type: "tool_use".into(),
+                    id: Some("toolu_2".into()),
+                    name: Some("bash".into()),
+                    input: Some(serde_json::json!({"command": "ls"})),
+                    text: None,
+                    ..Default::default()
+                },
+            ]),
+        )];
+        assert_eq!(extract_prompt(&msgs), "hello\nworld");
+    }
+
+    #[test]
+    fn test_extract_prompt_very_long_text() {
+        let long_text = "A".repeat(100_000);
+        let msgs = vec![make_msg("user", ContentVal::Single(long_text.clone()))];
+        let result = extract_prompt(&msgs);
+        assert_eq!(result.len(), 100_000);
+        assert!(result.starts_with("AAAA"));
+        assert!(result.ends_with("AAAA"));
+    }
+
+    #[test]
+    fn test_extract_prompt_bang_command() {
+        let msgs = vec![make_msg("user", ContentVal::Single("!ls -la".into()))];
+        assert_eq!(extract_prompt(&msgs), "!ls -la");
+    }
+
+    #[test]
+    fn test_extract_prompt_last_user_non_text() {
+        let msgs = vec![
+            make_msg("user", ContentVal::Single("first command".into())),
+            make_msg("assistant", ContentVal::Single("ok".into())),
+            make_msg(
+                "user",
+                ContentVal::Multiple(vec![MessageContent {
+                    content_type: "tool_result".into(),
+                    tool_use_id: Some("toolu_local_shell".into()),
+                    content: Some(serde_json::json!("output")),
+                    text: None,
+                    ..Default::default()
+                }]),
+            ),
+        ];
+        assert_eq!(extract_prompt(&msgs), "first command");
+    }
+
+    #[test]
+    fn test_extract_prompt_assistant_only() {
+        let msgs = vec![
+            make_msg("assistant", ContentVal::Single("some text".into())),
+            make_msg("assistant", ContentVal::Single("more text".into())),
+        ];
+        assert_eq!(extract_prompt(&msgs), "");
+    }
+
+    #[test]
+    fn test_extract_prompt_text_block_missing_text_field() {
+        let msgs = vec![make_msg(
+            "user",
+            ContentVal::Multiple(vec![
+                MessageContent {
+                    content_type: "text".into(),
+                    text: None,
+                    ..Default::default()
+                },
+                MessageContent {
+                    content_type: "text".into(),
+                    text: Some("actual text".into()),
+                    ..Default::default()
+                },
+            ]),
+        )];
+        assert_eq!(extract_prompt(&msgs), "actual text");
+    }
+
+    // ── ContentVal serde tests ──
+
+    #[test]
+    fn test_content_val_single_deserialize() {
+        let json = r#""hello world""#;
+        let val: ContentVal = serde_json::from_str(json).unwrap();
+        match val {
+            ContentVal::Single(s) => assert_eq!(s, "hello world"),
+            _ => panic!("Expected ContentVal::Single"),
+        }
+    }
+
+    #[test]
+    fn test_content_val_multiple_deserialize() {
+        let json = r#"[
+            {"type": "text", "text": "hello"},
+            {"type": "image"}
+        ]"#;
+        let val: ContentVal = serde_json::from_str(json).unwrap();
+        match val {
+            ContentVal::Multiple(blocks) => {
+                assert_eq!(blocks.len(), 2);
+                assert_eq!(blocks[0].content_type, "text");
+                assert_eq!(blocks[0].text.as_deref(), Some("hello"));
+                assert_eq!(blocks[1].content_type, "image");
+            }
+            _ => panic!("Expected ContentVal::Multiple"),
+        }
+    }
+
+    #[test]
+    fn test_content_val_empty_array_deserialize() {
+        let json = r#"[]"#;
+        let val: ContentVal = serde_json::from_str(json).unwrap();
+        match val {
+            ContentVal::Multiple(blocks) => assert!(blocks.is_empty()),
+            _ => panic!("Expected ContentVal::Multiple"),
+        }
+    }
+
+    #[test]
+    fn test_content_val_all_content_types() {
+        let json = r#"[
+            {"type": "text", "text": "hello"},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "abc"}},
+            {"type": "tool_use", "id": "tu1", "name": "bash", "input": {"cmd": "ls"}},
+            {"type": "tool_result", "tool_use_id": "tu1", "content": "output"}
+        ]"#;
+        let val: ContentVal = serde_json::from_str(json).unwrap();
+        match val {
+            ContentVal::Multiple(blocks) => {
+                assert_eq!(blocks.len(), 4);
+                assert_eq!(blocks[0].content_type, "text");
+                assert_eq!(blocks[0].text.as_deref(), Some("hello"));
+                assert_eq!(blocks[1].content_type, "image");
+                assert_eq!(blocks[2].content_type, "tool_use");
+                assert_eq!(blocks[2].id.as_deref(), Some("tu1"));
+                assert_eq!(blocks[2].name.as_deref(), Some("bash"));
+                assert_eq!(blocks[3].content_type, "tool_result");
+                assert_eq!(blocks[3].tool_use_id.as_deref(), Some("tu1"));
+            }
+            _ => panic!("Expected ContentVal::Multiple"),
+        }
+    }
+
+    #[test]
+    fn test_message_deserialize_single() {
+        let json = r#"{"role": "user", "content": "hello"}"#;
+        let msg: Message = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.role, "user");
+        match msg.content {
+            ContentVal::Single(s) => assert_eq!(s, "hello"),
+            _ => panic!("Expected ContentVal::Single"),
+        }
+    }
+
+    #[test]
+    fn test_message_deserialize_multiple() {
+        let json =
+            r#"{"role": "user", "content": [{"type": "text", "text": "hello"}]}"#;
+        let msg: Message = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.role, "user");
+        match msg.content {
+            ContentVal::Multiple(blocks) => {
+                assert_eq!(blocks.len(), 1);
+                assert_eq!(blocks[0].content_type, "text");
+            }
+            _ => panic!("Expected ContentVal::Multiple"),
+        }
+    }
 }
