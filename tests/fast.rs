@@ -253,7 +253,7 @@ async fn test_tc007_spa_fallback_behavior() {
     let client = reqwest::Client::new();
     let resp = client
         .get(format!("{}/dashboard/nonexistent-subroute", base))
-        .header("Cookie", "bridge_admin_token=test-token")
+        .header("Cookie", "bridge_admin_session=test-token")
         .send()
         .await
         .unwrap();
@@ -1339,7 +1339,7 @@ async fn test_tc068_security_headers_on_dashboard_spa() {
     let client = reqwest::Client::new();
     let resp = client
         .get(format!("{}/dashboard/", base))
-        .header("Cookie", "bridge_admin_token=test-token")
+        .header("Cookie", "bridge_admin_session=test-token")
         .send()
         .await
         .unwrap();

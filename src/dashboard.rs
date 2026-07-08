@@ -131,12 +131,18 @@ pub async fn serve_webui(headers: HeaderMap, uri: axum::http::Uri) -> Result<Res
     let path = path.trim_start_matches('/');
     let path = if path.is_empty() { "index.html" } else { path };
 
+    let resolved_path = if WebAssets::get(path).is_some() {
+        path
+    } else {
+        "index.html"
+    };
+
     // If requesting the SPA main page (or falling back to it), enforce auth via cookie
-    if path == "index.html" {
+    if resolved_path == "index.html" {
         let admin_token = std::env::var("DASHBOARD_ADMIN_TOKEN").unwrap_or_default();
         let authenticated = if admin_token.is_empty() {
             false
-        } else if let Some(cookie_token) = extract_cookie(&headers, "bridge_admin_token") {
+        } else if let Some(cookie_token) = extract_cookie(&headers, "bridge_admin_session") {
             cookie_token == admin_token
         } else {
             false
@@ -148,18 +154,11 @@ pub async fn serve_webui(headers: HeaderMap, uri: axum::http::Uri) -> Result<Res
         }
     }
 
-    let asset = WebAssets::get(path).or_else(|| {
-        // SPA fallback — serve index.html for unknown paths
-        warn!(
-            "Dashboard asset not found: '{}', falling back to index.html",
-            path
-        );
-        WebAssets::get("index.html")
-    });
+    let asset = WebAssets::get(resolved_path);
 
     match asset {
         Some(content) => {
-            let mime = mime_guess::from_path(path).first_or_octet_stream();
+            let mime = mime_guess::from_path(resolved_path).first_or_octet_stream();
             let mut res_headers = HeaderMap::new();
             res_headers.insert(
                 header::CONTENT_TYPE,
@@ -186,7 +185,7 @@ pub async fn serve_landing(headers: HeaderMap) -> Result<Response, StatusCode> {
     // If they already have a valid cookie, redirect them straight to the dashboard
     let admin_token = std::env::var("DASHBOARD_ADMIN_TOKEN").unwrap_or_default();
     if !admin_token.is_empty() {
-        if let Some(cookie_token) = extract_cookie(&headers, "bridge_admin_token") {
+        if let Some(cookie_token) = extract_cookie(&headers, "bridge_admin_session") {
             if cookie_token == admin_token {
                 return Ok(Redirect::temporary("/dashboard/").into_response());
             }
@@ -526,11 +525,33 @@ fn mask_auth_tokens(tokens: &Option<Vec<String>>) -> Value {
 }
 
 /// POST /api/dashboard/login — check X-Dashboard-Token header against DASHBOARD_ADMIN_TOKEN.
-pub async fn handler_login(
-    headers: HeaderMap,
-) -> Result<impl axum::response::IntoResponse, (StatusCode, Json<Value>)> {
+/// Sets an HttpOnly session cookie on success so subsequent requests are authenticated.
+pub async fn handler_login(headers: HeaderMap) -> Result<Response, (StatusCode, Json<Value>)> {
     check_admin_token(&headers, None)?;
-    Ok(Json(json!({ "status": "ok", "success": true })))
+    let admin_token = std::env::var("DASHBOARD_ADMIN_TOKEN").unwrap_or_default();
+
+    let mut res = Json(json!({ "status": "ok", "success": true })).into_response();
+    res.headers_mut().insert(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&format!(
+            "bridge_admin_session={}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400",
+            admin_token
+        ))
+        .unwrap(),
+    );
+    Ok(res)
+}
+
+/// POST /api/dashboard/logout — clear the session cookie.
+pub async fn handler_logout() -> Response {
+    let mut res = Json(json!({ "status": "ok", "success": true })).into_response();
+    res.headers_mut().insert(
+        header::SET_COOKIE,
+        HeaderValue::from_static(
+            "bridge_admin_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0",
+        ),
+    );
+    res
 }
 
 /// GET /api/dashboard/diagnostics — Rich operational status for authenticated admin.
@@ -581,10 +602,12 @@ fn check_admin_token(
         }
     };
 
+    let cookie_token = extract_cookie(headers, "bridge_admin_session");
     let request_token = headers
         .get("X-Dashboard-Token")
         .and_then(|v| v.to_str().ok())
         .or(query_token)
+        .or(cookie_token.as_deref())
         .unwrap_or("");
 
     // Fail closed if the request token is empty

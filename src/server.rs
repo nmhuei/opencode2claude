@@ -139,6 +139,7 @@ pub async fn run_server(args: ServeArgsBridge) {
         .route("/api/dashboard/proxies", get(dashboard::handler_proxies))
         .route("/api/dashboard/config", get(dashboard::handler_config))
         .route("/api/dashboard/login", post(dashboard::handler_login))
+        .route("/api/dashboard/logout", post(dashboard::handler_logout))
         .route(
             "/api/dashboard/diagnostics",
             get(dashboard::handler_dashboard_diagnostics),

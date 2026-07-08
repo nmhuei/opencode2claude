@@ -249,41 +249,6 @@
 </div>
 
 <script>
-  function getCookie(name) {
-    var value = "; " + document.cookie;
-    var parts = value.split("; " + name + "=");
-    if (parts.length === 2) return parts.pop().split(";").shift();
-  }
-
-  function setCookie(name, value, days) {
-    var expires = "";
-    if (days) {
-      var date = new Date();
-      date.setTime(date.getTime() + (days * 24 * 60 * 60 * 1000));
-      expires = "; expires=" + date.toUTCString();
-    }
-    document.cookie = name + "=" + (value || "")  + expires + "; path=/; SameSite=Strict";
-  }
-
-  // If already logged in, redirect to dashboard automatically
-  var currentToken = getCookie('bridge_admin_token');
-  if (currentToken) {
-    fetch('/api/dashboard/login', {
-      method: 'POST',
-      headers: {
-        'X-Dashboard-Token': currentToken,
-        'Accept': 'application/json'
-      }
-    })
-    .then(function(r) { return r.json(); })
-    .then(function(data) {
-      if (data.success) {
-        window.location.href = '/dashboard/';
-      }
-    })
-    .catch(function() {});
-  }
-
   async function handleLogin(e) {
     e.preventDefault();
     var passwordInput = document.getElementById('password');
@@ -310,7 +275,6 @@
       
       var data = await resp.json();
       if (data.success) {
-        setCookie('bridge_admin_token', password, 365);
         window.location.href = '/dashboard/';
       } else {
         errorMsg.textContent = data.message || 'Invalid password';

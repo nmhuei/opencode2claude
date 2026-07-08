@@ -14,7 +14,8 @@ var state = {
   sse: null,
   reconnectAttempts: 0,
   reconnectTimeout: null,
-  token: null,
+  authenticated: false,
+  bridgeToken: null,
   proxyRestarting: new Set(),
   configEditMode: false, // false = view/form, true = raw TOML editor
   eventCount: 0,
@@ -98,7 +99,7 @@ function dismissToast(toast) {
 }
 
 /* ==========================================================
-   4. API Client
+   4. API Client — uses HttpOnly session cookie (no JS token)
    ========================================================== */
 async function apiFetch(url, options) {
   options = options || {};
@@ -107,10 +108,6 @@ async function apiFetch(url, options) {
   var headers = options.headers || {};
   headers['Accept'] = 'application/json';
 
-  if (state.token) {
-    headers['X-Dashboard-Token'] = state.token;
-    headers['Authorization'] = 'Bearer ' + state.token;
-  }
   if (options.body && typeof options.body === 'string') {
     headers['Content-Type'] = 'application/x-toml';
   }
@@ -121,6 +118,7 @@ async function apiFetch(url, options) {
       var resp = await fetch(url, {
         method: options.method || 'GET',
         headers: headers,
+        credentials: 'same-origin',
         body: options.body || undefined,
       });
       if (!resp.ok) {
@@ -144,65 +142,28 @@ async function apiFetch(url, options) {
   throw lastErr;
 }
 
-function getCookie(name) {
-  var value = "; " + document.cookie;
-  var parts = value.split("; " + name + "=");
-  if (parts.length === 2) return parts.pop().split(";").shift();
-}
-
-function setCookie(name, value, days) {
-  var expires = "";
-  if (days) {
-    var date = new Date();
-    date.setTime(date.getTime() + (days * 24 * 60 * 60 * 1000));
-    expires = "; expires=" + date.toUTCString();
-  }
-  document.cookie = name + "=" + (value || "")  + expires + "; path=/; SameSite=Strict";
-}
-
-function deleteCookie(name) {
-  document.cookie = name + '=; Max-Age=-99999999; path=/; SameSite=Strict';
-}
-
 /* ==========================================================
-   5. Authentication & Login
+   5. Authentication & Login (server-managed HttpOnly cookie)
    ========================================================== */
 function checkAuthStatus(statusData) {
   if (!statusData) return;
   
-  // If server does not require token
+  // If server does not require token — session cookie is still set,
+  // but the server allows unauthenticated access
   if (!statusData.admin_token_configured) {
     hideLoginScreen();
     document.getElementById('logoutBtn').style.display = 'none';
     return;
   }
   
-  // Check if we have token
-  var savedToken = getCookie('bridge_admin_token');
-  if (savedToken) {
-    state.token = savedToken;
-    verifySavedToken();
-  } else {
-    showLoginScreen();
-  }
-}
-
-async function verifySavedToken() {
-  try {
-    var data = await apiFetch('/api/dashboard/login', { method: 'POST', retries: 1 });
-    if (data.success) {
-      hideLoginScreen();
-      document.getElementById('logoutBtn').style.display = 'flex';
-      // Load other data since we are authenticated now
-      loadConfig();
-      loadProxies();
-      connectSSE();
-    } else {
-      showLoginScreen();
-    }
-  } catch (e) {
-    showLoginScreen();
-  }
+  // If we got here, the server returned 200 for /api/dashboard/status
+  // which means the HttpOnly session cookie was accepted.
+  state.authenticated = true;
+  hideLoginScreen();
+  document.getElementById('logoutBtn').style.display = 'flex';
+  loadConfig();
+  loadProxies();
+  connectSSE();
 }
 
 function showLoginScreen() {
@@ -227,11 +188,15 @@ async function handleLoginSubmit(e) {
   submitBtn.querySelector('span').textContent = 'Verifying...';
   
   try {
-    // Temporarily save to state to run query
-    state.token = token;
-    var data = await apiFetch('/api/dashboard/login', { method: 'POST', retries: 1 });
+    // Login via X-Dashboard-Token header; server sets HttpOnly cookie on success
+    var resp = await fetch('/api/dashboard/login', {
+      method: 'POST',
+      headers: { 'X-Dashboard-Token': token, 'Accept': 'application/json' },
+      credentials: 'same-origin',
+    });
+    var data = await resp.json();
     if (data.success) {
-      setCookie('bridge_admin_token', token, 365);
+      state.authenticated = true;
       showToast('Logged in successfully', 'success');
       hideLoginScreen();
       document.getElementById('logoutBtn').style.display = 'flex';
@@ -240,11 +205,9 @@ async function handleLoginSubmit(e) {
       loadProxies();
       connectSSE();
     } else {
-      state.token = null;
       showToast('Invalid admin key', 'error');
     }
   } catch (err) {
-    state.token = null;
     showToast('Login verification failed: ' + err.message, 'error');
   } finally {
     submitBtn.disabled = false;
@@ -252,13 +215,13 @@ async function handleLoginSubmit(e) {
   }
 }
 
-function handleLogout() {
-  deleteCookie('bridge_admin_token');
-  localStorage.removeItem('bridge_admin_token');
-  sessionStorage.removeItem('bridge_admin_token');
-  state.token = null;
+async function handleLogout() {
+  try {
+    await fetch('/api/dashboard/logout', { method: 'POST', credentials: 'same-origin' });
+  } catch (e) { /* ignore */ }
+  state.authenticated = false;
   showToast('Logged out', 'info');
-  showLoginScreen();
+  window.location.href = '/';
 }
 
 /* ==========================================================
@@ -285,7 +248,7 @@ async function loadStatus() {
   } catch (err) {
     console.error('loadStatus failed:', err);
     // Don't show toast for simple missing token (prompting for login on first load)
-    if (err.status !== 401 || state.token) {
+    if (err.status !== 401 || state.authenticated) {
       showToast('Failed to load status: ' + err.message, 'error');
     }
     setConnection('error');
@@ -816,8 +779,8 @@ async function handleTesterSubmit(e) {
   var headers = {
     'Content-Type': 'application/json',
   };
-  if (state.token) {
-    headers['Authorization'] = 'Bearer ' + state.token;
+  if (state.bridgeToken) {
+    headers['Authorization'] = 'Bearer ' + state.bridgeToken;
   }
 
   var body = {
@@ -963,7 +926,6 @@ function connectSSE() {
   if (state.sse) state.sse.close();
 
   var url = '/api/dashboard/events';
-  if (state.token) url += '?token=' + encodeURIComponent(state.token);
 
   setConnection('connecting');
   var es = new EventSource(url);
@@ -1070,9 +1032,9 @@ function showTokenModal() {
   container.innerHTML =
     '<div class="modal-overlay">' +
     '<div class="modal">' +
-    '<div class="modal-title">Authentication Authorization Token</div>' +
-    '<div class="modal-desc">Configure your Bearer token to authorize server modifications and establish authenticated event lines.</div>' +
-    '<input type="password" class="modal-input" id="tokenInput" placeholder="Bearer Token" value="' + escapeHtml(state.token || '') + '" />' +
+    '<div class="modal-title">Bridge API Bearer Token</div>' +
+    '<div class="modal-desc">Configure your Bearer token to authorize Bridge API requests from the built-in tester.</div>' +
+    '<input type="password" class="modal-input" id="tokenInput" placeholder="Bearer Token" value="' + escapeHtml(state.bridgeToken || '') + '" />' +
     '<div class="modal-actions">' +
     '<button class="btn btn-secondary" id="modalCancel">Cancel</button>' +
     '<button class="btn btn-primary" id="modalSave">Confirm</button>' +
@@ -1086,19 +1048,12 @@ function showTokenModal() {
 
   document.getElementById('modalSave').onclick = function() {
     var tk = input.value.trim() || null;
-    state.token = tk;
+    state.bridgeToken = tk;
     container.innerHTML = '';
     if (tk) {
-      localStorage.setItem('bridge_admin_token', tk);
-      showToast('Token registered', 'success');
-      if (state.sse) state.sse.close();
-      if (state.reconnectTimeout) clearTimeout(state.reconnectTimeout);
-      state.reconnectAttempts = 0;
-      connectSSE();
-      loadConfig();
+      showToast('Bridge token registered', 'success');
     } else {
-      localStorage.removeItem('bridge_admin_token');
-      showToast('Token cleared', 'info');
+      showToast('Bridge token cleared', 'info');
     }
   };
 
