@@ -268,7 +268,10 @@ async function loadStatus() {
     return data;
   } catch (err) {
     console.error('loadStatus failed:', err);
-    showToast('Failed to load status: ' + err.message, 'error');
+    // Don't show toast for simple missing token (prompting for login on first load)
+    if (err.status !== 401 || state.token) {
+      showToast('Failed to load status: ' + err.message, 'error');
+    }
     setConnection('error');
   }
 }
