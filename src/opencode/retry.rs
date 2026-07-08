@@ -97,10 +97,43 @@ pub(super) async fn execute_with_warp_retry(
     };
     let max_retries = pool_size.max(3) + 2;
 
+    let fallbacks = std::env::var("OPENCODE_MODEL_FALLBACKS")
+        .ok()
+        .map(|s| {
+            s.split(',')
+                .map(|m| crate::opencode::mapper::map_model_name(m.trim()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let mut model_list = vec![req_body.model.clone()];
+    if fallbacks.is_empty() {
+        let m = req_body.model.clone();
+        if m.contains("deepseek-v4-flash-free") || m.contains("nemotron-3-ultra-free") {
+            model_list.push("deepseek-v4-flash-free".to_string());
+            model_list.push("nemotron-3-ultra-free".to_string());
+            let mut seen = std::collections::HashSet::new();
+            model_list.retain(|x| seen.insert(x.clone()));
+        }
+    } else {
+        model_list.extend(fallbacks);
+        let mut seen = std::collections::HashSet::new();
+        model_list.retain(|x| seen.insert(x.clone()));
+    }
+
+    let mut model_index = 0;
     let mut retry_count: u32 = 0;
     let mut last_failed_idx: Option<usize> = None;
 
     loop {
+        let current_model = if model_index < model_list.len() {
+            &model_list[model_index]
+        } else {
+            &req_body.model
+        };
+        let mut req_body_clone = req_body.clone();
+        req_body_clone.model = current_model.clone();
+
         // Select the client from the proxy pool if configured
         let (client, proxy_url, idx) = {
             let mut pool = state.proxy_pool.write().await;
@@ -119,7 +152,7 @@ pub(super) async fn execute_with_warp_retry(
 
         let res = client
             .post("https://opencode.ai/zen/v1/chat/completions")
-            .json(req_body)
+            .json(&req_body_clone)
             .send()
             .await;
 
@@ -129,6 +162,16 @@ pub(super) async fn execute_with_warp_retry(
 
                 if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
                     // 429 and 5xx are rate-limit / server errors
+                    if model_index + 1 < model_list.len() {
+                        model_index += 1;
+                        warn!(
+                            "Upstream error (status {}) on model {}. Switching to fallback model: {}",
+                            status, req_body_clone.model, model_list[model_index]
+                        );
+                        retry_count = 0;
+                        last_failed_idx = None;
+                        continue;
+                    }
                     if (retry_count as usize) < max_retries {
                         retry_count += 1;
                         if let (Some(idx), Some(ref url)) = (idx, &proxy_url) {
@@ -176,6 +219,16 @@ pub(super) async fn execute_with_warp_retry(
                             "Upstream returned 400 with rate-limit body (truncated): {}",
                             body_text.chars().take(200).collect::<String>()
                         );
+                        if model_index + 1 < model_list.len() {
+                            model_index += 1;
+                            warn!(
+                                "Upstream rate limit on model {}. Switching to fallback model: {}",
+                                req_body_clone.model, model_list[model_index]
+                            );
+                            retry_count = 0;
+                            last_failed_idx = None;
+                            continue;
+                        }
                         if (retry_count as usize) < max_retries {
                             retry_count += 1;
                             if let (Some(idx), Some(ref url)) = (idx, &proxy_url) {
@@ -201,6 +254,16 @@ pub(super) async fn execute_with_warp_retry(
                         )));
                     } else {
                         // Genuine 400 error — upstream provider failure, retry up to 10x
+                        if model_index + 1 < model_list.len() {
+                            model_index += 1;
+                            warn!(
+                                "Upstream returned 400 (provider error) on model {}. Switching to fallback model: {}",
+                                req_body_clone.model, model_list[model_index]
+                            );
+                            retry_count = 0;
+                            last_failed_idx = None;
+                            continue;
+                        }
                         if retry_count < MAX_PROVIDER_RETRIES {
                             retry_count += 1;
                             warn!(
@@ -267,6 +330,16 @@ pub(super) async fn execute_with_warp_retry(
                     let backoff = std::time::Duration::from_secs(2u64.pow(retry_count.min(4)));
                     info!("Backing off for {:?} before retry...", backoff);
                     tokio::time::sleep(backoff).await;
+                    continue;
+                }
+                if model_index + 1 < model_list.len() {
+                    model_index += 1;
+                    warn!(
+                        "Network error on model {}: {}. Switching to fallback model: {}",
+                        req_body_clone.model, e, model_list[model_index]
+                    );
+                    retry_count = 0;
+                    last_failed_idx = None;
                     continue;
                 }
                 return Err(BridgeError::UpstreamError(format!(

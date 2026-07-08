@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the verification ecosystem that gates and validates all 8 phases of the CLI supervisor upgrade for `opencode2claude`.
+**Goal:** Build the verification ecosystem that gates and validates all 8 phases of the CLI supervisor upgrade for `opencode2api`.
 
 **Architecture:** 4 lib modules (`common.sh`, `cargo.sh`, `process.sh`, `report.sh`) provide CLI helpers and gate functions. `verify.sh` is the single entrypoint with phase registry, argument parsing, and dispatch. Each phase gets a `scripts/phases/phase-N-name.sh` script (gates) and a `verification/phases/phase-N-name.md` contract. CI calls `verify.sh all --profile ci` as sole verification step.
 
@@ -549,7 +549,7 @@ GATES=(
 
 gate_cli_help() {
   info "Gate 1.5: CLI help"
-  local bin="$ROOT_DIR/target/debug/opencode2claude"
+  local bin="$ROOT_DIR/target/debug/opencode2api"
   "$bin" serve --help  >/dev/null || return 1
   "$bin" start --help  >/dev/null || return 1
   "$bin" status --help >/dev/null || return 1
@@ -562,7 +562,7 @@ gate_cli_help() {
 gate_cli_smoke() {
   require_profile local heavy || return 0
   info "Gate 1.6: CLI smoke"
-  local bin="$ROOT_DIR/target/debug/opencode2claude"
+  local bin="$ROOT_DIR/target/debug/opencode2api"
   local port; port="$(pick_free_port)"
   local pid; local log_file="$VERIFY_LOG_DIR/phase-1-cli-smoke.log"
   "$bin" serve --port "$port" >"$log_file" 2>&1 & pid=$!
@@ -612,12 +612,12 @@ run_gates
 | **Scope** | Refactor `main.rs` to use Clap subcommands: `serve`, `start`, `status`, `stop`, `restart`, `env`, `logs`. Extract `run_server()`. Create `src/cli.rs`. |
 | **Files to create** | `src/cli.rs` |
 | **Files to modify** | `src/main.rs` (refactor flat args → subcommands), `Cargo.toml` (update Clap dep) |
-| **Expected behavior contract** | `opencode2claude --help` lists all subcommands. `opencode2claude serve` starts bridge on configured port. `opencode2claude start/status/stop/restart/env/logs` are accepted (may error until Phase 2). `opencode2claude` (no args) runs `serve`. |
+| **Expected behavior contract** | `opencode2api --help` lists all subcommands. `opencode2api serve` starts bridge on configured port. `opencode2api start/status/stop/restart/env/logs` are accepted (may error until Phase 2). `opencode2api` (no args) runs `serve`. |
 | **Acceptance gates** | cargo fmt ✓, clippy ✓, check ✓, unit tests ✓, build ✓, `--help` lists subcommands ✓, `serve --port X` serves `/health` ✓, integration tests pass ✓ |
 | **Verification command** | `./scripts/verify.sh phase-1 --profile local` |
 | **Review requirements** | code-reviewer (MEDIUM+), architecture-consistency (MEDIUM+) |
 | **Out of scope** | Runtime directory creation, PID file management, Docker control, health endpoint beyond basic check, security hardening |
-| **Definition of Done** | 1. All 8 gates pass on `--profile local` 2. `opencode2claude --help` shows 7 subcommands 3. `opencode2claude serve --port X` serves `/health` 4. All existing unit tests still pass 5. No CRITICAL/HIGH code review findings |
+| **Definition of Done** | 1. All 8 gates pass on `--profile local` 2. `opencode2api --help` shows 7 subcommands 3. `opencode2api serve --port X` serves `/health` 4. All existing unit tests still pass 5. No CRITICAL/HIGH code review findings |
 ```
 
 - [ ] **Step 3: Test phase-1 script can parse and list gates**
@@ -726,7 +726,7 @@ gate_runtime_dir_created() {
 
 gate_pid_file_written() {
   info "Gate 2.7: PID file has correct JSON structure"
-  # Phase 2 implementation writes .runtime/opencode2claude.pid.json
+  # Phase 2 implementation writes .runtime/opencode2api.pid.json
   pass "pid file written"
 }
 
@@ -780,7 +780,7 @@ GATES=(
 gate_shell_default_disabled() {
   info "Gate 3.6: Default shell policy is 'disabled'"
   # Verify config.rs default is ShellPolicy::Disabled
-  "$ROOT_DIR/target/debug/opencode2claude" serve --help >/dev/null || true
+  "$ROOT_DIR/target/debug/opencode2api" serve --help >/dev/null || true
   pass "shell default disabled"
 }
 
@@ -839,15 +839,15 @@ GATES=(
 )
 
 gate_proxy_help() {
-  info "Gate 4.6: opencode2claude proxy --help works"
-  "$ROOT_DIR/target/debug/opencode2claude" proxy --help >/dev/null || return 1
+  info "Gate 4.6: opencode2api proxy --help works"
+  "$ROOT_DIR/target/debug/opencode2api" proxy --help >/dev/null || return 1
   pass "proxy --help"
 }
 
 gate_proxy_ps() {
   require_profile local heavy || return 0
-  info "Gate 4.7: opencode2claude proxy ps lists proxies"
-  "$ROOT_DIR/target/debug/opencode2claude" proxy ps >/dev/null 2>&1 || true
+  info "Gate 4.7: opencode2api proxy ps lists proxies"
+  "$ROOT_DIR/target/debug/opencode2api" proxy ps >/dev/null 2>&1 || true
   pass "proxy ps"
 }
 
@@ -950,15 +950,15 @@ GATES=(
 )
 
 gate_status_output() {
-  info "Gate 6.6: opencode2claude status shows running/stopped"
-  "$ROOT_DIR/target/debug/opencode2claude" status >/dev/null 2>&1 || true
+  info "Gate 6.6: opencode2api status shows running/stopped"
+  "$ROOT_DIR/target/debug/opencode2api" status >/dev/null 2>&1 || true
   pass "status"
 }
 
 gate_log_tail() {
   require_profile local heavy || return 0
-  info "Gate 6.7: opencode2claude logs shows recent output"
-  "$ROOT_DIR/target/debug/opencode2claude" logs >/dev/null 2>&1 || true
+  info "Gate 6.7: opencode2api logs shows recent output"
+  "$ROOT_DIR/target/debug/opencode2api" logs >/dev/null 2>&1 || true
   pass "logs"
 }
 
@@ -1128,7 +1128,7 @@ git commit -m "feat: add phase 2-8 verification scripts (disabled skeletons)"
 | **Scope** | Add `src/runtime.rs` (`.runtime/` paths), `src/pidfile.rs` (JSON PID read/write). `supervisor.rs` creates `.runtime/` on `start`, writes PID file, cleans up on `stop`. |
 | **Files to create** | `src/runtime.rs`, `src/pidfile.rs` |
 | **Files to modify** | `src/main.rs` (add runtime setup), `src/supervisor.rs` (use runtime paths), `.runtime/` (gitignored) |
-| **Expected behavior contract** | `opencode2claude start` creates `.runtime/` dir. PID file `.runtime/opencode2claude.pid.json` written with correct JSON structure. `opencode2claude stop` reads PID file and kills process. `opencode2claude status` returns running/stopped based on PID file. |
+| **Expected behavior contract** | `opencode2api start` creates `.runtime/` dir. PID file `.runtime/opencode2api.pid.json` written with correct JSON structure. `opencode2api stop` reads PID file and kills process. `opencode2api status` returns running/stopped based on PID file. |
 | **Acceptance gates** | cargo gates pass, CLI help works, `.runtime/` created on `start`, PID JSON valid, `status` reads PID correctly |
 | **Verification command** | `./scripts/verify.sh phase-2 --profile local` |
 | **Review requirements** | code-reviewer (MEDIUM+) |
@@ -1170,7 +1170,7 @@ git commit -m "feat: add phase 2-8 verification scripts (disabled skeletons)"
 | **Scope** | Add `proxy` subcommand group with `ps`, `restart`, `logs`, `status`. Implement Docker WARP lifecycle via CLI rather than `start.sh`. `src/docker.rs` manages container create/resume/verify. |
 | **Files to create** | `src/docker.rs` |
 | **Files to modify** | `src/cli.rs` (add proxy subcommand), `src/supervisor.rs` (proxy lifecycle) |
-| **Expected behavior contract** | `opencode2claude proxy ps` lists WARP containers. `opencode2claude proxy restart <name>` restarts a proxy. `opencode2claude proxy logs <name>` shows container logs. `opencode2claude proxy status` reports health. |
+| **Expected behavior contract** | `opencode2api proxy ps` lists WARP containers. `opencode2api proxy restart <name>` restarts a proxy. `opencode2api proxy logs <name>` shows container logs. `opencode2api proxy status` reports health. |
 | **Acceptance gates** | cargo gates pass, `proxy --help` works, `proxy ps` lists Docker containers |
 | **Verification command** | `./scripts/verify.sh phase-4 --profile local` |
 | **Review requirements** | code-reviewer (MEDIUM+) |
@@ -1211,7 +1211,7 @@ git commit -m "feat: add phase 2-8 verification scripts (disabled skeletons)"
 | **Scope** | Add `src/health.rs` — port check + `/health` poll. Create `src/supervisor.rs` `status()` reads PID file + bridge health. `logs` subcommand tails stdout/stderr journal. `/health` endpoint returns structured JSON (no config leak). |
 | **Files to create** | `src/health.rs` |
 | **Files to modify** | `src/supervisor.rs` (status, logs), `src/main.rs` (wire in health module) |
-| **Expected behavior contract** | `opencode2claude status` shows bridge running/stopped, proxy pool health, uptime. `opencode2claude logs` tails recent bridge output. `/health` returns status without exposing config secrets. |
+| **Expected behavior contract** | `opencode2api status` shows bridge running/stopped, proxy pool health, uptime. `opencode2api logs` tails recent bridge output. `/health` returns status without exposing config secrets. |
 | **Acceptance gates** | cargo gates pass, `status` shows bridge state, `logs` returns output, `/health` is clean |
 | **Verification command** | `./scripts/verify.sh phase-6 --profile local` |
 | **Review requirements** | code-reviewer (MEDIUM+) |
@@ -1229,10 +1229,10 @@ git commit -m "feat: add phase 2-8 verification scripts (disabled skeletons)"
 | **Phase ID** | `phase-7-docs-migration` |
 | **Status** | Planned |
 | **Dependencies** | Phase 5 (Proxy pool fix), Phase 6 (Health/Status/Log) |
-| **Scope** | Write `docs/cli.md` with all subcommands and examples. Write `docs/migration-from-start-sh.md`. Update `start.sh` → wrapper calling `opencode2claude start`. Update `stop.sh` → wrapper calling `opencode2claude stop`. |
+| **Scope** | Write `docs/cli.md` with all subcommands and examples. Write `docs/migration-from-start-sh.md`. Update `start.sh` → wrapper calling `opencode2api start`. Update `stop.sh` → wrapper calling `opencode2api stop`. |
 | **Files to create** | `docs/cli.md`, `docs/migration-from-start-sh.md` |
 | **Files to modify** | `start.sh` (delegate to supervisor), `stop.sh` (delegate to supervisor) |
-| **Expected behavior contract** | `docs/cli.md` documents all subcommands. `docs/migration-from-start-sh.md` explains migration path. `start.sh` is a thin wrapper around `opencode2claude start`. `stop.sh` is a thin wrapper around `opencode2claude stop`. |
+| **Expected behavior contract** | `docs/cli.md` documents all subcommands. `docs/migration-from-start-sh.md` explains migration path. `start.sh` is a thin wrapper around `opencode2api start`. `stop.sh` is a thin wrapper around `opencode2api stop`. |
 | **Acceptance gates** | cargo gates pass, docs exist, cli.md documents all commands, migration guide covers start.sh users |
 | **Verification command** | `./scripts/verify.sh phase-7 --profile ci` |
 | **Review requirements** | architecture-consistency (MEDIUM+) |
@@ -1280,7 +1280,7 @@ git commit -m "feat: add phase 2-8 metadata contracts"
 - [ ] **Step 1: Write `verification/README.md`**
 
 ```markdown
-# Verification Ecosystem — opencode2claude CLI Supervisor
+# Verification Ecosystem — opencode2api CLI Supervisor
 
 ## Quick Start
 

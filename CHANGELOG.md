@@ -1,6 +1,13 @@
 # Changelog
 
-All notable changes to opencode2claude will be documented in this file.
+All notable changes to opencode2api will be documented in this file.
+
+## [0.4.0] — 2026-07-03
+
+### Added
+- Self-update functionality (`update` subcommand) to check, verify, download, and atomically replace the running binary with the latest GitHub release.
+- Configuration initializer (`init` subcommand) to generate a fully commented `opencode2api.toml` template.
+- 13 new unit tests covering self-update and initialization logic.
 
 ## [0.3.2] — 2026-06-30
 

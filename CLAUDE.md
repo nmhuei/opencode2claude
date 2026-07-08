@@ -2,21 +2,24 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Build & Development
+## Build, Install & Development
 
 ```bash
 # Build
 cargo build
 cargo build --release     # LTO, single codegen unit, strip
 
-# Run (foreground)
-cargo run
-RUST_LOG=debug cargo run
+# Install locally (available globally on PATH)
+./install-local.sh
 
-# Run (background daemon via supervisor)
-cargo build && ./target/debug/opencode2claude start
-./target/debug/opencode2claude status
-./target/debug/opencode2claude stop
+# Run (foreground server engine)
+cargo run --bin opencode2api-serve
+RUST_LOG=debug cargo run --bin opencode2api-serve
+
+# Run (background daemon via supervisor controller CLI)
+cargo build && ./target/debug/oc2api server start
+./target/debug/oc2api server status
+./target/debug/oc2api server stop
 
 # Quick start with Docker proxy pool (legacy wrapper)
 cargo build && source start.sh
@@ -48,12 +51,12 @@ cargo clippy -- -D warnings
 
 ## Project Overview
 
-**OpenCode2Claude** (~4.2k LOC) is a local HTTP proxy that translates Anthropic Messages API requests into OpenAI-compatible API calls. It allows Claude Code to use any LLM provider supported by the OpenCode platform — DeepSeek, GPT-4o, Gemini, Llama, etc.
+**OpenCode2API** (~4.2k LOC) is a local HTTP proxy that translates Anthropic Messages API requests into OpenAI-compatible API calls. It allows Claude Code to use any LLM provider supported by the OpenCode platform — DeepSeek, GPT-4o, Gemini, Llama, etc.
 
 ### Data Flow
 
 ```
-Claude Code → opencode2claude (:4000) → opencode.ai/zen/v1/chat/completions → Any LLM
+Claude Code → opencode2api (:4000) → opencode.ai/zen/v1/chat/completions → Any LLM
                               ↓
                         !shell commands (bypass LLM, local exec)
 ```
@@ -66,8 +69,10 @@ Unlike earlier versions, the bridge now communicates **directly with the upstrea
 
 ```
 src/
-├── main.rs               # Router, startup, graceful shutdown
+├── main.rs               # Daemon controller CLI (opencode2api)
+├── serve_main.rs         # HTTP bridge server entrypoint (opencode2api-serve)
 ├── lib.rs                # Library entry point (in-process embedding)
+├── server.rs             # HTTP bridge server running logic
 ├── cli.rs                # CLI argument parsing via Clap subcommands
 ├── config.rs             # Config chain: CLI args > Env vars > TOML > Defaults
 ├── handlers.rs           # Parse Anthropic requests, route to shell/upstream
@@ -176,17 +181,21 @@ tests/
 ### CLI Subcommands
 
 ```
-opencode2claude serve [OPTIONS]   Start API bridge server (foreground)
-opencode2claude start [OPTIONS]   Start bridge as background daemon
-opencode2claude status [OPTIONS]  Show bridge status
-opencode2claude stop [OPTIONS]    Stop the bridge
-opencode2claude restart           Restart the bridge
-opencode2claude logs              View bridge logs
-opencode2claude env               Display environment information
-opencode2claude proxy status/ps   List proxy pool with roles and health
-opencode2claude proxy restart     Recreate primary proxy containers (40001-40003)
-opencode2claude proxy purge       Remove + recreate primary proxy containers
-opencode2claude proxy logs        View proxy container logs
+opencode2api server start [OPTIONS]  Start API bridge server (daemon or -f foreground)
+opencode2api server stop [OPTIONS]   Stop the bridge
+opencode2api server status [OPTIONS]  Show bridge status
+opencode2api server restart          Restart the bridge
+opencode2api server logs             View bridge logs
+opencode2api server config           Display active configuration schema
+opencode2api env                     Display environment information
+opencode2api doctor                  Diagnose bridge configuration and health
+opencode2api completion <SHELL>      Generate shell completion script
+opencode2api update                  Self-update binary from GitHub
+opencode2api init                    Initialize default TOML configuration
+opencode2api proxy status/ps         List proxy pool with roles and health
+opencode2api proxy restart           Recreate primary proxy containers (40001-40003)
+opencode2api proxy purge             Remove + recreate primary proxy containers
+opencode2api proxy logs              View proxy container logs
 ```
 
 ### CLI Flags (override all config sources)
@@ -207,7 +216,7 @@ opencode2claude proxy logs        View proxy container logs
 
 ### TOML Config
 
-Create `opencode2claude.toml` in project root (or use `-c`):
+Create `opencode2api.toml` in project root (or use `-c`):
 ```toml
 port = 4000
 model = "openai/gpt-4o"

@@ -142,7 +142,7 @@ impl BridgeConfig {
         let config_path = overrides
             .config_path
             .as_deref()
-            .unwrap_or("opencode2claude.toml");
+            .unwrap_or("opencode2api.toml");
         let toml_config = TomlConfig::from_file(config_path);
 
         // Host: CLI > Env > TOML > Default
@@ -372,6 +372,27 @@ impl BridgeConfig {
             return Ok(());
         }
 
+        // Non-loopback bind requires an explicit strong dashboard admin token
+        let dashboard_token = std::env::var("DASHBOARD_ADMIN_TOKEN").unwrap_or_default();
+        if dashboard_token.is_empty() {
+            return Err(
+                "SECURITY VIOLATION: Binding to a non-loopback address without an explicit DASHBOARD_ADMIN_TOKEN.\n"
+                    .to_string()
+                    + "  Set DASHBOARD_ADMIN_TOKEN to a strong secret before binding publicly.\n"
+                    + "  Or set BRIDGE_HOST=127.0.0.1 to restrict to localhost only.\n"
+                    + "  Current host: " + &self.host.to_string(),
+            );
+        }
+        if dashboard_token.len() < 8 {
+            return Err(
+                "SECURITY VIOLATION: DASHBOARD_ADMIN_TOKEN is too weak (must be at least 8 characters) for non-loopback binding.\n"
+                    .to_string()
+                    + "  Configure a stronger DASHBOARD_ADMIN_TOKEN.\n"
+                    + "  Or set BRIDGE_HOST=127.0.0.1 to restrict to localhost only.\n"
+                    + "  Current host: " + &self.host.to_string(),
+            );
+        }
+
         // Non-loopback bind (e.g. 0.0.0.0 or ::) requires auth
         if !self.auth_enabled() {
             return Err(
@@ -587,6 +608,8 @@ mod tests {
 
     #[test]
     fn test_security_public_bind_without_auth_rejected() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        env::set_var("DASHBOARD_ADMIN_TOKEN", "super-secret-admin-token-12345");
         // 0.0.0.0 without auth — rejected
         let config = BridgeConfig {
             host: "0.0.0.0".parse().unwrap(),
@@ -595,6 +618,7 @@ mod tests {
             ..Default::default()
         };
         let result = config.validate_security();
+        env::remove_var("DASHBOARD_ADMIN_TOKEN");
         assert!(result.is_err(), "public bind without auth must be rejected");
         let msg = result.unwrap_err();
         assert!(
@@ -611,6 +635,8 @@ mod tests {
 
     #[test]
     fn test_security_public_bind_with_auth_allowed() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        env::set_var("DASHBOARD_ADMIN_TOKEN", "super-secret-admin-token-12345");
         // 0.0.0.0 with auth — OK
         let config = BridgeConfig {
             host: "0.0.0.0".parse().unwrap(),
@@ -618,14 +644,19 @@ mod tests {
             auth_tokens: Some(vec!["sk-valid".to_string()]),
             ..Default::default()
         };
+        let result = config.validate_security();
+        env::remove_var("DASHBOARD_ADMIN_TOKEN");
         assert!(
-            config.validate_security().is_ok(),
-            "public bind with auth must be allowed"
+            result.is_ok(),
+            "public bind with auth must be allowed: {:?}",
+            result.err()
         );
     }
 
     #[test]
     fn test_security_public_bind_with_unrestricted_shell_rejected() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        env::set_var("DASHBOARD_ADMIN_TOKEN", "super-secret-admin-token-12345");
         // 0.0.0.0 + unrestricted shell — rejected regardless of auth
         let config = BridgeConfig {
             host: "0.0.0.0".parse().unwrap(),
@@ -634,6 +665,7 @@ mod tests {
             ..Default::default()
         };
         let result = config.validate_security();
+        env::remove_var("DASHBOARD_ADMIN_TOKEN");
         assert!(
             result.is_err(),
             "public bind + unrestricted shell must be rejected even with auth"
@@ -649,6 +681,43 @@ mod tests {
             "error should mention BRIDGE_SHELL_POLICY: {}",
             msg
         );
+    }
+
+    #[test]
+    fn test_security_public_bind_without_dashboard_token_rejected() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        env::remove_var("DASHBOARD_ADMIN_TOKEN");
+        let config = BridgeConfig {
+            host: "0.0.0.0".parse().unwrap(),
+            shell_policy: ShellPolicy::Disabled,
+            auth_tokens: Some(vec!["sk-valid".to_string()]),
+            ..Default::default()
+        };
+        let result = config.validate_security();
+        assert!(
+            result.is_err(),
+            "public bind without dashboard token must be rejected"
+        );
+        assert!(result.unwrap_err().contains("DASHBOARD_ADMIN_TOKEN"));
+    }
+
+    #[test]
+    fn test_security_public_bind_with_weak_dashboard_token_rejected() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        env::set_var("DASHBOARD_ADMIN_TOKEN", "12345"); // too short (5 < 8)
+        let config = BridgeConfig {
+            host: "0.0.0.0".parse().unwrap(),
+            shell_policy: ShellPolicy::Disabled,
+            auth_tokens: Some(vec!["sk-valid".to_string()]),
+            ..Default::default()
+        };
+        let result = config.validate_security();
+        env::remove_var("DASHBOARD_ADMIN_TOKEN");
+        assert!(
+            result.is_err(),
+            "public bind with weak dashboard token must be rejected"
+        );
+        assert!(result.unwrap_err().contains("too weak"));
     }
 
     #[test]

@@ -8,7 +8,7 @@
 | **Scope** | Add `src/runtime.rs` (`.runtime/` paths), `src/pidfile.rs` (JSON PID read/write). `supervisor.rs` creates `.runtime/` on `start`, writes PID file, cleans up on `stop`. |
 | **Files to create** | `src/runtime.rs`, `src/pidfile.rs` |
 | **Files to modify** | `src/main.rs` (add runtime setup), `src/supervisor.rs` (use runtime paths), `.runtime/` (gitignored) |
-| **Expected behavior contract** | `opencode2claude start` creates `.runtime/` dir. PID file `.runtime/opencode2claude.pid.json` written with correct JSON structure. `opencode2claude stop` reads PID file and kills process. `opencode2claude status` returns running/stopped based on PID file. |
+| **Expected behavior contract** | `opencode2api start` creates `.runtime/` dir. PID file `.runtime/opencode2api.pid.json` written with correct JSON structure. `opencode2api stop` reads PID file and kills process. `opencode2api status` returns running/stopped based on PID file. |
 | **Acceptance gates** | cargo gates pass, CLI help works, `.runtime/` created on `start`, PID JSON valid, `status` reads PID correctly |
 | **Verification command** | `./scripts/verify.sh phase-2 --profile local` |
 | **Review requirements** | code-reviewer (MEDIUM+) |

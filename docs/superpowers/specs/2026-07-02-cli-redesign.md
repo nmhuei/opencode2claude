@@ -1,10 +1,10 @@
 # CLI Redesign — Design Spec
 
-## OpenCode2Claude Command-Line Interface v2
+## OpenCode2API Command-Line Interface v2
 
 ## 1. Executive Summary
 
-This spec describes a full UX/UI redesign of the `opencode2claude` CLI. The current CLI (v0.3.2) uses basic clap derive output with no colors, no tables, no progress indicators, and no consistency in output formatting.
+This spec describes a full UX/UI redesign of the `opencode2api` CLI. The current CLI (v0.3.2) uses basic clap derive output with no colors, no tables, no progress indicators, and no consistency in output formatting.
 
 The redesigned CLI shifts from a flat subcommand list to a hierarchical command tree with consistent output formatting, semantic colors, structured tables, progress spinners, and machine-readable output for automation.
 
@@ -21,7 +21,7 @@ The redesigned CLI shifts from a flat subcommand list to a hierarchical command 
 ## 3. Command Tree
 
 ```
-opencode2claude
+opencode2api
 ├── server                     # Server management group
 │   ├── start [-f]             # Start bridge (default: daemon, -f: foreground)
 │   ├── stop                   # Stop the bridge
@@ -223,7 +223,7 @@ All JSON render paths return `Result<String, Error>` — no `.unwrap()` on seria
  ✓ docker-daemon      Docker is running (v27.0)
  ✓ port-4000          Port 4000 is free
  ⚠ proxy-containers   2/3 primary containers running (warp-3 missing)
- ✓ config-file        opencode2claude.toml parsed OK
+ ✓ config-file        opencode2api.toml parsed OK
  ✓ auth-status        Auth enabled (2 tokens configured)
 
  Result: 1 warning — bridge should still operate
@@ -362,13 +362,13 @@ src/
 
 ## 14. Acceptance Criteria
 
-1. `opencode2claude server status` shows colored output with bridge state
-2. `opencode2claude server status --json` returns valid JSON
-3. `opencode2claude proxy ps` shows a formatted table
-4. `opencode2claude doctor` runs 6 checks and shows pass/warn/fail
-5. `opencode2claude doctor --json` returns structured JSON with exit code
-6. `opencode2claude completion bash` generates valid bash completions
-7. `opencode2claude server logs` shows colored log lines
+1. `opencode2api server status` shows colored output with bridge state
+2. `opencode2api server status --json` returns valid JSON
+3. `opencode2api proxy ps` shows a formatted table
+4. `opencode2api doctor` runs 6 checks and shows pass/warn/fail
+5. `opencode2api doctor --json` returns structured JSON with exit code
+6. `opencode2api completion bash` generates valid bash completions
+7. `opencode2api server logs` shows colored log lines
 8. `--color never` disables ANSI (pipe-safe)
 9. `--json` and `--quiet` conflict detected by clap (not runtime)
 10. Existing `serve`, `start`, `stop`, `status`, `restart`, `logs` commands still work

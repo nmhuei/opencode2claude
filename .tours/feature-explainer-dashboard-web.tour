@@ -1,0 +1,90 @@
+{
+  "$schema": "https://aka.ms/codetour-schema",
+  "title": "Web Dashboard Flow (Embedded SPA)",
+  "description": "Walkthrough of the current web UI flow: Axum routes → embedded static assets → dashboard APIs (REST + SSE) → client-side SPA logic and views.",
+  "ref": "main",
+  "steps": [
+    {
+      "directory": "src/webui",
+      "title": "Web UI assets (no build step)",
+      "description": "The dashboard UI is shipped as static files (HTML/CSS/JS) embedded into the Rust binary. There’s no bundler — any changes here directly affect what the server serves."
+    },
+    {
+      "file": "src/server.rs",
+      "line": 121,
+      "title": "Server router: where web lives",
+      "description": "Axum wires the core API under `/v1/*` (with auth middleware) and exposes the dashboard separately: `/` (landing), `/dashboard/*` (SPA assets), and `/api/dashboard/*` (REST + SSE). This is the top-level map for the web flow."
+    },
+    {
+      "file": "src/dashboard.rs",
+      "line": 74,
+      "title": "Assets are embedded via rust-embed",
+      "description": "`rust_embed::RustEmbed` pulls everything under `src/webui/` into the binary at compile time. This is the key reason the UI is 'static files' but still served by Rust without a filesystem dependency."
+    },
+    {
+      "file": "src/dashboard.rs",
+      "line": 81,
+      "title": "Serving the SPA: /dashboard/*path",
+      "description": "`serve_webui()` strips the `/dashboard` prefix, resolves a file path, and serves the asset with a guessed MIME type. If the asset is missing, it falls back to `index.html` (SPA routing fallback)."
+    },
+    {
+      "file": "src/dashboard.rs",
+      "line": 127,
+      "title": "Landing page at /",
+      "description": "`serve_landing()` serves `landing.html` from the same embedded assets. This is the portal that links into the dashboard UI and `/health`."
+    },
+    {
+      "file": "src/dashboard.rs",
+      "line": 154,
+      "title": "Dashboard REST API: status/config/proxies",
+      "description": "The dashboard reads server state via JSON endpoints: `/api/dashboard/status`, `/api/dashboard/proxies`, `/api/dashboard/config`. These all require the dashboard admin token check."
+    },
+    {
+      "file": "src/dashboard.rs",
+      "line": 349,
+      "title": "Live updates: SSE events stream",
+      "description": "`/api/dashboard/events` is Server-Sent Events. Clients subscribe and receive `proxy_status`, `proxy_log`, `config_saved`, and `heartbeat` events, which the web UI uses to refresh tables and append event logs."
+    },
+    {
+      "file": "src/dashboard.rs",
+      "line": 460,
+      "title": "Dashboard auth gate (X-Dashboard-Token)",
+      "description": "`check_admin_token()` validates `X-Dashboard-Token` (header) or `?token=` (SSE query) against `DASHBOARD_ADMIN_TOKEN`. This is separate from the bridge API Bearer tokens."
+    },
+    {
+      "file": "src/webui/index.html",
+      "line": 15,
+      "title": "Dashboard UI shell: views + login overlay",
+      "description": "The HTML defines the layout, the 4 main views (Overview, Proxy Pool, Configuration, API Tester), and the login overlay. All content is rendered/updated by `app.js` at runtime."
+    },
+    {
+      "file": "src/webui/app.js",
+      "line": 103,
+      "title": "Client API wrapper + token propagation",
+      "description": "`apiFetch()` injects `X-Dashboard-Token` and also sets `Authorization: Bearer ...` when a token exists. It treats HTTP 401 as a hard auth failure and shows the login overlay."
+    },
+    {
+      "file": "src/webui/app.js",
+      "line": 943,
+      "title": "Client SSE connection lifecycle",
+      "description": "`connectSSE()` opens `EventSource('/api/dashboard/events?token=...')`, listens to typed events, and reconnects with exponential backoff on error. This drives real-time 'console events' and periodic refreshes."
+    },
+    {
+      "file": "src/webui/app.js",
+      "line": 742,
+      "title": "API Tester: streaming via /v1/messages (SSE)",
+      "description": "The tester posts to `/v1/messages` with `stream: true` and manually parses SSE lines from `response.body`. It renders token deltas and collapses the 'thinking' box once text starts streaming."
+    },
+    {
+      "file": "src/webui/style.css",
+      "line": 14,
+      "title": "Design system: dark zinc + indigo accents",
+      "description": "CSS variables define the theme and reusable atoms: backgrounds, typography, radii, borders, and accent colors. Most component styles build on these primitives."
+    },
+    {
+      "title": "Next steps",
+      "description": "If you want to start editing the web UI, the highest-leverage files are `src/webui/index.html` (structure), `src/webui/style.css` (design system), and `src/webui/app.js` (behavior). The server side touchpoints are in `src/dashboard.rs` and the route map in `src/server.rs`."
+    }
+  ]
+}
+

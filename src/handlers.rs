@@ -491,25 +491,10 @@ pub async fn handle_models(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 /// GET /health — Health check endpoint for monitoring and Docker.
-pub async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
-    let daemon_ok = opencode::check_daemon(&state.http_client, state.config.opencode_port).await;
-
-    let proxy_pool_stats = state.proxy_pool.read().await.snapshot();
-
+pub async fn handle_health(State(_state): State<AppState>) -> impl IntoResponse {
     Json(json!({
-        "status": "healthy",
+        "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
-        "daemon": {
-            "status": if daemon_ok { "connected" } else { "disconnected" },
-            "port": state.config.opencode_port
-        },
-        "config": {
-            "model": state.config.model.as_deref().unwrap_or("(default)"),
-            "shell_policy": state.config.shell_policy.description(),
-            "auth_enabled": state.config.auth_enabled(),
-            "bridge_port": state.config.bridge_port
-        },
-        "proxy_pool": proxy_pool_stats
     }))
 }
 

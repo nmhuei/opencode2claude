@@ -15,16 +15,16 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact_name: opencode2claude-linux-amd64
+            artifact_name: opencode2api-linux-amd64
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
-            artifact_name: opencode2claude-linux-arm64
+            artifact_name: opencode2api-linux-arm64
           - os: macos-latest
             target: x86_64-apple-darwin
-            artifact_name: opencode2claude-macos-amd64
+            artifact_name: opencode2api-macos-amd64
           - os: macos-latest
             target: aarch64-apple-darwin
-            artifact_name: opencode2claude-macos-arm64
+            artifact_name: opencode2api-macos-arm64
 
     steps:
       - name: Checkout source
@@ -52,12 +52,12 @@ jobs:
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Check binary size
-        run: ls -lh target/${{ matrix.target }}/release/opencode2claude
+        run: ls -lh target/${{ matrix.target }}/release/opencode2api
 
       - name: Rename binary for upload
         run: |
           mkdir -p staging
-          cp target/${{ matrix.target }}/release/opencode2claude staging/${{ matrix.artifact_name }}
+          cp target/${{ matrix.target }}/release/opencode2api staging/${{ matrix.artifact_name }}
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v5
@@ -112,7 +112,7 @@ jobs:
         shell: bash
         run: |
           VERSION="$(grep '^version =' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
-          if curl -fsSL "https://crates.io/api/v1/crates/opencode2claude/$VERSION" >/dev/null; then
+          if curl -fsSL "https://crates.io/api/v1/crates/opencode2api/$VERSION" >/dev/null; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
@@ -148,7 +148,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ghcr.io/${{ github.repository_owner }}/opencode2claude
+          images: ghcr.io/${{ github.repository_owner }}/opencode2api
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}

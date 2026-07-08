@@ -1,6 +1,6 @@
 //! PID file management for the bridge supervisor.
 //!
-//! Stores bridge process metadata in `~/.opencode2claude/opencode2claude.pid.json`.
+//! Stores bridge process metadata in `~/.opencode2api/opencode2api.pid.json`.
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;

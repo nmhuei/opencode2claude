@@ -1,25 +1,25 @@
 <div align="center">
 
-# 🌉 OpenCode2Claude
+# 🌉 OpenCode2API
 
 ### Bridge OpenCode tools to Claude Code — with **token estimation**, **automatic casing resolution**, and a **resilient Cloudflare WARP proxy pool**.
 
-[![Crates.io](https://img.shields.io/crates/v/opencode2claude?style=for-the-badge&logo=rust)](https://crates.io/crates/opencode2claude)
-[![CI](https://img.shields.io/github/actions/workflow/status/nmhuei/opencode2claude/ci.yml?style=for-the-badge&branch=main)](https://github.com/nmhuei/opencode2claude/actions)
-[![Docker](https://img.shields.io/badge/docker-ghcr.io-2496ED?style=for-the-badge&logo=docker)](https://github.com/nmhuei/opencode2claude/pkgs/container/opencode2claude)
+[![Crates.io](https://img.shields.io/crates/v/opencode2api?style=for-the-badge&logo=rust)](https://crates.io/crates/opencode2api)
+[![CI](https://img.shields.io/github/actions/workflow/status/nmhuei/opencode2api/ci.yml?style=for-the-badge&branch=main)](https://github.com/nmhuei/opencode2api/actions)
+[![Docker](https://img.shields.io/badge/docker-ghcr.io-2496ED?style=for-the-badge&logo=docker)](https://github.com/nmhuei/opencode2api/pkgs/container/opencode2api)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)](LICENSE)
-[![GitHub Release](https://img.shields.io/github/v/release/nmhuei/opencode2claude?style=for-the-badge&logo=github)](https://github.com/nmhuei/opencode2claude/releases)
+[![GitHub Release](https://img.shields.io/github/v/release/nmhuei/opencode2api?style=for-the-badge&logo=github)](https://github.com/nmhuei/opencode2api/releases)
 
-[![Watch Demo](https://img.shields.io/badge/🎬_Watch_Demo-asciinema-4c4c4c?style=for-the-badge)](https://asciinema.org/a/opencode2claude-demo)
-[![Try Playground](https://img.shields.io/badge/🚀_Try_Playground-Vercel-000000?style=for-the-badge&logo=vercel)](https://opencode2claude.playground.dev)
+[![Watch Demo](https://img.shields.io/badge/🎬_Watch_Demo-asciinema-4c4c4c?style=for-the-badge)](https://asciinema.org/a/opencode2api-demo)
+[![Try Playground](https://img.shields.io/badge/🚀_Try_Playground-Vercel-000000?style=for-the-badge&logo=vercel)](https://opencode2api.playground.dev)
 
 ---
 
-**Claude Code** → `opencode2claude` → **opencode.ai/zen/v1/chat/completions** → **Any LLM**
+**Claude Code** → `opencode2api` → **opencode.ai/zen/v1/chat/completions** → **Any LLM**
 
 ```bash
-opencode2claude start  # Start the bridge daemon (background)
-opencode2claude status # Check if it's running
+opencode2api start  # Start the bridge daemon (background)
+opencode2api status # Check if it's running
 claude                 # Works with any model
 ```
 
@@ -29,7 +29,7 @@ claude                 # Works with any model
 
 ---
 
-## ✨ Why OpenCode2Claude?
+## ✨ Why OpenCode2API?
 
 Claude Code is locked to Anthropic's API. This bridge routes it through [OpenCode](https://github.com/opencode-ai/opencode) to access **50+ models** — including free tiers like `deepseek-v4-flash-free` — while adding **production-grade observability**, **cost prediction**, and **resilient egress**.
 
@@ -50,7 +50,7 @@ graph LR
         OC[OpenCode CLI]
     end
     
-    subgraph Bridge["🌉  OpenCode2Claude Bridge"]
+    subgraph Bridge["🌉  OpenCode2API Bridge"]
         BR[HTTP Server\nAxum + Tokio]
         TE[Token Estimator]
         CR[Casing Resolver]
@@ -87,14 +87,14 @@ graph LR
 ## 🎬 Quick Demo
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/nmhuei/opencode2claude/main/assets/demo-dark.gif">
-  <img src="https://raw.githubusercontent.com/nmhuei/opencode2claude/main/assets/demo-light.gif" alt="OpenCode2Claude demo — token estimation, proxy pool, and casing resolution in action" width="900">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/nmhuei/opencode2api/main/assets/demo-dark.gif">
+  <img src="https://raw.githubusercontent.com/nmhuei/opencode2api/main/assets/demo-light.gif" alt="OpenCode2API demo — token estimation, proxy pool, and casing resolution in action" width="900">
 </picture>
 
 <details>
 <summary>📺 <strong>Watch full terminal recording on asciinema</strong></summary>
 
-[![asciicast](https://asciinema.org/a/opencode2claude-demo.svg)](https://asciinema.org/a/opencode2claude-demo)
+[![asciicast](https://asciinema.org/a/opencode2api-demo.svg)](https://asciinema.org/a/opencode2api-demo)
 
 </details>
 
@@ -107,12 +107,12 @@ graph LR
 
 | Platform | Command | Notes |
 |----------|---------|-------|
-| **Cargo** (recommended) | `cargo install opencode2claude` | Requires Rust toolchain |
-| **Homebrew** | `brew install nmhuei/tap/opencode2claude` | macOS / Linux |
-| **Binary** | [Download Latest](https://github.com/nmhuei/opencode2claude/releases) | No Rust needed, ~5MB static binary |
-| **Docker** | `docker pull ghcr.io/nmhuei/opencode2claude:latest` | Multi-arch (amd64/arm64) |
-| **Nix** | `nix profile install github:nmhuei/opencode2claude` | Flakes supported |
-| **Quick Install Script** | `curl -fsSL https://raw.githubusercontent.com/nmhuei/opencode2claude/main/install.sh \| sh` | Auto-detects OS/arch, no deps |
+| **Cargo** (recommended) | `cargo install opencode2api` | Requires Rust toolchain |
+| **Homebrew** | `brew install nmhuei/tap/opencode2api` | macOS / Linux |
+| **Binary** | [Download Latest](https://github.com/nmhuei/opencode2api/releases) | No Rust needed, ~5MB static binary |
+| **Docker** | `docker pull ghcr.io/nmhuei/opencode2api:latest` | Multi-arch (amd64/arm64) |
+| **Nix** | `nix profile install github:nmhuei/opencode2api` | Flakes supported |
+| **Quick Install Script** | `curl -fsSL https://raw.githubusercontent.com/nmhuei/opencode2api/main/install.sh \| sh` | Auto-detects OS/arch, no deps |
 
 </details>
 
@@ -124,10 +124,10 @@ graph LR
 
 ```bash
 # 1. Start the bridge daemon (background, auto-spawns WARP proxies if Docker available)
-opencode2claude start
+opencode2api start
 
 # 2. Verify it's running
-opencode2claude status
+opencode2api status
 # → Bridge: RUNNING (pid 12345)
 # → WARP Pool: 3 primary + 2 warm-standby healthy
 
@@ -141,7 +141,7 @@ claude
 # Want a specific model? Override via env or CLI flag:
 export OPENCODE_MODEL="openai/gpt-4o"
 # or
-opencode2claude serve --port 4000 --model "google/gemini-2.5-pro"
+opencode2api serve --port 4000 --model "google/gemini-2.5-pro"
 
 # Shell commands bypass the LLM entirely — prefix with `!`:
 You: !git status          # → instant local exec (~10ms)
@@ -172,7 +172,7 @@ You: What is recursion?   # → routed through LLM as normal
 ### 🎯 Token Estimation — Know the Cost Before You Call
 
 ```bash
-$ opencode2claude estimate "refactor the auth module to use JWT"
+$ opencode2api estimate "refactor the auth module to use JWT"
 ┌─────────────────────────────────────────────────────────────────────┐
 │ 📊 Token Estimation Result                                          │
 ├─────────────────────────────────────────────────────────────────────┤
@@ -194,14 +194,14 @@ $ opencode2claude estimate "refactor the auth module to use JWT"
 <summary>📖 <strong>How It Works</strong></summary>
 
 - **Static Analysis**: Parses prompt intent, estimates tool call count & complexity
-- **Historical Calibration**: Learns from your actual usage patterns (stored locally in `~/.cache/opencode2claude/calibration.json`)
+- **Historical Calibration**: Learns from your actual usage patterns (stored locally in `~/.cache/opencode2api/calibration.json`)
 - **Model-Aware**: Different tokenizers per model (Claude, GPT, Gemini, etc.) — uses `tiktoken`/`tokenizers` crate
 - **Export Formats**: `--format json` for CI/CD integration, `--format table` for human reading
 - **Confidence Scoring**: Based on prompt similarity to historical data + tool call predictability
 
 </details>
 
-**Integration:** Also available as a library — `opencode2claude::estimate::estimate_tokens(&prompt, &model)`
+**Integration:** Also available as a library — `opencode2api::estimate::estimate_tokens(&prompt, &model)`
 
 ---
 
@@ -220,7 +220,7 @@ OpenCode uses `snake_case`, Claude Code expects `camelCase`. We handle it automa
 | `weird_tool_name_v2` | `weirdToolNameV2` | ✅ Heuristic (handles suffixes) |
 | `legacy_tool` | `legacyTool` | ⚠️ Configurable mapping |
 
-**Custom Mappings** (in `~/.config/opencode2claude/config.toml`):
+**Custom Mappings** (in `~/.config/opencode2api/config.toml`):
 ```toml
 [tool_casing]
 fallback_strategy = "heuristic"  # heuristic | passthrough | error
@@ -245,7 +245,7 @@ custom_mappings = {
 
 ### 🌐 Cloudflare WARP Proxy Pool — Resilient Egress
 
-When running multiple concurrent Claude Code agents, they hit free-tier rate limits quickly if sharing a single IP. **OpenCode2Claude solves this with a two-tier proxy pool:**
+When running multiple concurrent Claude Code agents, they hit free-tier rate limits quickly if sharing a single IP. **OpenCode2API solves this with a two-tier proxy pool:**
 
 ```mermaid
 graph TB
@@ -290,26 +290,26 @@ graph TB
 
 ```bash
 # Enable WARP pool (requires warp-cli registered on host)
-opencode2claude serve --warp-pool --pool-size 3 --standby-size 2
+opencode2api serve --warp-pool --pool-size 3 --standby-size 2
 
 # Or via env vars:
 export BRIDGE_WARP_POOL=true
 export BRIDGE_WARP_POOL_SIZE=3
 export BRIDGE_WARP_STANDBY_SIZE=2
-opencode2claude start
+opencode2api start
 
 # Manage proxy containers:
-opencode2claude proxy status      # List with roles (primary vs protected) + health
-opencode2claude proxy restart     # Recreate primary proxies only (40001-40003)
-opencode2claude proxy purge       # Remove + recreate primary proxies
-opencode2claude proxy logs        # View proxy container logs
+opencode2api proxy status      # List with roles (primary vs protected) + health
+opencode2api proxy restart     # Recreate primary proxies only (40001-40003)
+opencode2api proxy purge       # Remove + recreate primary proxies
+opencode2api proxy logs        # View proxy container logs
 ```
 
 **Manual Proxy Pool** (bring your own SOCKS5/HTTP):
 ```bash
 export BRIDGE_PRIMARY_PROXIES="socks5://127.0.0.1:40001,socks5://127.0.0.1:40002,socks5://127.0.0.1:40003"
 export BRIDGE_WARM_STANDBY_PROXIES="socks5://127.0.0.1:40004,socks5://127.0.0.1:40005"
-opencode2claude start
+opencode2api start
 ```
 
 ---
@@ -343,13 +343,13 @@ opencode2claude start
 
 ## ⚙️ Configuration
 
-**Priority:** CLI args → Env vars → TOML file (`~/.config/opencode2claude/config.toml`) → Defaults
+**Priority:** CLI args → Env vars → TOML file (`~/.config/opencode2api/config.toml`) → Defaults
 
 <details>
 <summary><strong>📋 Full Config Reference</strong> (click to expand)</summary>
 
 ```toml
-# ~/.config/opencode2claude/config.toml
+# ~/.config/opencode2api/config.toml
 # All values shown are defaults — override only what you need
 
 [server]
@@ -360,7 +360,7 @@ workers = 0                    # 0 = auto (num_cpus)
 [token_estimation]
 enabled = true
 model = "claude-3-5-sonnet-20241022"  # Model for tokenization calibration
-calibration_file = "~/.cache/opencode2claude/calibration.json"
+calibration_file = "~/.cache/opencode2api/calibration.json"
 confidence_threshold = 0.75    # Below this, returns "low confidence"
 
 [tool_casing]
@@ -400,7 +400,7 @@ log_format = "json"              # json | pretty
 **Quick CLI Overrides:**
 ```bash
 # All config via flags (highest priority)
-opencode2claude serve \
+opencode2api serve \
   --port 8080 \
   --host 0.0.0.0 \
   --model "openai/gpt-4o" \
@@ -418,7 +418,7 @@ opencode2claude serve \
 ## 🔧 CLI Reference
 
 ```bash
-opencode2claude <COMMAND> [OPTIONS]
+opencode2api <COMMAND> [OPTIONS]
 
 COMMANDS:
   serve          Run bridge server (foreground)
@@ -434,22 +434,22 @@ COMMANDS:
   --version      Show version
 
 # Proxy subcommands:
-opencode2claude proxy status      # List proxies with roles + health
-opencode2claude proxy restart     # Recreate primary proxies only
-opencode2claude proxy purge       # Remove + recreate primary proxies
-opencode2claude proxy logs        # View proxy container logs
+opencode2api proxy status      # List proxies with roles + health
+opencode2api proxy restart     # Recreate primary proxies only
+opencode2api proxy purge       # Remove + recreate primary proxies
+opencode2api proxy logs        # View proxy container logs
 
 # Config subcommands:
-opencode2claude config init       # Create default config.toml
-opencode2claude config show       # Print resolved config
-opencode2claude config path       # Show config file path
+opencode2api config init       # Create default config.toml
+opencode2api config show       # Print resolved config
+opencode2api config path       # Show config file path
 ```
 
 ---
 
 ## 🤝 Comparison
 
-| Feature | OpenCode2Claude | Manual Proxy | Other Bridges |
+| Feature | OpenCode2API | Manual Proxy | Other Bridges |
 |---------|-----------------|--------------|---------------|
 | Token estimation | ✅ Native, calibrated | ❌ | ❌ |
 | Casing resolution | ✅ Heuristic + config | ❌ Manual | ⚠️ Partial |
@@ -492,8 +492,8 @@ Contributions welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) first.
 
 ```bash
 # Development setup
-git clone https://github.com/nmhuei/opencode2claude
-cd opencode2claude
+git clone https://github.com/nmhuei/opencode2api
+cd opencode2api
 cargo build --all-features
 cargo test --all-features
 
@@ -520,6 +520,6 @@ MIT © [nmhuei](https://github.com/nmhuei)
 
 **Star this repo** if it saves you time — it helps others discover it!
 
-[⭐ Star on GitHub](https://github.com/nmhuei/opencode2claude/stargazers) • [🐛 Report Bug](https://github.com/nmhuei/opencode2claude/issues) • [💡 Request Feature](https://github.com/nmhuei/opencode2claude/issues/new) • [💬 Discussions](https://github.com/nmhuei/opencode2claude/discussions)
+[⭐ Star on GitHub](https://github.com/nmhuei/opencode2api/stargazers) • [🐛 Report Bug](https://github.com/nmhuei/opencode2api/issues) • [💡 Request Feature](https://github.com/nmhuei/opencode2api/issues/new) • [💬 Discussions](https://github.com/nmhuei/opencode2api/discussions)
 
 </div>

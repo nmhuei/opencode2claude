@@ -1,27 +1,27 @@
 #!/bin/sh
 #
-# install.sh - Install opencode2claude
+# install.sh - Install opencode2api
 #
 # Auto-detects OS + arch, downloads the correct pre-built binary from GitHub
 # releases, and installs it to /usr/local/bin (with sudo if needed) or
 # ~/.local/bin as fallback.
 #
 # Usage
-#   curl -fsSL https://raw.githubusercontent.com/nmhuei/opencode2claude/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/nmhuei/opencode2api/main/install.sh | sh
 #   sh install.sh
 #
 # Environment variables
-#   OPENCODE2CLAUDE_VERSION  Version tag to install (default: latest)
-#   OPENCODE2CLAUDE_BINDIR   Install directory (default: auto-detect)
+#   OPENCODE2API_VERSION  Version tag to install (default: latest)
+#   OPENCODE2API_BINDIR   Install directory (default: auto-detect)
 #
 
 set -eu
 
 # ── Metadata ──────────────────────────────────────────────────────────
 REPO_OWNER="nmhuei"
-REPO_NAME="opencode2claude"
+REPO_NAME="opencode2api"
 REPO="${REPO_OWNER}/${REPO_NAME}"
-PROJECT="opencode2claude"
+PROJECT="opencode2api"
 GITHUB="https://github.com/${REPO}"
 API_URL="https://api.github.com/repos/${REPO}/releases/latest"
 
@@ -120,7 +120,7 @@ find_download_tool() {
 fetch_latest_version() {
     # May fail due to rate-limiting or network — caller handles empty return.
     local tmpfile
-    tmpfile="$(mktemp 2>/dev/null || echo "/tmp/opencode2claude-version.$$")"
+    tmpfile="$(mktemp 2>/dev/null || echo "/tmp/opencode2api-version.$$")"
     dl "$API_URL" "$tmpfile" 2>/dev/null || true
     grep '"tag_name"' "$tmpfile" 2>/dev/null |
         sed 's/.*"tag_name": *"\([^"]*\)".*/\1/' || true
@@ -128,8 +128,8 @@ fetch_latest_version() {
 }
 
 get_installed_version() {
-    if command -v opencode2claude >/dev/null 2>&1; then
-        opencode2claude --version 2>/dev/null || printf ''
+    if command -v opencode2api >/dev/null 2>&1; then
+        opencode2api --version 2>/dev/null || printf ''
     fi
 }
 
@@ -245,8 +245,8 @@ do_install() {
 #  Verification
 # ══════════════════════════════════════════════════════════════════════
 verify_install() {
-    if command -v opencode2claude >/dev/null 2>&1; then
-        ver="$(opencode2claude --version 2>/dev/null)"
+    if command -v opencode2api >/dev/null 2>&1; then
+        ver="$(opencode2api --version 2>/dev/null)"
         ok "Installed: ${ver:-${PROJECT}}"
     else
         warn "Binary installed but not found in PATH."
@@ -321,7 +321,7 @@ check_warp() {
 print_welcome() {
     printf '%s\n' ""
     header "================================================"
-    header "  opencode2claude installed!"
+    header "  opencode2api (oc2api) installed!"
     header "================================================"
     printf '%s\n' ""
     printf '  %s%s%s\n' "${BOLD}" "Quick start" "${NC}"
@@ -329,17 +329,17 @@ print_welcome() {
 
     if command -v opencode >/dev/null 2>&1; then
         printf '%s\n' "  1. Start the bridge:"
-        printf '     %s%s%s\n' "${CYAN}" "opencode2claude" "${NC}"
+        printf '     %s%s%s\n' "${CYAN}" "oc2api server start" "${NC}"
         printf '%s\n' ""
         printf '%s\n' "  2. Use Claude Code with any LLM:"
         printf '     %s%s%s\n' "${CYAN}" "claude" "${NC}"
         printf '%s\n' ""
         printf '%s\n' "  3. Use a specific model:"
-        printf '     %s%s%s\n' "${CYAN}" "OPENCODE_MODEL=\"openai/gpt-4o\" opencode2claude" "${NC}"
+        printf '     %s%s%s\n' "${CYAN}" "oc2api server start -m opencode/deepseek-v4-flash-free" "${NC}"
     else
         printf '%s\n' "  1. Install OpenCode first, then start the bridge:"
         printf '     %s%s%s\n' "${CYAN}" "curl -fsSL https://docs.opencode.ai/install.sh | sh" "${NC}"
-        printf '     %s%s%s\n' "${CYAN}" "opencode2claude" "${NC}"
+        printf '     %s%s%s\n' "${CYAN}" "oc2api server start" "${NC}"
         printf '%s\n' ""
         printf '%s\n' "  2. Use Claude Code with any LLM:"
         printf '     %s%s%s\n' "${CYAN}" "claude" "${NC}"
@@ -347,7 +347,7 @@ print_welcome() {
     printf '%s\n' ""
     printf '  %s%s%s\n' "${BOLD}" "Resources" "${NC}"
     printf '    %s\n' "${GITHUB}"
-    printf '    %s\n' "opencode2claude --help"
+    printf '    %s\n' "oc2api --help"
     printf '%s\n' ""
 }
 

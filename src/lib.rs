@@ -6,6 +6,7 @@
 
 pub mod cli;
 pub mod config;
+pub mod dashboard;
 pub mod docker;
 pub mod doctor;
 pub mod error;
@@ -17,8 +18,10 @@ pub mod output;
 pub mod pidfile;
 pub mod proxy_pool;
 pub mod runtime;
+pub mod server;
 pub mod shell;
 pub mod sse;
 pub mod state;
+pub mod stream_tracker;
 pub mod supervisor;
 pub mod update;

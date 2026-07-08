@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OpenCode2API Console</title>
+<meta name="description" content="Operations Dashboard for OpenCode2API API Bridge">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/dashboard/style.css?v=1.1.1">
+</head>
+<body>
+
+<!-- Login Screen -->
+<div id="loginOverlay" class="login-overlay hidden">
+  <div class="login-card">
+    <div class="login-header">
+      <div class="login-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+          <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+        </svg>
+      </div>
+      <h2>Console Login</h2>
+      <p>Enter your admin authorization token to access the operations dashboard.</p>
+    </div>
+    <form id="loginForm" class="login-form">
+      <div class="form-group">
+        <label for="loginToken">Admin Token</label>
+        <input type="password" id="loginToken" placeholder="Enter DASHBOARD_ADMIN_TOKEN" required autocomplete="current-password">
+      </div>
+      <button type="submit" class="btn btn-primary btn-block" id="loginSubmitBtn">
+        <span>Sign In</span>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="5" y1="12" x2="19" y2="12"/>
+          <polyline points="12 5 19 12 12 19"/>
+        </svg>
+      </button>
+    </form>
+    <div class="login-footer">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+        <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+      </svg>
+      <span>Secure Bridge Connection</span>
+    </div>
+  </div>
+</div>
+
+<!-- Main App Layout -->
+<div class="app-layout" id="appLayout">
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <div class="brand">
+        <div class="brand-logo">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="12 2 2 7 12 12 22 7 12 2"/>
+            <polyline points="2 17 12 22 22 17"/>
+            <polyline points="2 12 12 17 22 12"/>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <span class="brand-name">OpenCode2API</span>
+          <span class="brand-sub">Bridge Admin Console</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Navigation -->
+    <nav class="sidebar-nav" id="sidebarNav">
+      <button class="nav-btn active" data-view="overview">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon">
+          <rect x="3" y="3" width="7" height="7" rx="1"/>
+          <rect x="14" y="3" width="7" height="7" rx="1"/>
+          <rect x="3" y="14" width="7" height="7" rx="1"/>
+          <rect x="14" y="14" width="7" height="7" rx="1"/>
+        </svg>
+        <span>Overview</span>
+      </button>
+      <button class="nav-btn" data-view="proxies">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon">
+          <rect x="2" y="2" width="20" height="8" rx="2"/>
+          <rect x="2" y="14" width="20" height="8" rx="2"/>
+          <circle cx="6" cy="6" r="1" fill="currentColor"/>
+          <circle cx="6" cy="18" r="1" fill="currentColor"/>
+        </svg>
+        <span>Proxy Pool</span>
+      </button>
+      <button class="nav-btn" data-view="config">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon">
+          <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>
+          <circle cx="12" cy="12" r="4"/>
+        </svg>
+        <span>Configuration</span>
+      </button>
+      <button class="nav-btn" data-view="tester">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon">
+          <polygon points="5 3 19 12 5 21 5 3"/>
+        </svg>
+        <span>API Tester</span>
+      </button>
+    </nav>
+
+    <!-- Sidebar Footer (System Status) -->
+    <div class="sidebar-footer">
+      <div class="footer-status-row">
+        <span class="status-title">System Status</span>
+        <span class="status-badge" id="systemStatusBadge">
+          <span class="status-badge-dot"></span>
+          <span class="status-badge-text">Connecting</span>
+        </span>
+      </div>
+
+      <div class="footer-stats-grid">
+        <div class="footer-stat-card">
+          <div class="stat-card-label">Primary</div>
+          <div class="stat-card-value" id="sidebarPrimaryCount">0/0</div>
+        </div>
+        <div class="footer-stat-card">
+          <div class="stat-card-label">Standby</div>
+          <div class="stat-card-value" id="sidebarStandbyCount">0/0</div>
+        </div>
+      </div>
+
+      <div class="footer-meta-card">
+        <div class="meta-row">
+          <span class="meta-label">Version</span>
+          <span class="meta-val" id="sidebarVersion">---</span>
+        </div>
+        <div class="meta-row">
+          <span class="meta-label">Uptime</span>
+          <span class="meta-val" id="sidebarUptime">---</span>
+        </div>
+      </div>
+
+      <div class="footer-actions">
+        <button class="btn btn-destructive btn-block" id="logoutBtn" style="display:none; margin-bottom: 8px;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+            <polyline points="16 17 21 12 16 7"/>
+            <line x1="21" y1="12" x2="9" y2="12"/>
+          </svg>
+          <span>Sign Out</span>
+        </button>
+        <button class="btn btn-secondary btn-block" id="settingsBtn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+          <span>Admin Token</span>
+        </button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Sidebar Backdrop for mobile drawer -->
+  <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
+
+  <!-- Main Work Area -->
+  <main class="main-content" id="mainContent">
+    <!-- Mobile Header -->
+    <header class="mobile-header" id="mobileHeader">
+      <div class="brand">
+        <div class="brand-logo">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="12 2 2 7 12 12 22 7 12 2"/>
+            <polyline points="2 17 12 22 22 17"/>
+            <polyline points="2 12 12 17 22 12"/>
+          </svg>
+        </div>
+        <span class="brand-name">OpenCode2API</span>
+      </div>
+      <button class="icon-btn" id="mobileMenuBtn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/>
+        </svg>
+      </button>
+    </header>
+
+    <div class="content-container">
+      
+      <!-- Overview View -->
+      <section class="view active" id="view-overview">
+        <div class="view-header">
+          <div>
+            <h1 class="view-title">Overview</h1>
+            <p class="view-desc">Monitor bridge API status, uptime, proxy node availability, and health metrics.</p>
+          </div>
+          <button class="btn btn-secondary btn-sm" id="refreshOverviewBtn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
+            </svg>
+            <span>Refresh</span>
+          </button>
+        </div>
+
+        <div class="metrics-grid" id="metricsGrid">
+          <!-- Rendered dynamically -->
+        </div>
+
+        <div class="view-subheader">
+          <h2>Active Proxy Pool</h2>
+          <span class="badge badge-indigo" id="overviewProxyBadge">0 Nodes</span>
+        </div>
+        <div class="card overflow-x">
+          <div id="overviewProxyTable">
+            <div class="card-empty">Loading proxy nodes...</div>
+          </div>
+        </div>
+
+        <div class="view-subheader">
+          <h2>Console Events</h2>
+          <button class="btn btn-sm btn-secondary" id="clearEventsBtn">Clear Logs</button>
+        </div>
+        <div class="card log-feed-card">
+          <div class="log-feed" id="eventLog">
+            <!-- Dynamic log feed -->
+          </div>
+        </div>
+      </section>
+
+      <!-- Proxies View -->
+      <section class="view" id="view-proxies">
+        <div class="view-header">
+          <div>
+            <h1 class="view-title">Proxy Pool Management</h1>
+            <p class="view-desc">Manage proxy nodes, monitor latency, cooldown timers, success counts, and restart managed containers.</p>
+          </div>
+          <button class="btn btn-secondary btn-sm" id="refreshProxiesBtn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
+            </svg>
+            <span>Refresh</span>
+          </button>
+        </div>
+        <div class="card overflow-x" id="proxyDetailTable">
+          <div class="card-empty">Loading proxy details...</div>
+        </div>
+      </section>
+
+      <!-- Config View -->
+      <section class="view" id="view-config">
+        <div class="view-header">
+          <div>
+            <h1 class="view-title">Bridge Configuration</h1>
+            <p class="view-desc">Edit parameters of the opencode2api daemon. Admin authorization token required to write changes.</p>
+          </div>
+          <div class="header-actions" style="display: flex; gap: 8px; align-items: center;">
+            <button class="btn btn-secondary btn-sm" id="refreshConfigBtn">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
+              </svg>
+              <span>Refresh</span>
+            </button>
+            <div id="configActions"></div>
+          </div>
+        </div>
+        <div class="card" id="configPanel">
+          <div class="card-empty">Loading configuration data...</div>
+        </div>
+      </section>
+
+      <!-- API Tester View -->
+      <section class="view" id="view-tester">
+        <div class="view-header">
+          <div>
+            <h1 class="view-title">API Tester</h1>
+            <p class="view-desc">Test bridge translation and model routing directly in your browser. Streams live tokens and reasoning process.</p>
+          </div>
+        </div>
+        
+        <div class="tester-layout">
+          <!-- Left settings panel -->
+          <div class="card tester-settings">
+            <div class="card-header-simple">Test Configurations</div>
+            <form id="testerForm" class="tester-form">
+              <div class="form-group">
+                <label for="testerModel">Model to test</label>
+                <input type="text" id="testerModel" list="availableModels" placeholder="opencode/deepseek-v4-flash-free" required>
+                <p class="form-help">Select or type any model identifier configured upstream.</p>
+              </div>
+              <div class="form-row">
+                <div class="form-group flex-1">
+                  <label for="testerTemp">Temperature</label>
+                  <input type="number" id="testerTemp" min="0" max="1" step="0.1" value="0.7">
+                </div>
+                <div class="form-group flex-1">
+                  <label for="testerTokens">Max Tokens</label>
+                  <input type="number" id="testerTokens" min="1" max="8192" value="2048">
+                </div>
+              </div>
+              <div class="form-group">
+                <label for="testerPrompt">User Prompt</label>
+                <textarea id="testerPrompt" rows="5" placeholder="Type a prompt for the model..." required>Write a short, engaging description of how opencode2api translates API requests.</textarea>
+              </div>
+              
+              <button type="submit" class="btn btn-primary btn-block" id="testerSubmitBtn">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polygon points="5 3 19 12 5 21 5 3"/>
+                </svg>
+                <span>Run Prompt Test</span>
+              </button>
+            </form>
+          </div>
+          
+          <!-- Right output panel -->
+          <div class="tester-output-container">
+            <div class="card tester-results">
+              <div class="card-header-simple">
+                <span>Model Output</span>
+                <span class="test-badge hidden" id="testLatencyBadge">--- ms</span>
+              </div>
+              <div class="test-response-area" id="testResponseArea">
+                <div class="response-placeholder">Run a prompt test to view model response.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+    </div>
+  </main>
+</div>
+
+<!-- Toast Container -->
+<div id="toastContainer"></div>
+
+<!-- Modal Container -->
+<div id="modalContainer"></div>
+
+<datalist id="availableModels">
+  <option value="opencode/deepseek-v4-flash-free">DeepSeek V4 Flash (Free)</option>
+  <option value="opencode/nemotron-3-ultra-free">Nemotron 3 Ultra (Free)</option>
+</datalist>
+
+<script src="/dashboard/app.js?v=1.1.1"></script>
+</body>
+</html>

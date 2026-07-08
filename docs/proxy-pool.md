@@ -2,10 +2,10 @@
 
 ## Two-Tier Model
 
-opencode2claude uses a two-tier proxy pool:
+opencode2api uses a two-tier proxy pool:
 
 1. **Primary Managed Pool** (ports 40001–40003)
-   - Managed by opencode2claude CLI
+   - Managed by opencode2api CLI
    - Can be started, restarted, recovered, rotated, purged
    - Used as default routing targets for normal traffic
    - Docker containers managed via CLI (`proxy restart`, `proxy purge`)

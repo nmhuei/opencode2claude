@@ -1,4 +1,4 @@
-//! Config initializer — generates a default `opencode2claude.toml`.
+//! Config initializer — generates a default `opencode2api.toml`.
 //!
 //! The `init` subcommand writes a commented template to the specified path,
 //! giving users a ready-to-edit starting point.
@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use std::path::Path;
 
 /// Default config template content.
-const CONFIG_TEMPLATE: &str = r##"# OpenCode2Claude configuration
+const CONFIG_TEMPLATE: &str = r##"# OpenCode2API configuration
 # Uncomment and adjust values as needed.
 
 # Bridge listen port
@@ -83,7 +83,7 @@ pub async fn generate_config(path: &Path, force: bool) -> Result<()> {
 
     eprintln!("✓ Config template written to {}", path.display());
     eprintln!("  Edit it to match your setup, then run:");
-    eprintln!("    opencode2claude server start -c {}", path.display());
+    eprintln!("    opencode2api server start -c {}", path.display());
 
     Ok(())
 }
@@ -102,7 +102,7 @@ mod tests {
 
     #[test]
     fn test_config_template_contains_all_sections() {
-        assert!(CONFIG_TEMPLATE.contains("OpenCode2Claude configuration"));
+        assert!(CONFIG_TEMPLATE.contains("OpenCode2API configuration"));
         assert!(CONFIG_TEMPLATE.contains("Web Search API Keys"));
         assert!(CONFIG_TEMPLATE.contains("Proxy Pool"));
     }

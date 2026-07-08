@@ -13,25 +13,25 @@ all in one script. While functional, this approach had several drawbacks:
 
 ## Current Workflow
 
-The `opencode2claude` binary now includes a built-in supervisor:
+The `opencode2api` binary now includes a built-in supervisor:
 
 ### Quick Start
 
 ```bash
 # Start the bridge (background daemon)
-opencode2claude start
+opencode2api start
 
 # Check status
-opencode2claude status
+opencode2api status
 
 # View logs
-opencode2claude logs
+opencode2api logs
 
 # Stop the bridge
-opencode2claude stop
+opencode2api stop
 
 # Manage proxy pool
-opencode2claude proxy status
+opencode2api proxy status
 ```
 
 ### Proxy Container Management
@@ -40,17 +40,17 @@ Proxy containers (Docker WARP SOCKS5 proxies) are **not** managed by `start.sh`.
 Use the `proxy` subcommand instead:
 
 ```bash
-opencode2claude proxy status    # List containers with roles
-opencode2claude proxy restart   # Recreate primary proxies (40001–40003)
-opencode2claude proxy purge     # Remove + recreate primary proxies
-opencode2claude proxy logs      # View proxy container logs
+opencode2api proxy status    # List containers with roles
+opencode2api proxy restart   # Recreate primary proxies (40001–40003)
+opencode2api proxy purge     # Remove + recreate primary proxies
+opencode2api proxy logs      # View proxy container logs
 ```
 
 ### Warm-Standby Protection
 
 Ports 40004–40005 are **Warm-Standby Protected Proxies**. They are:
 
-- Never stopped, restarted, purged, or recreated by `opencode2claude proxy`
+- Never stopped, restarted, purged, or recreated by `opencode2api proxy`
 - Routed normal traffic only when the selected primary is unhealthy/cooldown/dead
 - Still shown in `proxy status` output with a `protected` label
 
@@ -76,20 +76,20 @@ However, `start.sh` is now **legacy** — all new development focuses on the sup
 ### 1. Install the Binary
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nmhuei/opencode2claude/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/nmhuei/opencode2api/main/install.sh | sh
 ```
 
 Or via Cargo:
 
 ```bash
-cargo install opencode2claude
+cargo install opencode2api
 ```
 
 ### 2. Verify
 
 ```bash
-opencode2claude --help
-opencode2claude status
+opencode2api --help
+opencode2api status
 ```
 
 ### 3. Start Using CLI Commands
@@ -97,7 +97,7 @@ opencode2claude status
 Replace `source start.sh` with:
 
 ```bash
-opencode2claude start
+opencode2api start
 export ANTHROPIC_API_KEY="opencode-bridge"
 export ANTHROPIC_BASE_URL="http://127.0.0.1:4000/v1"
 export OPENCODE_MODEL="opencode/deepseek-v4-flash-free"
@@ -107,7 +107,7 @@ Or use the `.env` / TOML config file for persistent settings.
 
 ### 4. Migrate Proxy Workflow
 
-| Before (`start.sh`) | After (`opencode2claude proxy …`) |
+| Before (`start.sh`) | After (`opencode2api proxy …`) |
 |---------------------|-----------------------------------|
 | Implicit Docker setup | Explicit `proxy status` / `proxy restart` |
 | No pool visibility | `proxy status` shows roles + health |
@@ -116,12 +116,12 @@ Or use the `.env` / TOML config file for persistent settings.
 
 ## What Changed
 
-| Aspect | `start.sh` | `opencode2claude` CLI |
+| Aspect | `start.sh` | `opencode2api` CLI |
 |--------|------------|----------------------|
 | Process model | Background with `.bridge.pids` | Supervisor with PID in `.runtime/` |
 | Restart on crash | Manual | Re-spawn on `start` / `restart` |
 | Proxy management | Side effect of `start.sh` | Dedicated `proxy` subcommand |
-| Status | No CLI status | `opencode2claude status` + `proxy status` |
+| Status | No CLI status | `opencode2api status` + `proxy status` |
 | WarmStandby protection | None | Enforced by CLI code (`is_protected_proxy_port`) |
 
 ## Deprecation

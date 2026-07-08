@@ -1,11 +1,14 @@
 //! Application state shared across all handlers.
 
 use crate::config::BridgeConfig;
+use crate::dashboard::DashboardEvent;
 use crate::opencode::search::SearchClient;
 use crate::proxy_pool::{health_monitor, process_restart_queue, ProxyPool};
 use reqwest::Client;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
+use tokio::sync::broadcast;
 use tokio::sync::RwLock;
 use tokio::sync::Semaphore;
 use tracing::info;
@@ -23,6 +26,10 @@ pub struct AppState {
     pub rate_limiter: Option<Arc<Semaphore>>,
     /// Thread-safe SOCKS5/HTTP proxy pool for multi-agent support.
     pub proxy_pool: Arc<RwLock<ProxyPool>>,
+    /// Broadcast channel for dashboard SSE events.
+    pub event_tx: broadcast::Sender<DashboardEvent>,
+    /// Unix timestamp (seconds) when the server started.
+    pub started_at: Arc<AtomicU64>,
 }
 
 impl AppState {
@@ -76,12 +83,25 @@ impl AppState {
             Arc::new(RwLock::new(ProxyPool::default()))
         };
 
+        // Broadcast channel for dashboard SSE (capacity 256)
+        let (event_tx, _) = broadcast::channel(256);
+
+        // Record server start timestamp
+        let started_at = Arc::new(AtomicU64::new(
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        ));
+
         Self {
             config: Arc::new(config),
             search_client,
             http_client,
             rate_limiter,
             proxy_pool,
+            event_tx,
+            started_at,
         }
     }
 }

@@ -1,4 +1,4 @@
-# Verification Ecosystem for opencode2claude CLI Supervisor
+# Verification Ecosystem for opencode2api CLI Supervisor
 
 > Date: 2026-06-29
 > Status: Approved Design
@@ -6,7 +6,7 @@
 
 ## Overview
 
-This document defines the verification ecosystem for implementing the `opencode2claude` CLI supervisor upgrade (8 phases). The ecosystem combines **deterministic verification scripts**, **agent-based review**, and **CI integration** to ensure each phase is implemented completely, correctly, and without scope bleeding.
+This document defines the verification ecosystem for implementing the `opencode2api` CLI supervisor upgrade (8 phases). The ecosystem combines **deterministic verification scripts**, **agent-based review**, and **CI integration** to ensure each phase is implemented completely, correctly, and without scope bleeding.
 
 ## Architecture
 
@@ -78,7 +78,7 @@ GATES=(
   gate_compile_check             # cargo check --locked --all-targets
   gate_unit_tests                # cargo test --locked
   gate_binary_build              # cargo build --locked
-  gate_cli_help                  # opencode2claude --help output
+  gate_cli_help                  # opencode2api --help output
   gate_cli_smoke                 # bridge serve + /health (local/heavy only)
   gate_bridge_integration        # cargo test --test integration -- --ignored (local/heavy only)
 )
@@ -125,7 +125,7 @@ Each phase adds phase-specific gates after the common ones.
 ## Section 3: Directory Structure
 
 ```
-opencode2claude/
+opencode2api/
 ├── src/
 │   ├── main.rs              # (modified) match subcommand
 │   ├── cli.rs               # (new) clap subcommands
@@ -170,14 +170,14 @@ opencode2claude/
 │
 ├── .runtime/                 # (gitignored) generated runtime + verify logs
 │   ├── verify/
-│   └── opencode2claude.pid.json
+│   └── opencode2api.pid.json
 │
 ├── .github/workflows/
 │   └── ci.yml                # (modified) uses verify.sh
 │
 ├── .gitignore                # add .runtime/
-├── start.sh                  # wrapper: exec opencode2claude start
-├── stop.sh                   # wrapper: exec opencode2claude stop
+├── start.sh                  # wrapper: exec opencode2api start
+├── stop.sh                   # wrapper: exec opencode2api stop
 └── docs/
     ├── cli.md
     ├── proxy-pool.md
@@ -275,7 +275,7 @@ GATES=(
 
 gate_cli_help() {
   info "Gate 1.5: CLI help"
-  local bin="$ROOT_DIR/target/debug/opencode2claude"
+  local bin="$ROOT_DIR/target/debug/opencode2api"
   # Test each subcommand has valid --help (more precise than grep)
   "$bin" serve --help  >/dev/null || return 1
   "$bin" start --help  >/dev/null || return 1
@@ -289,7 +289,7 @@ gate_cli_help() {
 gate_cli_smoke() {
   require_profile local heavy || return 0
   info "Gate 1.6: CLI smoke"
-  local bin="$ROOT_DIR/target/debug/opencode2claude"
+  local bin="$ROOT_DIR/target/debug/opencode2api"
   local port; port="$(pick_free_port)"
   local pid; local log_file="$VERIFY_LOG_DIR/phase-1-cli-smoke.log"
   "$bin" serve --port "$port" >"$log_file" 2>&1 & pid=$!

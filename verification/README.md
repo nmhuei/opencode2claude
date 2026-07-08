@@ -1,4 +1,4 @@
-# Verification Ecosystem — opencode2claude CLI Supervisor
+# Verification Ecosystem — opencode2api CLI Supervisor
 
 ## Quick Start
 

@@ -3,36 +3,32 @@
 //! This binary provides a local HTTP server that translates Anthropic API requests
 //! into OpenAI-compatible API calls forwarded to opencode.ai/zen/v1/chat/completions.
 
-use opencode2claude::cli::{
-    self, Command, CompletionArgs, InitArgs, ProxyCommand, ServerCommand, UpdateArgs,
+use opencode2api::cli::{
+    self, Command, CompletionArgs, DashboardCommand, InitArgs, ProxyCommand, ServerCommand,
+    ServerStartArgs, UpdateArgs,
 };
-use opencode2claude::config::{self, BridgeConfig};
-use opencode2claude::docker;
-use opencode2claude::doctor;
-use opencode2claude::handlers;
-use opencode2claude::middleware;
-use opencode2claude::output::{setup_color, OutputFormat};
-use opencode2claude::proxy_pool;
-use opencode2claude::runtime::RuntimePaths;
-use opencode2claude::state::AppState;
-use opencode2claude::supervisor::{Supervisor, SupervisorStatus};
+use opencode2api::config::{self, BridgeConfig};
+use opencode2api::docker;
+use opencode2api::doctor;
+use opencode2api::output::{setup_color, OutputFormat};
+use opencode2api::proxy_pool;
+use opencode2api::runtime::RuntimePaths;
+use opencode2api::server::{run_server, ServeArgsBridge};
+use opencode2api::supervisor::{Supervisor, SupervisorStatus};
 
 use clap::CommandFactory;
 use clap::Parser;
 use clap_complete::generate;
 
-use axum::routing::{get, post};
-use axum::Router;
 use comfy_table::{presets, Cell as CtCell, Color as CtColor, ContentArrangement, Table};
 use indicatif::{ProgressBar, ProgressStyle};
-use std::net::SocketAddr;
-use tower_http::limit::RequestBodyLimitLayer;
-use tracing::info;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use yansi::Paint;
 
 #[tokio::main]
 async fn main() {
+    // Load environment variables from .env file if present
+    let _ = dotenvy::dotenv();
+
     let cli = cli::Cli::parse();
 
     // Initialize color support BEFORE any output
@@ -50,6 +46,9 @@ async fn main() {
     match cli.command {
         // New server subcommand group
         Some(Command::Server(cmd)) => cmd_server(cmd, fmt).await,
+
+        // New dashboard subcommand group
+        Some(Command::Dashboard(cmd)) => cmd_dashboard(cmd, fmt).await,
 
         // New commands
         Some(Command::Doctor) => cmd_doctor(fmt).await,
@@ -116,13 +115,15 @@ async fn cmd_server(cmd: ServerCommand, fmt: OutputFormat) {
     match cmd {
         ServerCommand::Start(args) => {
             if args.foreground {
+                let quiet = fmt == OutputFormat::Quiet || fmt == OutputFormat::Json;
+                maybe_bootstrap_proxies(args.no_proxy, quiet).await;
                 // Run in foreground using bridge args
                 let bridge_args = ServeArgsBridge {
                     port: args.port,
                     host: args.host,
                     config: args.config,
                     model: args.model,
-                    shell_policy: args.shell_policy,
+                    shell_policy: args.shell_policy.map(|p| p.to_string()),
                     tavily_api_key: args.tavily_api_key,
                     exa_api_key: args.exa_api_key,
                     serper_api_key: args.serper_api_key,
@@ -131,18 +132,28 @@ async fn cmd_server(cmd: ServerCommand, fmt: OutputFormat) {
                 };
                 cmd_run_server(bridge_args).await;
             } else {
-                start_daemon(args.port, args.host, fmt).await;
+                start_daemon(args, fmt).await;
             }
         }
         ServerCommand::Stop(args) => {
             let sup = resolve_runtime(args.port, args.host);
             match sup.stop() {
-                Ok(()) => println!("Bridge stopped."),
+                Ok(()) => {
+                    println!("Bridge stopped.");
+                    let quiet = fmt == OutputFormat::Quiet || fmt == OutputFormat::Json;
+                    if let Err(e) = docker::stop_proxy_containers(args.purge).await {
+                        if !quiet {
+                            eprintln!(
+                                "{} Failed to stop proxy containers: {}",
+                                "✗".red().bold(),
+                                e
+                            );
+                        }
+                    }
+                }
                 Err(e) => {
                     eprintln!("{} bridge: stop failed — {}", "✗".red().bold(), e);
-                    eprintln!(
-                        "   Hint: Is the bridge running? Try `opencode2claude server status`"
-                    );
+                    eprintln!("   Hint: Is the bridge running? Try `oc2api server status`");
                     std::process::exit(1);
                 }
             }
@@ -157,7 +168,13 @@ async fn cmd_server(cmd: ServerCommand, fmt: OutputFormat) {
             } else {
                 match sup.status() {
                     Ok(status) => cmd_print_status(status, fmt).await,
-                    Err(e) => eprintln!("{} bridge: status failed — {}.", "✗".red().bold(), e),
+                    Err(e) => {
+                        if fmt == OutputFormat::Quiet {
+                            println!("error");
+                        } else {
+                            eprintln!("{} bridge: status failed — {}.", "✗".red().bold(), e);
+                        }
+                    }
                 }
             }
         }
@@ -179,7 +196,7 @@ async fn cmd_server(cmd: ServerCommand, fmt: OutputFormat) {
                 }
                 Err(e) => {
                     eprintln!("{} restart: {}", "✗".red().bold(), e);
-                    eprintln!("   Hint: Check the PID file or run `opencode2claude server start`");
+                    eprintln!("   Hint: Check the PID file or run `oc2api server start`");
                     std::process::exit(1);
                 }
             }
@@ -217,8 +234,14 @@ async fn cmd_server(cmd: ServerCommand, fmt: OutputFormat) {
     }
 }
 
-async fn start_daemon(port: Option<u16>, host: Option<String>, fmt: OutputFormat) {
-    let sup = resolve_runtime(port, host);
+async fn start_daemon(mut args: cli::ServerStartArgs, fmt: OutputFormat) {
+    let quiet = fmt == OutputFormat::Quiet || fmt == OutputFormat::Json;
+    if !args.no_proxy {
+        maybe_bootstrap_proxies(false, quiet).await;
+        args.no_proxy = true;
+    }
+
+    let sup = resolve_runtime_for_start(&args);
 
     if fmt == OutputFormat::Json {
         // No spinner in JSON mode — output structured data only
@@ -232,7 +255,9 @@ async fn start_daemon(port: Option<u16>, host: Option<String>, fmt: OutputFormat
             }
             Err(e) => {
                 eprintln!("{} start: {}", "✗".red().bold(), e);
-                eprintln!("   Hint: Check if the bridge is already running. Try: `opencode2claude server stop`");
+                eprintln!(
+                    "   Hint: Check if the bridge is already running. Try: `oc2api server stop`"
+                );
                 std::process::exit(1);
             }
         }
@@ -260,8 +285,9 @@ async fn start_daemon(port: Option<u16>, host: Option<String>, fmt: OutputFormat
             maybe_print_proxy_table(fmt).await;
         }
         Err(e) => {
-            spinner.finish_with_message(format!("{} Error: {}", "✗".red().bold(), e));
-            eprintln!("   Hint: Check if the bridge is already running. Try: `opencode2claude server stop`");
+            spinner.finish_and_clear();
+            eprintln!("{} start: {}", "✗".red().bold(), e);
+            eprintln!("   Hint: Check if the bridge is already running. Try: `oc2api server stop`");
             std::process::exit(1);
         }
     }
@@ -277,6 +303,18 @@ async fn cmd_doctor(fmt: OutputFormat) {
                 println!("{s}");
             }
         }
+        OutputFormat::Quiet => {
+            let mut warnings = 0;
+            let mut failures = 0;
+            for c in &report.checks {
+                match c.status {
+                    doctor::CheckStatus::Warn => warnings += 1,
+                    doctor::CheckStatus::Fail => failures += 1,
+                    doctor::CheckStatus::Pass => {}
+                }
+            }
+            println!("warnings={} failures={}", warnings, failures);
+        }
         _ => {
             println!("{}", report);
         }
@@ -291,10 +329,10 @@ fn cmd_completion(args: CompletionArgs) {
 }
 
 async fn cmd_update(args: UpdateArgs) {
-    use opencode2claude::update::{self, fetch_latest_release, find_matching_asset, has_update};
+    use opencode2api::update::{self, fetch_latest_release, find_matching_asset, has_update};
 
     let client = reqwest::Client::builder()
-        .user_agent(concat!("opencode2claude/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("opencode2api/", env!("CARGO_PKG_VERSION")))
         .build()
         .unwrap_or_default();
 
@@ -377,7 +415,7 @@ async fn cmd_update(args: UpdateArgs) {
 }
 
 async fn cmd_init(args: InitArgs) {
-    use opencode2claude::init::generate_config;
+    use opencode2api::init::generate_config;
 
     let path = std::path::Path::new(&args.output);
     match generate_config(path, args.force).await {
@@ -462,6 +500,30 @@ async fn cmd_proxy(cmd: ProxyCommand, fmt: OutputFormat) {
                 if let Ok(s) = serde_json::to_string_pretty(&nodes) {
                     println!("{s}");
                 }
+                return;
+            }
+            if fmt == OutputFormat::Quiet {
+                let mut primary_running = 0;
+                let mut primary_total = 0;
+                let mut standby_running = 0;
+                let mut standby_total = 0;
+                for (port, _, running) in &containers {
+                    if primary_ports.contains(port) {
+                        primary_total += 1;
+                        if *running {
+                            primary_running += 1;
+                        }
+                    } else if ws_ports.contains(port) {
+                        standby_total += 1;
+                        if *running {
+                            standby_running += 1;
+                        }
+                    }
+                }
+                println!(
+                    "primary={}/{} standby={}/{}",
+                    primary_running, primary_total, standby_running, standby_total
+                );
                 return;
             }
 
@@ -744,27 +806,13 @@ async fn cmd_proxy(cmd: ProxyCommand, fmt: OutputFormat) {
 
 // ── Legacy backward-compat commands ──
 
-#[derive(Default)]
-struct ServeArgsBridge {
-    pub port: Option<u16>,
-    pub host: Option<String>,
-    pub config: Option<String>,
-    pub model: Option<String>,
-    pub shell_policy: Option<String>,
-    pub tavily_api_key: Option<String>,
-    pub exa_api_key: Option<String>,
-    pub serper_api_key: Option<String>,
-    pub searxng_url: Option<String>,
-    pub searxng_api_key: Option<String>,
-}
-
 async fn cmd_serve_legacy(args: cli::ServeArgs) {
     let bridge_args = ServeArgsBridge {
         port: args.port,
         host: args.host,
         config: args.config,
         model: args.model,
-        shell_policy: args.shell_policy,
+        shell_policy: args.shell_policy.map(|p| p.to_string()),
         tavily_api_key: args.tavily_api_key,
         exa_api_key: args.exa_api_key,
         serper_api_key: args.serper_api_key,
@@ -775,7 +823,16 @@ async fn cmd_serve_legacy(args: cli::ServeArgs) {
 }
 
 async fn cmd_start_legacy(args: cli::StartArgs, fmt: OutputFormat) {
-    start_daemon(args.port, args.host, fmt).await;
+    start_daemon(
+        cli::ServerStartArgs {
+            foreground: false,
+            port: args.port,
+            host: args.host,
+            ..Default::default()
+        },
+        fmt,
+    )
+    .await;
 }
 
 async fn cmd_status_legacy(args: cli::StatusArgs, fmt: OutputFormat) {
@@ -799,9 +856,7 @@ fn cmd_stop_legacy(args: cli::StopArgs) {
         Ok(()) => println!("Bridge stopped."),
         Err(e) => {
             eprintln!("{} bridge: stop failed — {}", "✗".red().bold(), e);
-            eprintln!(
-                "   Hint: Try `opencode2claude server status` to check if the bridge is running."
-            );
+            eprintln!("   Hint: Try `oc2api server status` to check if the bridge is running.");
             std::process::exit(1);
         }
     }
@@ -825,7 +880,7 @@ async fn cmd_restart_legacy(fmt: OutputFormat) {
         }
         Err(e) => {
             eprintln!("{} restart: {}", "✗".red().bold(), e);
-            eprintln!("   Hint: Check the PID file or run `opencode2claude server start`");
+            eprintln!("   Hint: Check the PID file or run `oc2api server start`");
             std::process::exit(1);
         }
     }
@@ -905,6 +960,13 @@ async fn maybe_print_proxy_table(fmt: OutputFormat) {
 
 /// Bridge status dashboard with uptime and proxy pool table.
 async fn cmd_print_status(status: SupervisorStatus, fmt: OutputFormat) {
+    if fmt == OutputFormat::Quiet {
+        match status {
+            SupervisorStatus::Running { .. } => println!("running"),
+            SupervisorStatus::Stopped => println!("stopped"),
+        }
+        return;
+    }
     println!();
     match status {
         SupervisorStatus::Running {
@@ -1005,7 +1067,7 @@ fn cmd_print_env() {
         println!(" {} = {}", "OPENCODE_MODEL".bold(), m.yellow().bold());
     }
     println!();
-    println!(" {}", "eval \"$(opencode2claude env)\"".green().bold());
+    println!(" {}", "eval \"$(oc2api env)\"".green().bold());
     println!();
 }
 
@@ -1061,7 +1123,7 @@ fn show_logs(fmt: OutputFormat) {
 
     if !log_path.exists() {
         eprintln!(
-            "{} No log file found. Start the daemon first: `opencode2claude server start`",
+            "{} No log file found. Start the daemon first: `oc2api server start`",
             "✗".red().bold()
         );
         std::process::exit(1);
@@ -1111,7 +1173,7 @@ fn show_logs(fmt: OutputFormat) {
         }
         Err(e) => {
             eprintln!("{} log: {}", "✗".red().bold(), e);
-            eprintln!("   Hint: Is the daemon running? Try `opencode2claude server start`");
+            eprintln!("   Hint: Is the daemon running? Try `oc2api server start`");
             std::process::exit(1);
         }
     }
@@ -1120,146 +1182,7 @@ fn show_logs(fmt: OutputFormat) {
 // ── Core server ──
 
 async fn cmd_run_server(args: ServeArgsBridge) {
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
-
-    let overrides = config::CliOverrides {
-        bridge_port: args.port,
-        host: args.host,
-        model: args.model,
-        shell_policy: args.shell_policy,
-        config_path: args.config,
-        tavily_api_key: args.tavily_api_key,
-        exa_api_key: args.exa_api_key,
-        serper_api_key: args.serper_api_key,
-        searxng_url: args.searxng_url,
-        searxng_api_key: args.searxng_api_key,
-    };
-    let config = BridgeConfig::from_env_and_cli(overrides);
-    let addr = SocketAddr::from((config.host, config.bridge_port));
-
-    if let Err(err) = config.validate_security() {
-        eprintln!("{}", err);
-        std::process::exit(1);
-    }
-
-    let max_body = config.max_body_size;
-
-    info!("╔══════════════════════════════════════════════╗");
-    info!(
-        "║     OpenCode2Claude Bridge v{}          ║",
-        env!("CARGO_PKG_VERSION")
-    );
-    info!("╠══════════════════════════════════════════════╣");
-    info!(
-        "║  Bridge:  http://{}{}║",
-        addr,
-        " ".repeat(27usize.saturating_sub(addr.to_string().len()))
-    );
-    info!(
-        "║  Daemon:  port {}                          ║",
-        config.opencode_port
-    );
-    info!(
-        "║  Model:   {}{}║",
-        config.model.as_deref().unwrap_or("(auto)"),
-        " ".repeat(33usize.saturating_sub(config.model.as_deref().unwrap_or("(auto)").len()))
-    );
-    info!(
-        "║  Shell:   {}{}║",
-        config.shell_policy.description(),
-        " ".repeat(33usize.saturating_sub(config.shell_policy.description().len()))
-    );
-    info!(
-        "║  Auth:    {}{}║",
-        if config.auth_enabled() {
-            "enabled"
-        } else {
-            "disabled"
-        },
-        " ".repeat(
-            33usize.saturating_sub(
-                if config.auth_enabled() {
-                    "enabled"
-                } else {
-                    "disabled"
-                }
-                .len()
-            )
-        )
-    );
-    info!("╚══════════════════════════════════════════════╝");
-    info!("To use: export ANTHROPIC_BASE_URL=\"http://{}/v1\"", addr);
-
-    let state = AppState::new(config);
-
-    let app = Router::new()
-        .route("/v1/messages", post(handlers::handle_messages))
-        .route(
-            "/v1/messages/count_tokens",
-            post(handlers::handle_count_tokens),
-        )
-        .route("/v1/models", get(handlers::handle_models))
-        .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            middleware::auth_middleware,
-        ))
-        .route("/health", get(handlers::handle_health))
-        .layer(RequestBodyLimitLayer::new(max_body))
-        .with_state(state);
-
-    let listener = match tokio::net::TcpListener::bind(addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("{} Failed to bind to {}: {}", "✗".red().bold(), addr, e);
-            eprintln!(
-                "   Hint: Is another process using port {}? Try: lsof -i :{}",
-                addr.port(),
-                addr.port()
-            );
-            std::process::exit(1);
-        }
-    };
-
-    info!("Server started successfully. Waiting for requests...");
-
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .unwrap_or_else(|e| {
-            eprintln!("{} Server error: {}", "✗".red().bold(), e);
-            std::process::exit(1);
-        });
-
-    info!("Server shut down gracefully.");
-}
-
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to install Ctrl+C handler");
-    };
-
-    #[cfg(unix)]
-    let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("Failed to install SIGTERM handler")
-            .recv()
-            .await;
-    };
-
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        _ = ctrl_c => { info!("Received SIGINT, shutting down..."); },
-        _ = terminate => { info!("Received SIGTERM, shutting down..."); },
-    }
+    run_server(args).await;
 }
 
 // ── Runtime helpers ──
@@ -1277,4 +1200,209 @@ fn resolve_runtime(port: Option<u16>, host: Option<String>) -> Supervisor {
         .unwrap_or_else(|| config::DEFAULT_HOST.to_string());
     let paths = RuntimePaths::new();
     Supervisor::new(paths, p, h)
+}
+
+fn resolve_runtime_for_start(args: &cli::ServerStartArgs) -> Supervisor {
+    let p = args
+        .port
+        .or_else(|| {
+            std::env::var("BRIDGE_PORT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+        })
+        .unwrap_or(config::DEFAULT_BRIDGE_PORT);
+    let h = args
+        .host
+        .clone()
+        .or_else(|| std::env::var("BRIDGE_HOST").ok())
+        .unwrap_or_else(|| config::DEFAULT_HOST.to_string());
+
+    let mut child_args = vec![
+        "--port".to_string(),
+        p.to_string(),
+        "--host".to_string(),
+        h.clone(),
+    ];
+    push_opt_arg(&mut child_args, "--config", args.config.as_deref());
+    push_opt_arg(&mut child_args, "--model", args.model.as_deref());
+    let shell_policy_str = args.shell_policy.map(|p| p.to_string());
+    push_opt_arg(
+        &mut child_args,
+        "--shell-policy",
+        shell_policy_str.as_deref(),
+    );
+    push_opt_arg(
+        &mut child_args,
+        "--tavily-api-key",
+        args.tavily_api_key.as_deref(),
+    );
+    push_opt_arg(
+        &mut child_args,
+        "--exa-api-key",
+        args.exa_api_key.as_deref(),
+    );
+    push_opt_arg(
+        &mut child_args,
+        "--serper-api-key",
+        args.serper_api_key.as_deref(),
+    );
+    push_opt_arg(
+        &mut child_args,
+        "--searxng-url",
+        args.searxng_url.as_deref(),
+    );
+    push_opt_arg(
+        &mut child_args,
+        "--searxng-api-key",
+        args.searxng_api_key.as_deref(),
+    );
+
+    let paths = RuntimePaths::new();
+    Supervisor::new(paths, p, h).with_child_args(child_args)
+}
+
+fn push_opt_arg(argv: &mut Vec<String>, flag: &str, value: Option<&str>) {
+    if let Some(value) = value.filter(|v| !v.is_empty()) {
+        argv.push(flag.to_string());
+        argv.push(value.to_string());
+    }
+}
+
+async fn maybe_bootstrap_proxies(no_proxy: bool, quiet: bool) {
+    if no_proxy {
+        return;
+    }
+    match docker::bootstrap_proxy_pool(quiet).await {
+        Ok((primary, standby)) => {
+            if !primary.is_empty() {
+                std::env::set_var("BRIDGE_PRIMARY_PROXIES", primary);
+            }
+            if !standby.is_empty() {
+                std::env::set_var("BRIDGE_WARM_STANDBY_PROXIES", standby);
+            }
+        }
+        Err(e) => {
+            if !quiet {
+                eprintln!("{} Failed to bootstrap proxy pool: {}", "✗".red().bold(), e);
+            }
+        }
+    }
+}
+
+async fn cmd_dashboard(cmd: DashboardCommand, fmt: OutputFormat) {
+    // Load .env if present
+    let _ = dotenvy::dotenv();
+
+    let default_port = 4000;
+    let default_host = std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
+    let supervisor = resolve_runtime(Some(default_port), Some(default_host.to_string()));
+
+    let is_running = matches!(supervisor.status(), Ok(SupervisorStatus::Running { .. }));
+
+    match cmd {
+        DashboardCommand::Start => {
+            if !is_running {
+                if fmt == OutputFormat::Human {
+                    println!(
+                        "{} Bridge daemon is not running. Starting bridge daemon...",
+                        "ℹ".blue()
+                    );
+                }
+                start_daemon(ServerStartArgs::default(), fmt).await;
+                // Wait briefly for startup bind
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            } else if fmt == OutputFormat::Human {
+                println!("{} Bridge daemon is already running.", "✓".green());
+            }
+
+            let url = format!("http://127.0.0.1:{}/dashboard/", default_port);
+
+            if fmt == OutputFormat::Human {
+                println!("🚀 Opening dashboard in browser: {}", url.cyan().bold());
+
+                let token = std::env::var("DASHBOARD_ADMIN_TOKEN").unwrap_or_default();
+                if token.is_empty() {
+                    println!(
+                        "{} {} DASHBOARD_ADMIN_TOKEN is unset. The dashboard is in fail-closed mode and disabled!",
+                        "⚠️".yellow().bold(),
+                        "WARNING:".red().bold()
+                    );
+                    println!(
+                        "   To fix: Set DASHBOARD_ADMIN_TOKEN in your environment or .env file."
+                    );
+                } else {
+                    println!("🔑 Admin Token: {}", token.green().bold());
+                }
+
+                // Open browser
+                let opened = if cfg!(target_os = "macos") {
+                    std::process::Command::new("open")
+                        .arg(&url)
+                        .status()
+                        .is_ok()
+                } else if cfg!(target_os = "windows") {
+                    std::process::Command::new("cmd")
+                        .args(["/C", "start", &url])
+                        .status()
+                        .is_ok()
+                } else {
+                    std::process::Command::new("xdg-open")
+                        .arg(&url)
+                        .status()
+                        .is_ok()
+                };
+
+                if !opened {
+                    println!(
+                        "   Failed to open browser automatically. Please open the URL manually."
+                    );
+                }
+            } else if fmt == OutputFormat::Json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "status": "started",
+                        "url": url,
+                        "token": std::env::var("DASHBOARD_ADMIN_TOKEN").unwrap_or_default()
+                    })
+                );
+            }
+        }
+        DashboardCommand::Status => {
+            let url = format!("http://127.0.0.1:{}/dashboard/", default_port);
+            let token = std::env::var("DASHBOARD_ADMIN_TOKEN").unwrap_or_default();
+
+            if fmt == OutputFormat::Human {
+                if is_running {
+                    println!(
+                        "{} Bridge Status: {}",
+                        "✓".green(),
+                        "RUNNING".green().bold()
+                    );
+                    println!("🔗 Dashboard URL: {}", url.cyan().bold());
+                    if token.is_empty() {
+                        println!(
+                            "{} {} DASHBOARD_ADMIN_TOKEN is unset. The dashboard is in fail-closed mode and disabled!",
+                            "⚠️".yellow().bold(),
+                            "WARNING:".red().bold()
+                        );
+                    } else {
+                        println!("🔑 Admin Token:  {}", token.green().bold());
+                    }
+                } else {
+                    println!("{} Bridge Status: {}", "✗".red(), "STOPPED".red().bold());
+                    println!("💡 Hint: Run `oc2api dashboard start` to launch the server and open the UI.");
+                }
+            } else if fmt == OutputFormat::Json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "running": is_running,
+                        "url": url,
+                        "token": token
+                    })
+                );
+            }
+        }
+    }
 }

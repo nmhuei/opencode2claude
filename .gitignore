@@ -1,18 +1,37 @@
+# Rust / Cargo Build Artifacts
+/target/
 
-# Added by cargo
-.bridge.pids
-.claude/
-client_tools.json
-dist/
+# OS-specific Files
 .DS_Store
-*.log
-# Logs
-# OS files
-RELEASE_GUIDE.md
-# Runtime files
+Thumbs.db
+
+# IDE & Editor Configuration
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Runtime & Process State
+.runtime/
 .opencode2claude/
-/target
-# Temporary test files (excluding tests/ directory)
+.bridge.pids
+client_tools.json
+
+# Local Environment Variables
+.env
+.env.local
+
+# Logs
+*.log
+bridge.log
+opencode_serve.log
+opencode_serve_debug.log
+start_setsid.log
+
+# Temporary Test Files (excluding tests/ directory)
 /test
 /test.*
-# Verification runtime artifacts
+/tmp/
+
+# Claude Code Artifacts
+.claude/

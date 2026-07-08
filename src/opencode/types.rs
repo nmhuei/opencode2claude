@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct OpenAiRequest {
     pub model: String,
     pub messages: Vec<OpenAiMessage>,
@@ -20,7 +20,7 @@ pub struct OpenAiRequest {
     pub max_tokens: Option<u32>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct OpenAiMessage {
     pub role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -33,7 +33,7 @@ pub struct OpenAiMessage {
     pub name: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct OpenAiToolCall {
     pub id: String,
     #[serde(rename = "type")]
@@ -41,20 +41,20 @@ pub struct OpenAiToolCall {
     pub function: OpenAiFunctionCall,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct OpenAiFunctionCall {
     pub name: String,
     pub arguments: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct OpenAiTool {
     #[serde(rename = "type")]
     pub tool_type: String,
     pub function: OpenAiFunction,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct OpenAiFunction {
     pub name: String,
     pub description: String,

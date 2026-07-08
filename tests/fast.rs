@@ -16,16 +16,31 @@ use tower_http::limit::RequestBodyLimitLayer;
 
 /// Build the same router structure used in production, with test config.
 fn build_test_router() -> Router {
-    let config = opencode2claude::config::BridgeConfig::default();
-    let state = opencode2claude::state::AppState::new(config);
+    let config = opencode2api::config::BridgeConfig::default();
+    let state = opencode2api::state::AppState::new(config);
 
     Router::new()
         .route(
             "/v1/messages",
-            post(opencode2claude::handlers::handle_messages),
+            post(opencode2api::handlers::handle_messages),
         )
-        .route("/v1/models", get(opencode2claude::handlers::handle_models))
-        .route("/health", get(opencode2claude::handlers::handle_health))
+        .route("/v1/models", get(opencode2api::handlers::handle_models))
+        .route("/health", get(opencode2api::handlers::handle_health))
+        .route("/", get(opencode2api::dashboard::serve_landing))
+        .route("/dashboard", get(opencode2api::dashboard::serve_webui))
+        .route("/dashboard/", get(opencode2api::dashboard::serve_webui))
+        .route(
+            "/dashboard/*path",
+            get(opencode2api::dashboard::serve_webui),
+        )
+        .route(
+            "/api/dashboard/status",
+            get(opencode2api::dashboard::handler_rest_status),
+        )
+        .route(
+            "/api/dashboard/diagnostics",
+            get(opencode2api::dashboard::handler_dashboard_diagnostics),
+        )
         .layer(RequestBodyLimitLayer::new(1_048_576))
         .with_state(state)
 }
@@ -69,16 +84,20 @@ async fn test_health_endpoint_fast() {
 
     let body: Value = resp.json().await.unwrap();
     assert_eq!(
-        body["status"], "healthy",
-        "Health body should report healthy"
+        body["status"], "ok",
+        "Health body should report minimal status ok"
     );
     assert!(
-        body["daemon"]["port"].as_u64().is_some(),
-        "daemon port should exist"
+        body["daemon"].is_null(),
+        "daemon metadata should be stripped from anonymous health check"
     );
     assert!(
-        body["config"]["shell_policy"].as_str().is_some(),
-        "config shell_policy should exist"
+        body["config"].is_null(),
+        "config metadata should be stripped from anonymous health check"
+    );
+    assert!(
+        body["proxy_pool"].is_null(),
+        "proxy_pool metadata should be stripped from anonymous health check"
     );
 }
 
@@ -169,4 +188,111 @@ async fn test_empty_messages_returns_error_fast() {
         "Empty messages should return error, got status {}",
         status
     );
+}
+
+static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[tokio::test]
+async fn test_dashboard_auth_fast() {
+    let _lock = ENV_MUTEX.lock().unwrap();
+
+    // 1. When DASHBOARD_ADMIN_TOKEN is unset/empty
+    std::env::remove_var("DASHBOARD_ADMIN_TOKEN");
+    let base = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Request with 123456 token should be rejected (401)
+    let resp1 = client
+        .get(format!("{}/api/dashboard/status", base))
+        .header("X-Dashboard-Token", "123456")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp1.status(), 401);
+
+    // Request without token should be rejected (401)
+    let resp2 = client
+        .get(format!("{}/api/dashboard/status", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp2.status(), 401);
+
+    // 2. When DASHBOARD_ADMIN_TOKEN is set explicitly
+    std::env::set_var("DASHBOARD_ADMIN_TOKEN", "super-secret-admin-token-12345");
+    let base2 = spawn_test_server().await;
+
+    // Request with correct token should be accepted (200)
+    let resp3 = client
+        .get(format!("{}/api/dashboard/status", base2))
+        .header("X-Dashboard-Token", "super-secret-admin-token-12345")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp3.status(), 200);
+
+    // Request with 123456 token should still be rejected (401)
+    let resp4 = client
+        .get(format!("{}/api/dashboard/status", base2))
+        .header("X-Dashboard-Token", "123456")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp4.status(), 401);
+
+    std::env::remove_var("DASHBOARD_ADMIN_TOKEN");
+}
+
+#[tokio::test]
+async fn test_authenticated_diagnostics_fast() {
+    let _lock = ENV_MUTEX.lock().unwrap();
+    std::env::set_var("DASHBOARD_ADMIN_TOKEN", "super-secret-admin-token-12345");
+    let base = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Anonymous diagnostics request should be rejected (401)
+    let resp1 = client
+        .get(format!("{}/api/dashboard/diagnostics", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp1.status(), 401);
+
+    // Correctly authenticated request should succeed (200) and return rich operational details
+    let resp2 = client
+        .get(format!("{}/api/dashboard/diagnostics", base))
+        .header("X-Dashboard-Token", "super-secret-admin-token-12345")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp2.status(), 200);
+
+    let body: Value = resp2.json().await.unwrap();
+    assert_eq!(body["status"], "healthy");
+    assert!(body["daemon"]["port"].as_u64().is_some());
+    assert!(body["config"]["shell_policy"].as_str().is_some());
+    assert!(body["proxy_pool"].is_object());
+
+    std::env::remove_var("DASHBOARD_ADMIN_TOKEN");
+}
+
+#[tokio::test]
+async fn test_security_headers_fast() {
+    let base = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    for path in &["", "dashboard", "dashboard/"] {
+        let resp = client
+            .get(format!("{}/{}", base, path))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let headers = resp.headers();
+        assert!(headers.contains_key("content-security-policy"));
+        assert_eq!(headers.get("x-frame-options").unwrap(), "DENY");
+        assert_eq!(headers.get("x-content-type-options").unwrap(), "nosniff");
+        assert_eq!(headers.get("referrer-policy").unwrap(), "no-referrer");
+    }
 }

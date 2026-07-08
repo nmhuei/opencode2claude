@@ -1,10 +1,10 @@
 # SOC Dashboard — Design Proposal
 
-## OpenCode2Claude Cyber/SOC Operations Console
+## OpenCode2API Cyber/SOC Operations Console
 
 ## 1. Executive Summary
 
-Đề xuất này mô tả thiết kế tổng thể cho **SOC Dashboard** dành cho `OpenCode2Claude`, định hướng theo phong cách **Cyber/SOC Command Center**: nền tối, dữ liệu realtime, cảnh báo theo mức độ nghiêm trọng, bản đồ luồng hệ thống, log timeline và trạng thái proxy pool.
+Đề xuất này mô tả thiết kế tổng thể cho **SOC Dashboard** dành cho `OpenCode2API`, định hướng theo phong cách **Cyber/SOC Command Center**: nền tối, dữ liệu realtime, cảnh báo theo mức độ nghiêm trọng, bản đồ luồng hệ thống, log timeline và trạng thái proxy pool.
 
 Mục tiêu của dashboard không phải chỉ là "làm giao diện đẹp", mà là tạo ra một **operations console** giúp người vận hành nhìn nhanh được:
 
@@ -20,7 +20,7 @@ Repo hiện đã có nền tảng phù hợp cho dashboard như `/health`, struc
 
 ### 2.1. Primary Goal
 
-Thiết kế một **SOC-style dashboard** để giám sát realtime toàn bộ hoạt động của `OpenCode2Claude` dưới góc nhìn vận hành, bảo mật và độ ổn định hệ thống.
+Thiết kế một **SOC-style dashboard** để giám sát realtime toàn bộ hoạt động của `OpenCode2API` dưới góc nhìn vận hành, bảo mật và độ ổn định hệ thống.
 
 ### 2.2. Secondary Goals
 
@@ -35,7 +35,7 @@ Thiết kế một **SOC-style dashboard** để giám sát realtime toàn bộ 
 
 **System Operator / Developer**
 
-Người chạy `opencode2claude` local hoặc server, cần theo dõi bridge, proxy pool, request và log.
+Người chạy `opencode2api` local hoặc server, cần theo dõi bridge, proxy pool, request và log.
 
 ### 3.2. Secondary Users
 
@@ -87,7 +87,7 @@ Dashboard chia thành 6 nhóm nội dung chính:
 
 Hiển thị tổng quan:
 
-- Product name: `OpenCode2Claude SOC Console`
+- Product name: `OpenCode2API SOC Console`
 - Bridge status: Online / Offline / Degraded
 - Current host/port
 - Runtime mode
@@ -112,7 +112,7 @@ Các KPI card quan trọng:
 
 Mô phỏng luồng hệ thống:
 
-`OpenCode CLI → OpenCode2Claude Bridge → Token Estimator → Casing Resolver → WARP Proxy Pool → Upstream LLM API`
+`OpenCode CLI → OpenCode2API Bridge → Token Estimator → Casing Resolver → WARP Proxy Pool → Upstream LLM API`
 
 Repo hiện có server route chính như `/v1/messages`, `/v1/messages/count_tokens`, `/v1/models` và `/health`, phù hợp để đưa vào dashboard monitoring.
 
@@ -159,7 +159,7 @@ Dashboard desktop nên dùng layout 12-column grid.
 
 ```text
 ┌─────────────────────────────────────────────────────────────┐
-│ Header: OpenCode2Claude SOC Console                         │
+│ Header: OpenCode2API SOC Console                         │
 │ Bridge Online | Model | Auth | Last Updated                 │
 └─────────────────────────────────────────────────────────────┘
 
@@ -681,7 +681,7 @@ Nên triển khai dashboard theo hướng:
 
 **Dark Cyber Command Center + Observability Dashboard + SOC Alert Panel**
 
-Không nên biến dashboard thành một trang admin thông thường. Điểm mạnh của `OpenCode2Claude` nằm ở bridge, proxy, token estimation, observability và runtime operations, nên dashboard cần ưu tiên:
+Không nên biến dashboard thành một trang admin thông thường. Điểm mạnh của `OpenCode2API` nằm ở bridge, proxy, token estimation, observability và runtime operations, nên dashboard cần ưu tiên:
 
 - realtime health
 - request flow

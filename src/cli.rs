@@ -12,13 +12,13 @@
 use crate::output::ColorChoice;
 use clap::{Args, Parser, Subcommand};
 
-/// Command-line interface for the OpenCode2Claude bridge.
+/// Command-line interface for the OpenCode2API bridge.
 #[derive(Parser)]
 #[command(
-    name = "opencode2claude",
+    name = "opencode2api",
     version,
     about = "A blazing-fast API bridge connecting Claude Code to any LLM",
-    long_about = "OpenCode2Claude is a local HTTP proxy that translates Anthropic Messages API \n\
+    long_about = "OpenCode2API is a local HTTP proxy that translates Anthropic Messages API \n\
                   requests into OpenAI-compatible API calls. Use Claude Code with any LLM \n\
                   provider — DeepSeek, GPT-4o, Gemini, Llama, and more.",
     styles = clap_styles()
@@ -63,6 +63,10 @@ pub enum Command {
     /// Manage WARP proxy pools
     #[command(subcommand)]
     Proxy(ProxyCommand),
+
+    /// Manage the admin dashboard (start, status)
+    #[command(subcommand)]
+    Dashboard(DashboardCommand),
 
     /// Display environment information for Claude Code
     Env,
@@ -149,8 +153,8 @@ pub struct ServerStartArgs {
     pub model: Option<String>,
 
     /// Override shell policy (disabled, allowlist, unrestricted)
-    #[arg(long = "shell-policy")]
-    pub shell_policy: Option<String>,
+    #[arg(long = "shell-policy", value_enum)]
+    pub shell_policy: Option<CliShellPolicy>,
 
     /// Tavily search API key override
     #[arg(long)]
@@ -168,9 +172,13 @@ pub struct ServerStartArgs {
     #[arg(long)]
     pub searxng_url: Option<String>,
 
-    /// SearXNG API key override
+    /// Override SearXNG API key override
     #[arg(long)]
     pub searxng_api_key: Option<String>,
+
+    /// Skip Docker SOCKS5 proxy pool bootstrap
+    #[arg(long = "no-proxy")]
+    pub no_proxy: bool,
 }
 
 /// Arguments for `server stop`.
@@ -183,6 +191,10 @@ pub struct ServerStopArgs {
     /// Override bind address
     #[arg(long)]
     pub host: Option<String>,
+
+    /// Remove proxy containers entirely instead of pausing them
+    #[arg(long = "purge")]
+    pub purge: bool,
 }
 
 /// Arguments for `server status`.
@@ -226,7 +238,7 @@ pub struct ServeArgs {
     #[arg(long)]
     pub host: Option<String>,
 
-    /// Path to custom TOML config file (default: opencode2claude.toml)
+    /// Path to custom TOML config file (default: opencode2api.toml)
     #[arg(short = 'c', long)]
     pub config: Option<String>,
 
@@ -235,8 +247,8 @@ pub struct ServeArgs {
     pub model: Option<String>,
 
     /// Override shell policy (disabled, allowlist, unrestricted)
-    #[arg(long = "shell-policy")]
-    pub shell_policy: Option<String>,
+    #[arg(long = "shell-policy", value_enum)]
+    pub shell_policy: Option<CliShellPolicy>,
 
     /// Tavily search API key override
     #[arg(long)]
@@ -299,11 +311,40 @@ pub struct UpdateArgs {
 /// Arguments for `init`.
 #[derive(Args, Debug)]
 pub struct InitArgs {
-    /// Output path for the config file (default: ./opencode2claude.toml)
-    #[arg(short, long, default_value = "opencode2claude.toml")]
+    /// Output path for the config file (default: ./opencode2api.toml)
+    #[arg(short, long, default_value = "opencode2api.toml")]
     pub output: String,
 
     /// Overwrite existing file without prompting
     #[arg(short, long)]
     pub force: bool,
+}
+
+/// Shell policy override values accepted on command line.
+#[derive(Debug, Clone, Copy, clap::ValueEnum, PartialEq)]
+pub enum CliShellPolicy {
+    Disabled,
+    Allowlist,
+    Unrestricted,
+}
+
+impl std::fmt::Display for CliShellPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            CliShellPolicy::Disabled => "disabled",
+            CliShellPolicy::Allowlist => "allowlist",
+            CliShellPolicy::Unrestricted => "unrestricted",
+        };
+        write!(f, "{value}")
+    }
+}
+
+/// Dashboard management subcommands.
+#[derive(Subcommand, Debug, Clone)]
+pub enum DashboardCommand {
+    /// Start the server (if not running) and open the dashboard in the browser
+    Start,
+
+    /// Check dashboard service status and active auth token details
+    Status,
 }

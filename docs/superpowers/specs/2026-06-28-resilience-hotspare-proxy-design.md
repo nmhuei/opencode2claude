@@ -1,4 +1,4 @@
-# OpenCode2Claude — Resilience & Hot-Spare Proxy Pool Design
+# OpenCode2API — Resilience & Hot-Spare Proxy Pool Design
 
 > Date: 2026-06-28  
 > Status: Draft  

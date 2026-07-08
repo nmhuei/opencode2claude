@@ -7,15 +7,15 @@
 use std::path::PathBuf;
 
 /// Default runtime directory name (under `$HOME`).
-pub const RUNTIME_DIR_NAME: &str = ".opencode2claude";
+pub const RUNTIME_DIR_NAME: &str = ".opencode2api";
 
 /// PID file name.
-pub const PID_FILE_NAME: &str = "opencode2claude.pid.json";
+pub const PID_FILE_NAME: &str = "opencode2api.pid.json";
 
 /// Log file name.
-pub const LOG_FILE_NAME: &str = "opencode2claude.log";
+pub const LOG_FILE_NAME: &str = "opencode2api.log";
 
-/// Manages paths for runtime artifacts under `~/.opencode2claude/`.
+/// Manages paths for runtime artifacts under `~/.opencode2api/`.
 pub struct RuntimePaths {
     root: PathBuf,
 }
@@ -27,7 +27,7 @@ impl Default for RuntimePaths {
 }
 
 impl RuntimePaths {
-    /// Create a new RuntimePaths stored under `~/.opencode2claude/`.
+    /// Create a new RuntimePaths stored under `~/.opencode2api/`.
     ///
     /// Falls back to the cwd if `HOME` is not set (rare).
     pub fn new() -> Self {
@@ -35,7 +35,7 @@ impl RuntimePaths {
         Self { root }
     }
 
-    /// Resolve the default runtime root: `$HOME/.opencode2claude`.
+    /// Resolve the default runtime root: `$HOME/.opencode2api`.
     ///
     /// Checks the `RUNTIME_DIR` environment variable first to support test suite isolation.
     pub fn default_root() -> PathBuf {
@@ -48,22 +48,22 @@ impl RuntimePaths {
         }
     }
 
-    /// Path to the `~/.opencode2claude/` directory.
+    /// Path to the `~/.opencode2api/` directory.
     pub fn runtime_dir(&self) -> PathBuf {
         self.root.clone()
     }
 
-    /// Path to the PID file: `~/.opencode2claude/opencode2claude.pid.json`.
+    /// Path to the PID file: `~/.opencode2api/opencode2api.pid.json`.
     pub fn pid_file(&self) -> PathBuf {
         self.runtime_dir().join(PID_FILE_NAME)
     }
 
-    /// Path to the bridge log file: `~/.opencode2claude/opencode2claude.log`.
+    /// Path to the bridge log file: `~/.opencode2api/opencode2api.log`.
     pub fn bridge_log(&self) -> PathBuf {
         self.runtime_dir().join(LOG_FILE_NAME)
     }
 
-    /// Ensure `~/.opencode2claude/` directory and all subdirectories exist.
+    /// Ensure `~/.opencode2api/` directory and all subdirectories exist.
     pub fn ensure_dirs(&self) -> std::io::Result<()> {
         std::fs::create_dir_all(self.runtime_dir())?;
         Ok(())

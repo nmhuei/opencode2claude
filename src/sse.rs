@@ -67,6 +67,42 @@ impl SseEventBuilder {
             .unwrap_or_else(|_| Event::default().data("{}"))
     }
 
+    /// Generate a `content_block_delta` event with a specific block index.
+    pub fn text_delta_at(&self, index: usize, text: &str) -> Event {
+        Event::default()
+            .event("content_block_delta")
+            .json_data(json!({
+                "type": "content_block_delta",
+                "index": index,
+                "delta": {"type": "text_delta", "text": text}
+            }))
+            .unwrap_or_else(|_| Event::default().data("{}"))
+    }
+
+    /// Generate a `content_block_delta` event for tool call input JSON.
+    pub fn input_json_delta(&self, index: usize, partial_json: &str) -> Event {
+        Event::default()
+            .event("content_block_delta")
+            .json_data(json!({
+                "type": "content_block_delta",
+                "index": index,
+                "delta": {"type": "input_json_delta", "partial_json": partial_json}
+            }))
+            .unwrap_or_else(|_| Event::default().data("{}"))
+    }
+
+    /// Generate a `content_block_delta` event for thinking/reasoning content.
+    pub fn thinking_delta(&self, index: usize, text: &str) -> Event {
+        Event::default()
+            .event("content_block_delta")
+            .json_data(json!({
+                "type": "content_block_delta",
+                "index": index,
+                "delta": {"type": "thinking_delta", "thinking": text}
+            }))
+            .unwrap_or_else(|_| Event::default().data("{}"))
+    }
+
     /// Generate the `content_block_stop` event — marks the end of a text block.
     pub fn content_block_stop(&self) -> Event {
         Event::default()
@@ -78,6 +114,41 @@ impl SseEventBuilder {
             .unwrap_or_else(|_| Event::default().data("{}"))
     }
 
+    /// Generate a `content_block_start` event for a specific block type and index.
+    pub fn content_block_start_at(
+        &self,
+        index: usize,
+        block_type: &str,
+        id: Option<&str>,
+        name: Option<&str>,
+    ) -> Event {
+        let mut content_block = json!({
+            "type": block_type,
+        });
+        if block_type == "text" {
+            content_block["text"] = json!("");
+        }
+        if block_type == "tool_use" || block_type == "thinking" {
+            if let Some(id_val) = id {
+                content_block["id"] = json!(id_val);
+            }
+            if let Some(name_val) = name {
+                content_block["name"] = json!(name_val);
+            }
+            if block_type == "tool_use" {
+                content_block["input"] = json!({});
+            }
+        }
+        Event::default()
+            .event("content_block_start")
+            .json_data(json!({
+                "type": "content_block_start",
+                "index": index,
+                "content_block": content_block,
+            }))
+            .unwrap_or_else(|_| Event::default().data("{}"))
+    }
+
     /// Generate the `message_delta` event — sent with stop reason at end of message.
     pub fn message_delta(&self, output_tokens: u32) -> Event {
         Event::default()
@@ -85,6 +156,18 @@ impl SseEventBuilder {
             .json_data(json!({
                 "type": "message_delta",
                 "delta": {"stop_reason": "end_turn", "stop_sequence": null},
+                "usage": {"output_tokens": output_tokens}
+            }))
+            .unwrap_or_else(|_| Event::default().data("{}"))
+    }
+
+    /// Generate a `message_delta` event with a configurable stop reason.
+    pub fn message_delta_with_stop(&self, stop_reason: &str, output_tokens: u32) -> Event {
+        Event::default()
+            .event("message_delta")
+            .json_data(json!({
+                "type": "message_delta",
+                "delta": {"stop_reason": stop_reason, "stop_sequence": null},
                 "usage": {"output_tokens": output_tokens}
             }))
             .unwrap_or_else(|_| Event::default().data("{}"))
@@ -118,6 +201,17 @@ impl SseEventBuilder {
             "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens}
         })
     }
+}
+
+/// Create a `content_block_stop` event for a specific block index.
+pub fn emit_block_stop(index: usize) -> Event {
+    Event::default()
+        .event("content_block_stop")
+        .json_data(json!({
+            "type": "content_block_stop",
+            "index": index
+        }))
+        .unwrap_or_else(|_| Event::default().data("{}"))
 }
 
 #[cfg(test)]
