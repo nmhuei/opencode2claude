@@ -87,6 +87,14 @@ fn build_test_router(config: opencode2api::config::BridgeConfig) -> Router {
             post(opencode2api::dashboard::handler_login),
         )
         .route(
+            "/api/dashboard/logout",
+            post(opencode2api::dashboard::handler_logout),
+        )
+        .route(
+            "/api/dashboard/auth/status",
+            get(opencode2api::dashboard::handler_auth_status),
+        )
+        .route(
             "/api/dashboard/diagnostics",
             get(opencode2api::dashboard::handler_dashboard_diagnostics),
         )
@@ -449,7 +457,99 @@ async fn test_tc018_events_correct_token() {
     env::remove_var("DASHBOARD_ADMIN_TOKEN");
 }
 
-// ──────────────────────────────────────────────────────────
+#[tokio::test]
+async fn test_auth_status_no_token() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
+    let base = spawn_test_server_default().await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{}/api/dashboard/auth/status", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["admin_token_configured"], true);
+    assert_eq!(body["authenticated"], false);
+    env::remove_var("DASHBOARD_ADMIN_TOKEN");
+}
+
+#[tokio::test]
+async fn test_auth_status_authenticated() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
+    let base = spawn_test_server_default().await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{}/api/dashboard/auth/status", base))
+        .header("X-Dashboard-Token", "test-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["admin_token_configured"], true);
+    assert_eq!(body["authenticated"], true);
+    env::remove_var("DASHBOARD_ADMIN_TOKEN");
+}
+
+#[tokio::test]
+async fn test_auth_status_no_admin_token_configured() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    env::remove_var("DASHBOARD_ADMIN_TOKEN");
+    let base = spawn_test_server_default().await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{}/api/dashboard/auth/status", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["admin_token_configured"], false);
+    assert_eq!(body["authenticated"], false);
+}
+
+#[tokio::test]
+async fn test_logout_clears_cookie() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
+    let base = spawn_test_server_default().await;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let resp = client
+        .post(format!("{}/api/dashboard/logout", base))
+        .header("X-Dashboard-Token", "test-token")
+        .send()
+        .await
+        .unwrap();
+    /* Check that the Set-Cookie header clears the cookie */
+    let set_cookie = resp.headers().get("set-cookie").unwrap().to_str().unwrap().to_string();
+    assert!(set_cookie.contains("bridge_admin_session="));
+    assert!(set_cookie.contains("Max-Age=0"));
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "ok");
+    env::remove_var("DASHBOARD_ADMIN_TOKEN");
+}
+
+#[tokio::test]
+async fn test_logout_no_auth() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let base = spawn_test_server_default().await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/api/dashboard/logout", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "ok");
+}
+
 // Group 3: Config Display/Save (TC-019 - TC-028)
 // ──────────────────────────────────────────────────────────
 
@@ -545,7 +645,8 @@ async fn test_tc024_save_config_correct_token_valid_toml() {
     let resp = client
         .post(format!("{}/api/dashboard/config/save", base))
         .header("X-Dashboard-Token", "test-token")
-        .body("model = 'opencode/deepseek-v4-flash-free'")
+        .header("Content-Type", "application/json")
+        .body(r#"{"content": "model = 'opencode/deepseek-v4-flash-free'"}"#)
         .send()
         .await
         .unwrap();
@@ -565,11 +666,13 @@ async fn test_tc025_save_config_correct_token_invalid_toml() {
     let resp = client
         .post(format!("{}/api/dashboard/config/save", base))
         .header("X-Dashboard-Token", "test-token")
-        .body("invalid = {")
+        .header("Content-Type", "application/json")
+        .body(r#"{"content": "invalid = {"}"#)
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200);
+    // Backend returns 400 for invalid TOML (changed from old 200 behavior)
+    assert_eq!(resp.status(), 400);
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["status"], "error");
     assert!(body["message"].as_str().unwrap().contains("Invalid TOML"));
@@ -586,13 +689,16 @@ async fn test_tc026_save_config_correct_token_empty_body() {
     let resp = client
         .post(format!("{}/api/dashboard/config/save", base))
         .header("X-Dashboard-Token", "test-token")
-        .body("")
+        .header("Content-Type", "application/json")
+        .body(r#"{}"#)
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200);
+    // Backend returns 400 when 'content' field is missing
+    assert_eq!(resp.status(), 400);
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["status"], "ok");
+    assert_eq!(body["status"], "error");
+    assert!(body["message"].as_str().unwrap().contains("Missing 'content' field"));
     env::remove_var("DASHBOARD_ADMIN_TOKEN");
 }
 
@@ -631,7 +737,8 @@ async fn test_tc028_config_reload_verification() {
     let save_resp = client
         .post(format!("{}/api/dashboard/config/save", base))
         .header("X-Dashboard-Token", "test-token")
-        .body("model = 'opencode/deepseek-v4-flash-free'")
+        .header("Content-Type", "application/json")
+        .body(r#"{"content": "model = 'opencode/deepseek-v4-flash-free'"}"#)
         .send()
         .await
         .unwrap();

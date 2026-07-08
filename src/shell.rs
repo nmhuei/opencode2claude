@@ -67,6 +67,27 @@ impl ShellPolicy {
             ShellPolicy::Unrestricted => "unrestricted".to_string(),
         }
     }
+
+    /// Short name for the policy kind (used in JSON responses).
+    pub fn kind(&self) -> &'static str {
+        match self {
+            ShellPolicy::Disabled => "disabled",
+            ShellPolicy::AllowList(_) => "allowlist",
+            ShellPolicy::Unrestricted => "unrestricted",
+        }
+    }
+
+    /// Get the allowlist as a comma-separated string, if applicable.
+    pub fn allowlist_string(&self) -> Option<String> {
+        match self {
+            ShellPolicy::AllowList(set) => {
+                let mut items: Vec<String> = set.iter().cloned().collect();
+                items.sort();
+                Some(items.join(", "))
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Extract the base command name from a shell command string.

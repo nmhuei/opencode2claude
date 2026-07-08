@@ -8,7 +8,8 @@
 //! | GET | `/api/dashboard/status` | Bridge status + uptime + proxy tier stats |
 //! | GET | `/api/dashboard/proxies` | Detailed proxy node list |
 //! | GET | `/api/dashboard/config` | Active config (secrets masked) |
-//! | POST | `/api/dashboard/config/save` | Atomic TOML config write |
+//! | GET | `/api/dashboard/config/raw` | Raw config file content |
+//! | POST | `/api/dashboard/config/save` | Merge-atomic TOML config write |
 //! | GET | `/api/dashboard/events` | Server-Sent Events stream |
 //! | POST | `/api/dashboard/proxy/:port/restart` | Restart a managed proxy container |
 
@@ -22,7 +23,7 @@ use axum::Json;
 use futures_util::Stream;
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::convert::Infallible;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime};
 use tokio::sync::broadcast;
@@ -36,6 +37,8 @@ const SSE_KEEPALIVE_SECS: u64 = 15;
 const HEARTBEAT_INTERVAL_SECS: u64 = 30;
 /// Default TOML config file path.
 const DEFAULT_CONFIG_PATH: &str = "opencode2api.toml";
+/// Session cookie name for dashboard admin authentication.
+const SESSION_COOKIE: &str = "bridge_admin_session";
 
 // ── Dashboard Events ──
 
@@ -142,7 +145,7 @@ pub async fn serve_webui(headers: HeaderMap, uri: axum::http::Uri) -> Result<Res
         let admin_token = std::env::var("DASHBOARD_ADMIN_TOKEN").unwrap_or_default();
         let authenticated = if admin_token.is_empty() {
             false
-        } else if let Some(cookie_token) = extract_cookie(&headers, "bridge_admin_session") {
+        } else if let Some(cookie_token) = extract_cookie(&headers, SESSION_COOKIE) {
             cookie_token == admin_token
         } else {
             false
@@ -185,7 +188,7 @@ pub async fn serve_landing(headers: HeaderMap) -> Result<Response, StatusCode> {
     // If they already have a valid cookie, redirect them straight to the dashboard
     let admin_token = std::env::var("DASHBOARD_ADMIN_TOKEN").unwrap_or_default();
     if !admin_token.is_empty() {
-        if let Some(cookie_token) = extract_cookie(&headers, "bridge_admin_session") {
+        if let Some(cookie_token) = extract_cookie(&headers, SESSION_COOKIE) {
             if cookie_token == admin_token {
                 return Ok(Redirect::temporary("/dashboard/").into_response());
             }
@@ -238,7 +241,7 @@ pub async fn handler_rest_status(
         "bridge_port": state.config.bridge_port,
         "auth_enabled": state.config.auth_enabled(),
         "admin_token_configured": true,
-        "shell_policy": state.config.shell_policy.description(),
+        "shell_policy": state.config.shell_policy.kind(),
         "primary_proxies": {
             "total": snapshot.primary.total,
             "healthy": snapshot.primary.healthy,
@@ -290,56 +293,101 @@ pub async fn handler_proxies(
     Ok(Json(nodes))
 }
 
-/// GET /api/dashboard/config — active configuration with secrets masked.
+/// GET /api/dashboard/config — active configuration with configured booleans instead of masked secrets.
 pub async fn handler_config(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, (StatusCode, Json<Value>)> {
     check_admin_token(&headers, None)?;
     let cfg = &state.config;
+    let primary_proxies: Vec<String> = cfg.primary_proxies.clone().unwrap_or_default();
+    let warm_standby_proxies: Vec<String> = cfg.warm_standby_proxies.clone().unwrap_or_default();
     Ok(Json(json!({
         "host": cfg.host.to_string(),
         "bridge_port": cfg.bridge_port,
         "model": cfg.model,
-        "shell_policy": cfg.shell_policy.description(),
-        "auth_tokens": mask_auth_tokens(&cfg.auth_tokens),
-        "max_body_size": cfg.max_body_size,
-        "stream_buffer_size": cfg.stream_buffer_size,
-        "channel_capacity": cfg.channel_capacity,
-        "tavily_api_key": cfg.tavily_api_key.as_deref().map(mask_secret),
-        "exa_api_key": cfg.exa_api_key.as_deref().map(mask_secret),
-        "serper_api_key": cfg.serper_api_key.as_deref().map(mask_secret),
+        "shell_policy": cfg.shell_policy.kind(),
+        "shell_policy_label": cfg.shell_policy.description(),
+        "tavily_api_key_configured": cfg.tavily_api_key.is_some(),
+        "exa_api_key_configured": cfg.exa_api_key.is_some(),
+        "serper_api_key_configured": cfg.serper_api_key.is_some(),
+        "auth_tokens_configured": cfg.auth_tokens.as_ref().map_or(false, |t| !t.is_empty()),
         "searxng_url": cfg.searxng_url,
-        "primary_proxies": cfg.primary_proxies.as_ref().map(|p| p.join(", ")),
-        "warm_standby_proxies": cfg.warm_standby_proxies.as_ref().map(|p| p.join(", ")),
+        "searxng_api_key_configured": cfg.searxng_api_key.is_some(),
+        "shell_allowlist": cfg.shell_policy.allowlist_string(),
+        "max_search_loops": cfg.max_search_loops,
+        "primary_proxies": primary_proxies,
+        "warm_standby_proxies": warm_standby_proxies,
     })))
 }
 
-/// POST /api/dashboard/config/save — atomic TOML config write.
+/// GET /api/dashboard/config/raw — return the raw config file content (including secrets).
+pub async fn handler_config_raw(
+    State(_state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    check_admin_token(&headers, None)?;
+    let config_path =
+        std::env::var("BRIDGE_CONFIG_PATH").unwrap_or_else(|_| DEFAULT_CONFIG_PATH.to_string());
+    let raw = std::fs::read_to_string(&config_path).unwrap_or_default();
+    Ok(Json(json!({ "raw": raw })))
+}
+
+/// POST /api/dashboard/config/save — atomic TOML config write with merge.
+///
+/// Accepts JSON body: `{ "content": "<TOML string>" }`.
+/// Merges incoming fields into the existing config file so that fields not
+/// present in the incoming content are preserved (e.g. API keys not visible
+/// in the form are not lost).
 pub async fn handler_config_save(
     State(state): State<AppState>,
     headers: HeaderMap,
-    body: axum::body::Bytes,
-) -> Result<impl axum::response::IntoResponse, (StatusCode, Json<Value>)> {
+    body: Option<axum::Json<Value>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     check_admin_token(&headers, None)?;
 
-    let content = String::from_utf8_lossy(&body);
+    // Extract TOML content from JSON body
+    let incoming_toml = match body {
+        Some(Json(ref payload)) => match payload.get("content").and_then(|v| v.as_str()) {
+            Some(c) => c.to_string(),
+            None => {
+                return Err((StatusCode::BAD_REQUEST, Json(json!({
+                    "status": "error",
+                    "success": false,
+                    "message": "Missing 'content' field in JSON body",
+                }))));
+            }
+        },
+        None => {
+            return Err((StatusCode::BAD_REQUEST, Json(json!({
+                "status": "error",
+                "success": false,
+                "message": "Request body is required",
+            }))));
+        }
+    };
 
     // Validate that the body parses as valid TOML
-    if let Err(e) = content.parse::<toml::Table>() {
-        return Ok(Json(json!({
+    if let Err(e) = incoming_toml.parse::<toml::Table>() {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({
             "status": "error",
+            "success": false,
             "message": format!("Invalid TOML: {}", e),
-        })));
+        }))));
     }
 
-    // Atomic write: write to .tmp, fsync, rename
+    // Read existing config file content
     let config_path =
         std::env::var("BRIDGE_CONFIG_PATH").unwrap_or_else(|_| DEFAULT_CONFIG_PATH.to_string());
+    let existing_content = std::fs::read_to_string(&config_path).unwrap_or_default();
 
+    // Merge: incoming overrides existing, existing fills gaps
+    let merged = merge_toml_configs(&existing_content, &incoming_toml);
+
+    // Atomic write: write to .tmp, fsync, rename
     let tmp_path = format!("{}.tmp", config_path);
 
-    match std::fs::write(&tmp_path, content.as_bytes()) {
+    match std::fs::write(&tmp_path, merged.as_bytes()) {
         Ok(()) => {
             // Open file for fsync
             if let Ok(file) = std::fs::File::open(&tmp_path) {
@@ -352,13 +400,14 @@ pub async fn handler_config_save(
                     let _ = state.event_tx.send(DashboardEvent::ConfigSaved {
                         timestamp: ts.clone(),
                     });
-                    Ok(Json(json!({ "status": "ok", "path": config_path })))
+                    Ok(Json(json!({ "status": "ok", "path": config_path, "success": true })))
                 }
                 Err(e) => {
                     error!("Dashboard: failed to rename config file: {}", e);
                     let _ = std::fs::remove_file(&tmp_path);
                     Ok(Json(json!({
                         "status": "error",
+                        "success": false,
                         "message": format!("Failed to write config: {}", e),
                     })))
                 }
@@ -368,10 +417,77 @@ pub async fn handler_config_save(
             error!("Dashboard: failed to write config file: {}", e);
             Ok(Json(json!({
                 "status": "error",
+                "success": false,
                 "message": format!("Failed to write config: {}", e),
             })))
         }
     }
+}
+
+/// Merge a new TOML content into existing content.
+/// Fields present in the new content override existing ones.
+/// Fields NOT present in the new content are preserved from the existing content.
+/// This ensures that secrets (API keys, auth tokens) not included in the
+/// incoming content are not lost during saves from the dashboard UI.
+fn merge_toml_configs(existing: &str, incoming: &str) -> String {
+    // Parse lines from both into key -> value maps
+    fn parse_toml_lines(text: &str) -> BTreeMap<String, String> {
+        text.lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                // Match key = "value" or key = value (skip comments and blank lines)
+                if line.starts_with('#') || line.is_empty() {
+                    return None;
+                }
+                if let Some(eq_pos) = line.find('=') {
+                    let key = line[..eq_pos].trim().to_string();
+                    let val = line[eq_pos + 1..].trim().to_string();
+                    Some((key, val))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    let _existing_map = parse_toml_lines(existing);
+    let incoming_map = parse_toml_lines(incoming);
+
+    // Build result: incoming overrides, existing fills gaps
+    let mut result = String::new();
+    let mut seen = HashSet::new();
+
+    // First pass: existing lines, but override values from incoming
+    for line in existing.lines() {
+        let trimmed = line.trim();
+        if let Some(eq_pos) = trimmed.find('=') {
+            let key = trimmed[..eq_pos].trim().to_string();
+            if incoming_map.contains_key(&key) {
+                // Override with incoming value
+                if let Some(new_val) = incoming_map.get(&key) {
+                    result.push_str(&format!("{} = {}\n", key, new_val));
+                }
+                seen.insert(key);
+            } else {
+                // Preserve existing line unchanged (including original formatting/whitespace)
+                result.push_str(line);
+                result.push('\n');
+            }
+        } else {
+            // Non-key-value lines (comments, blank lines, section headers) are preserved
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+
+    // Second pass: add incoming keys not already seen (new keys from incoming)
+    for (key, val) in &incoming_map {
+        if !seen.contains(key) {
+            result.push_str(&format!("{} = {}\n", key, val));
+        }
+    }
+
+    result
 }
 
 /// POST /api/dashboard/proxy/:port/restart — restart a managed proxy container.
@@ -507,39 +623,54 @@ pub fn unix_timestamp() -> String {
         .to_string()
 }
 
-/// Mask API key: show first 5 chars + "..." + last 4 chars.
-fn mask_secret(s: &str) -> String {
-    if s.len() <= 10 {
-        return "***".to_string();
-    }
-    format!("{}...{}", &s[..5], &s[s.len() - 4..])
-}
-
-/// Mask auth tokens: return "***" if any tokens are configured.
-fn mask_auth_tokens(tokens: &Option<Vec<String>>) -> Value {
-    match tokens {
-        Some(t) if !t.is_empty() => json!("***"),
-        Some(_) => json!([]),
-        None => json!(null),
-    }
-}
-
-/// POST /api/dashboard/login — check X-Dashboard-Token header against DASHBOARD_ADMIN_TOKEN.
+/// POST /api/dashboard/login — check token against DASHBOARD_ADMIN_TOKEN.
+/// Accepts token in JSON body (`{"token": "..."}`) or `X-Dashboard-Token` header.
 /// Sets an HttpOnly session cookie on success so subsequent requests are authenticated.
-pub async fn handler_login(headers: HeaderMap) -> Result<Response, (StatusCode, Json<Value>)> {
-    check_admin_token(&headers, None)?;
+pub async fn handler_login(
+    headers: HeaderMap,
+    body: Option<Json<Value>>,
+) -> Result<Response, (StatusCode, Json<Value>)> {
     let admin_token = std::env::var("DASHBOARD_ADMIN_TOKEN").unwrap_or_default();
 
-    let mut res = Json(json!({ "status": "ok", "success": true })).into_response();
-    res.headers_mut().insert(
-        header::SET_COOKIE,
-        HeaderValue::from_str(&format!(
-            "bridge_admin_session={}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400",
-            admin_token
-        ))
-        .unwrap(),
-    );
-    Ok(res)
+    // Extract token: JSON body first, then header/cookie fallback
+    let token = body
+        .and_then(|b| b.get("token").and_then(|v| v.as_str().map(|s| s.to_string())))
+        .or_else(|| {
+            // Fallback: try X-Dashboard-Token header
+            headers
+                .get("X-Dashboard-Token")
+                .and_then(|v| v.to_str().ok().map(|s| s.to_string()))
+        });
+
+    match token {
+        Some(t) if !t.is_empty() && t == admin_token => {
+            // Success — set session cookie
+            let mut res = Json(json!({ "status": "ok", "success": true })).into_response();
+            res.headers_mut().insert(
+                header::SET_COOKIE,
+                HeaderValue::from_str(&format!(
+                    "{}={}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400",
+                    SESSION_COOKIE, admin_token
+                ))
+                .unwrap(),
+            );
+            Ok(res)
+        }
+        Some(_) => Err((
+                StatusCode::UNAUTHORIZED,
+                Json(json!({
+                    "status": "error",
+                    "message": "Invalid password",
+                })),
+            )),
+        None => Err((
+                StatusCode::UNAUTHORIZED,
+                Json(json!({
+                    "status": "error",
+                    "message": "Please enter password to login",
+                })),
+            )),
+    }
 }
 
 /// POST /api/dashboard/logout — clear the session cookie.
@@ -547,9 +678,10 @@ pub async fn handler_logout() -> Response {
     let mut res = Json(json!({ "status": "ok", "success": true })).into_response();
     res.headers_mut().insert(
         header::SET_COOKIE,
-        HeaderValue::from_static(
-            "bridge_admin_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0",
-        ),
+        HeaderValue::from_str(&format!(
+            "{}={}; Path=/; HttpOnly; SameSite=Strict; Max-Age=0",
+            SESSION_COOKIE, ""
+        )).unwrap(),
     );
     res
 }
@@ -574,12 +706,36 @@ pub async fn handler_dashboard_diagnostics(
         },
         "config": {
             "model": state.config.model.as_deref().unwrap_or("(default)"),
-            "shell_policy": state.config.shell_policy.description(),
+            "shell_policy": state.config.shell_policy.kind(),
             "auth_enabled": state.config.auth_enabled(),
             "bridge_port": state.config.bridge_port
         },
         "proxy_pool": proxy_pool_stats
     })))
+}
+
+/// GET /api/dashboard/auth/status — public endpoint that reports whether admin token is
+/// configured and whether the current request is authenticated. No auth required.
+pub async fn handler_auth_status(headers: HeaderMap) -> Json<Value> {
+    let admin_token = std::env::var("DASHBOARD_ADMIN_TOKEN").unwrap_or_default();
+    let configured = !admin_token.is_empty();
+
+    let authenticated = if configured {
+        let cookie_token = extract_cookie(&headers, SESSION_COOKIE)
+            .or_else(|| {
+                headers.get("X-Dashboard-Token")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_string())
+            });
+        cookie_token.as_deref() == Some(&admin_token)
+    } else {
+        false
+    };
+
+    Json(json!({
+        "admin_token_configured": configured,
+        "authenticated": authenticated,
+    }))
 }
 
 /// Check DASHBOARD_ADMIN_TOKEN env var against the X-Dashboard-Token header.
@@ -602,7 +758,7 @@ fn check_admin_token(
         }
     };
 
-    let cookie_token = extract_cookie(headers, "bridge_admin_session");
+    let cookie_token = extract_cookie(headers, SESSION_COOKIE);
     let request_token = headers
         .get("X-Dashboard-Token")
         .and_then(|v| v.to_str().ok())

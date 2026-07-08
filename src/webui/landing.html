@@ -268,15 +268,17 @@
       var resp = await fetch('/api/dashboard/login', {
         method: 'POST',
         headers: {
-          'X-Dashboard-Token': password,
+          'Content-Type': 'application/json',
           'Accept': 'application/json'
-        }
+        },
+        body: JSON.stringify({ token: password })
       });
       
-      var data = await resp.json();
-      if (data.success) {
+      if (resp.ok) {
+        // Login success — backend sets HttpOnly session cookie automatically
         window.location.href = '/dashboard/';
       } else {
+        var data = await resp.json();
         errorMsg.textContent = data.message || 'Invalid password';
         errorMsg.style.display = 'block';
       }

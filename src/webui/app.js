@@ -35,6 +35,11 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+function escapeToml(str) {
+  if (str == null) return '';
+  return String(str).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
+}
+
 function formatUptime(seconds) {
   if (seconds == null || seconds < 0) return '--';
   var d = Math.floor(seconds / 86400);
@@ -166,6 +171,18 @@ function checkAuthStatus(statusData) {
   connectSSE();
 }
 
+async function checkDashboardSession() {
+  try {
+    var resp = await fetch('/api/dashboard/auth/status', {
+      credentials: 'same-origin'
+    });
+    var data = await resp.json();
+    return data;
+  } catch(e) {
+    return { admin_token_configured: false, authenticated: false };
+  }
+}
+
 function showLoginScreen() {
   window.location.href = '/';
 }
@@ -188,14 +205,14 @@ async function handleLoginSubmit(e) {
   submitBtn.querySelector('span').textContent = 'Verifying...';
   
   try {
-    // Login via X-Dashboard-Token header; server sets HttpOnly cookie on success
+    // Login via JSON body; server sets HttpOnly session cookie on success
     var resp = await fetch('/api/dashboard/login', {
       method: 'POST',
-      headers: { 'X-Dashboard-Token': token, 'Accept': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({ token: token }),
       credentials: 'same-origin',
     });
-    var data = await resp.json();
-    if (data.success) {
+    if (resp.ok) {
       state.authenticated = true;
       showToast('Logged in successfully', 'success');
       hideLoginScreen();
@@ -241,9 +258,6 @@ async function loadStatus() {
       testerModelInput.value = data.model;
     }
     
-    // Initial verification of login screen requirement
-    checkAuthStatus(data);
-    
     return data;
   } catch (err) {
     console.error('loadStatus failed:', err);
@@ -281,17 +295,21 @@ async function loadConfig() {
   }
 }
 
-async function saveConfig(tomlContent) {
+async function saveConfig(content) {
   try {
-    var data = await apiFetch('/api/dashboard/config/save', {
+    var resp = await fetch('/api/dashboard/config/save', {
       method: 'POST',
-      body: tomlContent,
-      retries: 1,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: content }),
+      credentials: 'same-origin',
     });
-    if (data.status === 'error') {
-      showToast(data.message || 'Save failed', 'error');
+    var data = await resp.json();
+    if (!resp.ok) {
+      showToast(data.message || 'Save failed (' + resp.status + ')', 'error');
+    } else if (data.success) {
+      showToast('Configuration saved and merged', 'success');
     } else {
-      showToast('Configuration saved', 'success');
+      showToast(data.message || 'Save failed', 'error');
     }
     return data;
   } catch (err) {
@@ -539,6 +557,56 @@ function updateRestartButtons() {
 /* ==========================================================
    10. Render — Configuration Form (ds2api style)
    ========================================================== */
+
+// Normalize a proxy value to an array regardless of whether
+// the backend sent it as an array or a joined string.
+function toArray(v) {
+  if (Array.isArray(v)) return v;
+  if (typeof v === 'string') return v.split(',').map(function(x) { return x.trim(); }).filter(Boolean);
+  return [];
+}
+
+function configToToml(config) {
+  var lines = [
+    'host = "' + escapeToml(config.host || '127.0.0.1') + '"',
+    'port = ' + Number(config.bridge_port || 4000),
+    'model = "' + escapeToml(config.model || '') + '"',
+    'shell_policy = "' + (config.shell_policy || 'disabled') + '"',
+  ];
+  if (config.shell_allowlist) {
+    lines.push('shell_allowlist = "' + escapeToml(config.shell_allowlist) + '"');
+  }
+  if (config.searxng_url) {
+    lines.push('searxng_url = "' + escapeToml(config.searxng_url) + '"');
+  }
+  // Handle proxies as arrays (backend now returns them as arrays)
+  var primaryProxies = toArray(config.primary_proxies);
+  primaryProxies.forEach(function(p) {
+    lines.push('primary_proxies = "' + escapeToml(p) + '"');
+  });
+  var warmStandbyProxies = toArray(config.warm_standby_proxies);
+  warmStandbyProxies.forEach(function(p) {
+    lines.push('warm_standby_proxies = "' + escapeToml(p) + '"');
+  });
+  lines.push('');
+  lines.push('# Secrets (API keys, auth tokens) are omitted for security.');
+  lines.push('# Re-enter them in the settings form to update.');
+  return lines.join('\n');
+}
+
+async function loadRawConfig() {
+  try {
+    var resp = await fetch('/api/dashboard/config/raw', {
+      credentials: 'same-origin'
+    });
+    var data = await resp.json();
+    return data.raw || '';
+  } catch(e) {
+    console.error('loadRawConfig failed:', e);
+    return '';
+  }
+}
+
 function renderConfig(config) {
   config = config || state.config;
   if (!config) { loadConfig(); return; }
@@ -587,17 +655,17 @@ function renderConfig(config) {
     html += '  <div class="form-row">';
     html += '    <div class="form-group flex-1">';
     html += '      <label for="cfgTavily">Tavily API Key</label>';
-    html += '      <input type="password" id="cfgTavily" placeholder="' + (config.tavily_api_key ? '•••••••• (Saved)' : 'Enter Tavily API key') + '">';
+    html += '      <input type="password" id="cfgTavily" placeholder="' + (config.tavily_api_key_configured ? '•••••••• (Saved)' : 'Enter Tavily API key') + '">';
     html += '    </div>';
     html += '    <div class="form-group flex-1">';
     html += '      <label for="cfgExa">Exa API Key</label>';
-    html += '      <input type="password" id="cfgExa" placeholder="' + (config.exa_api_key ? '•••••••• (Saved)' : 'Enter Exa API key') + '">';
+    html += '      <input type="password" id="cfgExa" placeholder="' + (config.exa_api_key_configured ? '•••••••• (Saved)' : 'Enter Exa API key') + '">';
     html += '    </div>';
     html += '  </div>';
     html += '  <div class="form-row">';
     html += '    <div class="form-group flex-1">';
     html += '      <label for="cfgSerper">Serper.dev API Key</label>';
-    html += '      <input type="password" id="cfgSerper" placeholder="' + (config.serper_api_key ? '•••••••• (Saved)' : 'Enter Serper API key') + '">';
+    html += '      <input type="password" id="cfgSerper" placeholder="' + (config.serper_api_key_configured ? '•••••••• (Saved)' : 'Enter Serper API key') + '">';
     html += '    </div>';
     html += '    <div class="form-group flex-1">';
     html += '      <label for="cfgSearxng">SearXNG Instance URL</label>';
@@ -611,7 +679,7 @@ function renderConfig(config) {
     html += '<div class="config-section-title" style="margin-bottom: 4px;">Security & Token Policies</div>';
     html += '  <div class="form-group">';
     html += '    <label for="cfgAuthTokens">Authorized Bearer Tokens</label>';
-    html += '    <input type="password" id="cfgAuthTokens" placeholder="' + (config.auth_tokens ? '•••••••• (Tokens configured)' : 'Comma-separated authorized keys (e.g. sk-1, sk-2)') + '">';
+    html += '    <input type="password" id="cfgAuthTokens" placeholder="' + (config.auth_tokens_configured ? '•••••••• (Tokens configured)' : 'Comma-separated authorized keys (e.g. sk-1, sk-2)') + '">';
     html += '    <p class="form-help">Require clients to authenticate via Bearer token to use bridge. Leave blank to disable auth.</p>';
     html += '  </div>';
     html += '</div>';
@@ -637,15 +705,17 @@ function renderConfig(config) {
 
   } else {
     // Edit mode (Raw TOML editor)
-    var toml = configToToml(config);
-    el.innerHTML =
-      '<div class="config-editor"><textarea id="configTextarea">' + escapeHtml(toml) + '</textarea></div>' +
-      '<div class="config-bar">' +
-      '<button class="btn btn-primary" id="saveRawConfigBtn">Save Config</button>' +
-      '<button class="btn btn-secondary" id="cancelEditBtn">Cancel</button>' +
-      '</div>';
-
-    if (actions) actions.innerHTML = '';
+    // Load raw config from backend to get full file content (including secrets)
+    loadRawConfig().then(function(raw) {
+      el.innerHTML =
+        '<div class="config-editor"><textarea id="configTextarea">' + escapeHtml(raw || configToToml(config)) + '</textarea></div>' +
+        '<div class="config-bar">' +
+        '<button class="btn btn-primary" id="saveRawConfigBtn">Save Config</button>' +
+        '<button class="btn btn-secondary" id="cancelEditBtn">Cancel</button>' +
+        '</div>';
+      if (actions) actions.innerHTML = '';
+    });
+    return;
   }
 }
 
@@ -674,28 +744,11 @@ async function handleBasicConfigSave(e) {
   
   if (searxng) tomlLines.push('searxng_url = "' + searxng + '"');
   
-  // Handlers for keys: use existing if input is placeholder/empty
-  var cfg = state.config || {};
-  
-  var activeTavily = tavily ? tavily : (cfg.tavily_api_key || '');
-  if (activeTavily) tomlLines.push('tavily_api_key = "' + activeTavily + '"');
-
-  var activeExa = exa ? exa : (cfg.exa_api_key || '');
-  if (activeExa) tomlLines.push('exa_api_key = "' + activeExa + '"');
-
-  var activeSerper = serper ? serper : (cfg.serper_api_key || '');
-  if (activeSerper) tomlLines.push('serper_api_key = "' + activeSerper + '"');
-
-  var activeAuth = authTokens ? authTokens : '';
-  if (activeAuth) {
-    tomlLines.push('auth_tokens = "' + activeAuth + '"');
-  } else if (cfg.auth_tokens && !authTokens) {
-    // If not modified, write existing masked/original
-    // Note: configuration endpoints store it as list. So we join if list.
-    if (Array.isArray(cfg.auth_tokens)) {
-      tomlLines.push('auth_tokens = "' + cfg.auth_tokens.join(',') + '"');
-    }
-  }
+  // Secrets: only include if user explicitly typed a new value
+  if (tavily) tomlLines.push('tavily_api_key = "' + escapeToml(tavily) + '"');
+  if (exa) tomlLines.push('exa_api_key = "' + escapeToml(exa) + '"');
+  if (serper) tomlLines.push('serper_api_key = "' + escapeToml(serper) + '"');
+  if (authTokens) tomlLines.push('auth_tokens = "' + authTokens + '"');
 
   var fullToml = tomlLines.join('\n');
   
@@ -779,6 +832,7 @@ async function handleTesterSubmit(e) {
   var headers = {
     'Content-Type': 'application/json',
   };
+
   if (state.bridgeToken) {
     headers['Authorization'] = 'Bearer ' + state.bridgeToken;
   }
@@ -928,7 +982,7 @@ function connectSSE() {
   var url = '/api/dashboard/events';
 
   setConnection('connecting');
-  var es = new EventSource(url);
+  var es = new EventSource(url, { withCredentials: true });
   state.sse = es;
 
   es.onopen = function() {
@@ -1152,14 +1206,19 @@ function bindEvents() {
     }
 
     if (e.target.id === 'saveRawConfigBtn') {
-      var textarea = document.getElementById('configTextarea');
-      if (textarea) {
-        state.configEditMode = false;
-        saveConfig(textarea.value).then(function() {
-          loadConfig();
-          loadStatus();
-        });
-      }
+      (async function() {
+        var textarea = document.getElementById('configTextarea');
+        if (textarea) {
+          state.configEditMode = false;
+          try {
+            await saveConfig(textarea.value);
+            await loadConfig();
+            await loadStatus();
+          } catch (err) {
+            // Toast already shown by saveConfig
+          }
+        }
+      })();
       return;
     }
   });
@@ -1171,14 +1230,21 @@ function bindEvents() {
 function init() {
   bindEvents();
 
-  // Load status first to discover if login screen is required
-  loadStatus().then(function() {
-    // If not blocked by login overlay, download other views
-    var overlay = document.getElementById('loginOverlay');
-    if (overlay.classList.contains('hidden')) {
-      loadProxies();
-      loadConfig();
+  // Verify session cookie first, then load data
+  checkDashboardSession().then(function(auth) {
+    if (!auth.authenticated) {
+      window.location.href = '/';
+      return;
     }
+    hideLoginScreen();
+    if (auth.admin_token_configured) {
+      document.getElementById('logoutBtn').style.display = 'flex';
+    }
+    state.authenticated = auth.authenticated;
+    loadStatus();
+    loadProxies();
+    loadConfig();
+    connectSSE();
   });
 
   // Auto-refresh stats/proxies every 30s
