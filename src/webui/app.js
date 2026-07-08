@@ -144,6 +144,26 @@ async function apiFetch(url, options) {
   throw lastErr;
 }
 
+function getCookie(name) {
+  var value = "; " + document.cookie;
+  var parts = value.split("; " + name + "=");
+  if (parts.length === 2) return parts.pop().split(";").shift();
+}
+
+function setCookie(name, value, days) {
+  var expires = "";
+  if (days) {
+    var date = new Date();
+    date.setTime(date.getTime() + (days * 24 * 60 * 60 * 1000));
+    expires = "; expires=" + date.toUTCString();
+  }
+  document.cookie = name + "=" + (value || "")  + expires + "; path=/; SameSite=Strict";
+}
+
+function deleteCookie(name) {
+  document.cookie = name + '=; Max-Age=-99999999; path=/; SameSite=Strict';
+}
+
 /* ==========================================================
    5. Authentication & Login
    ========================================================== */
@@ -158,7 +178,7 @@ function checkAuthStatus(statusData) {
   }
   
   // Check if we have token
-  var savedToken = localStorage.getItem('bridge_admin_token') || sessionStorage.getItem('bridge_admin_token');
+  var savedToken = getCookie('bridge_admin_token');
   if (savedToken) {
     state.token = savedToken;
     verifySavedToken();
@@ -186,12 +206,7 @@ async function verifySavedToken() {
 }
 
 function showLoginScreen() {
-  var overlay = document.getElementById('loginOverlay');
-  var layout = document.getElementById('appLayout');
-  overlay.classList.remove('hidden');
-  layout.classList.add('blur');
-  var logoutBtn = document.getElementById('logoutBtn');
-  if (logoutBtn) logoutBtn.style.display = 'none';
+  window.location.href = '/';
 }
 
 function hideLoginScreen() {
@@ -216,7 +231,7 @@ async function handleLoginSubmit(e) {
     state.token = token;
     var data = await apiFetch('/api/dashboard/login', { method: 'POST', retries: 1 });
     if (data.success) {
-      localStorage.setItem('bridge_admin_token', token);
+      setCookie('bridge_admin_token', token, 365);
       showToast('Logged in successfully', 'success');
       hideLoginScreen();
       document.getElementById('logoutBtn').style.display = 'flex';
@@ -238,6 +253,7 @@ async function handleLoginSubmit(e) {
 }
 
 function handleLogout() {
+  deleteCookie('bridge_admin_token');
   localStorage.removeItem('bridge_admin_token');
   sessionStorage.removeItem('bridge_admin_token');
   state.token = null;
