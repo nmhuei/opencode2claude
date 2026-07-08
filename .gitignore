@@ -1,37 +1,67 @@
-# Rust / Cargo Build Artifacts
+# ── Rust / Cargo Build Artifacts ──────────────────────
 /target/
+Cargo.lock
 
-# OS-specific Files
+# ── OS Files ────────────────────────────────────────────
 .DS_Store
 Thumbs.db
+Desktop.ini
 
-# IDE & Editor Configuration
+# ── IDE & Editor ──────────────────────────────────────
 .idea/
 .vscode/
 *.swp
 *.swo
+*.swn
+*.swo
+*~
 
-# Runtime & Process State
+# ── Runtime & Process State ─────────────────────────
 .runtime/
 .opencode2claude/
 .bridge.pids
 client_tools.json
 
-# Local Environment Variables
+# ── Environment Files ───────────────────────────────────
 .env
-.env.local
+.env.*
+!.env.example
 
-# Logs
+# ── Logs ────────────────────────────────────────────────
 *.log
 bridge.log
 opencode_serve.log
 opencode_serve_debug.log
 start_setsid.log
 
-# Temporary Test Files (excluding tests/ directory)
+# ── Temporary / Test Artifacts ────────────────────────
+/tmp/
 /test
 /test.*
-/tmp/
+/target.tmp
 
-# Claude Code Artifacts
+# ── Documentation Build ───────────────────────────────
+/target/doc/
+
+# ── OS-Level Dotfiles (security-related) ─────────────────
+.bridge.pids
+*.pid
+
+# ── Claude Code ───────────────────────────────────────
 .claude/
+
+# ── Legacy wrapper scripts (proxy pool moved to CLI) ────
+start.sh
+stop.sh
+
+# ── Security audit artifacts (optional, not needed for build) ──
+SECURITY.md
+qa_test_specification.md
+.github/dependabot.yml
+.github/workflows/codeql.yml
+.github/workflows/security-audit.yml
+
+# ── Config backups / temp ────────────────────────────
+*.tmp
+*.bak
+*.orig
