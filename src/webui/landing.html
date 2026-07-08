@@ -222,15 +222,22 @@
     Local API compatibility proxy translation bridge active on port 4000.
   </p>
   
-  <div class="portal-actions">
-    <a href="/dashboard/" class="btn btn-primary">
+  <form id="loginForm" onsubmit="handleLogin(event)" style="display: flex; flex-direction: column; gap: 12px; width: 100%;">
+    <div style="display: flex; flex-direction: column; gap: 6px; width: 100%;">
+      <input type="password" id="password" placeholder="Enter admin password..." required style="width: 100%; padding: 11px 16px; border-radius: var(--radius-md); border: 1px solid var(--border); background: rgba(255,255,255,0.02); color: var(--text-primary); font-family: var(--font-sans); font-size: 13px; outline: none; transition: border-color 0.2s;" onfocus="this.style.borderColor='var(--accent-indigo)'" onblur="this.style.borderColor='var(--border)'">
+      <div id="errorMsg" style="color: #ef4444; font-size: 12px; margin-top: 4px; display: none;"></div>
+    </div>
+    <button type="submit" id="submitBtn" class="btn btn-primary">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
         <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/>
         <polyline points="10 17 15 12 10 7"/>
         <line x1="15" y1="12" x2="3" y2="12"/>
       </svg>
-      <span>Login to Dashboard</span>
-    </a>
+      <span>Sign In to Dashboard</span>
+    </button>
+  </form>
+  
+  <div class="portal-actions" style="margin-top: -12px;">
     <a href="/health" target="_blank" class="btn btn-secondary">
       <span>Verify Health</span>
     </a>
@@ -240,6 +247,84 @@
     API Bridge Portal
   </div>
 </div>
+
+<script>
+  function getCookie(name) {
+    var value = "; " + document.cookie;
+    var parts = value.split("; " + name + "=");
+    if (parts.length === 2) return parts.pop().split(";").shift();
+  }
+
+  function setCookie(name, value, days) {
+    var expires = "";
+    if (days) {
+      var date = new Date();
+      date.setTime(date.getTime() + (days * 24 * 60 * 60 * 1000));
+      expires = "; expires=" + date.toUTCString();
+    }
+    document.cookie = name + "=" + (value || "")  + expires + "; path=/; SameSite=Strict";
+  }
+
+  // If already logged in, redirect to dashboard automatically
+  var currentToken = getCookie('bridge_admin_token');
+  if (currentToken) {
+    fetch('/api/dashboard/login', {
+      method: 'POST',
+      headers: {
+        'X-Dashboard-Token': currentToken,
+        'Accept': 'application/json'
+      }
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.success) {
+        window.location.href = '/dashboard/';
+      }
+    })
+    .catch(function() {});
+  }
+
+  async function handleLogin(e) {
+    e.preventDefault();
+    var passwordInput = document.getElementById('password');
+    var errorMsg = document.getElementById('errorMsg');
+    var submitBtn = document.getElementById('submitBtn');
+    var password = passwordInput.value.trim();
+    
+    if (!password) return;
+    
+    errorMsg.style.display = 'none';
+    submitBtn.disabled = true;
+    var btnText = submitBtn.querySelector('span');
+    var originalText = btnText.textContent;
+    btnText.textContent = 'Verifying...';
+
+    try {
+      var resp = await fetch('/api/dashboard/login', {
+        method: 'POST',
+        headers: {
+          'X-Dashboard-Token': password,
+          'Accept': 'application/json'
+        }
+      });
+      
+      var data = await resp.json();
+      if (data.success) {
+        setCookie('bridge_admin_token', password, 365);
+        window.location.href = '/dashboard/';
+      } else {
+        errorMsg.textContent = data.message || 'Invalid password';
+        errorMsg.style.display = 'block';
+      }
+    } catch (err) {
+      errorMsg.textContent = 'Connection error: ' + err.message;
+      errorMsg.style.display = 'block';
+    } finally {
+      submitBtn.disabled = false;
+      btnText.textContent = originalText;
+    }
+  }
+</script>
 
 </body>
 </html>

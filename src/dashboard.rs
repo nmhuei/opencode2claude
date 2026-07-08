@@ -103,12 +103,50 @@ fn add_security_headers(headers: &mut HeaderMap) {
     );
 }
 
+use axum::response::{Redirect, Response};
+
+/// Extract cookie value from request headers
+fn extract_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|cookie_str| {
+            cookie_str.split(';').find_map(|cookie| {
+                let mut parts = cookie.splitn(2, '=');
+                let k = parts.next()?.trim();
+                let v = parts.next()?.trim();
+                if k == name {
+                    Some(v.to_string())
+                } else {
+                    None
+                }
+            })
+        })
+}
+
 /// Serve the web UI SPA — serves embedded assets with fallback to `index.html`.
-pub async fn serve_webui(uri: axum::http::Uri) -> Result<(HeaderMap, Vec<u8>), StatusCode> {
+pub async fn serve_webui(headers: HeaderMap, uri: axum::http::Uri) -> Result<Response, StatusCode> {
     let path = uri.path();
     let path = path.strip_prefix("/dashboard").unwrap_or(path);
     let path = path.trim_start_matches('/');
     let path = if path.is_empty() { "index.html" } else { path };
+
+    // If requesting the SPA main page (or falling back to it), enforce auth via cookie
+    if path == "index.html" {
+        let admin_token = std::env::var("DASHBOARD_ADMIN_TOKEN").unwrap_or_default();
+        let authenticated = if admin_token.is_empty() {
+            false
+        } else if let Some(cookie_token) = extract_cookie(&headers, "bridge_admin_token") {
+            cookie_token == admin_token
+        } else {
+            false
+        };
+
+        if !authenticated {
+            // Redirect to root page (login portal)
+            return Ok(Redirect::temporary("/").into_response());
+        }
+    }
 
     let asset = WebAssets::get(path).or_else(|| {
         // SPA fallback — serve index.html for unknown paths
@@ -122,19 +160,19 @@ pub async fn serve_webui(uri: axum::http::Uri) -> Result<(HeaderMap, Vec<u8>), S
     match asset {
         Some(content) => {
             let mime = mime_guess::from_path(path).first_or_octet_stream();
-            let mut headers = HeaderMap::new();
-            headers.insert(
+            let mut res_headers = HeaderMap::new();
+            res_headers.insert(
                 header::CONTENT_TYPE,
                 HeaderValue::from_str(mime.as_ref())
                     .unwrap_or(HeaderValue::from_static("application/octet-stream")),
             );
-            headers.insert(
+            res_headers.insert(
                 header::CACHE_CONTROL,
                 HeaderValue::from_static("no-store, no-cache, must-revalidate, max-age=0"),
             );
-            headers.insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
-            add_security_headers(&mut headers);
-            Ok((headers, content.data.to_vec()))
+            res_headers.insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+            add_security_headers(&mut res_headers);
+            Ok((res_headers, content.data.to_vec()).into_response())
         }
         None => {
             warn!("Dashboard index.html not found in embedded assets");
@@ -144,22 +182,32 @@ pub async fn serve_webui(uri: axum::http::Uri) -> Result<(HeaderMap, Vec<u8>), S
 }
 
 /// Serve the beautiful landing page at the root URL (/)
-pub async fn serve_landing() -> Result<(HeaderMap, Vec<u8>), StatusCode> {
+pub async fn serve_landing(headers: HeaderMap) -> Result<Response, StatusCode> {
+    // If they already have a valid cookie, redirect them straight to the dashboard
+    let admin_token = std::env::var("DASHBOARD_ADMIN_TOKEN").unwrap_or_default();
+    if !admin_token.is_empty() {
+        if let Some(cookie_token) = extract_cookie(&headers, "bridge_admin_token") {
+            if cookie_token == admin_token {
+                return Ok(Redirect::temporary("/dashboard/").into_response());
+            }
+        }
+    }
+
     let asset = WebAssets::get("landing.html");
     match asset {
         Some(content) => {
-            let mut headers = HeaderMap::new();
-            headers.insert(
+            let mut res_headers = HeaderMap::new();
+            res_headers.insert(
                 header::CONTENT_TYPE,
                 HeaderValue::from_static("text/html; charset=utf-8"),
             );
-            headers.insert(
+            res_headers.insert(
                 header::CACHE_CONTROL,
                 HeaderValue::from_static("no-store, no-cache, must-revalidate, max-age=0"),
             );
-            headers.insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
-            add_security_headers(&mut headers);
-            Ok((headers, content.data.to_vec()))
+            res_headers.insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+            add_security_headers(&mut res_headers);
+            Ok((res_headers, content.data.to_vec()).into_response())
         }
         None => {
             warn!("Dashboard landing.html not found in embedded assets");

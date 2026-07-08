@@ -278,21 +278,50 @@ async fn test_authenticated_diagnostics_fast() {
 
 #[tokio::test]
 async fn test_security_headers_fast() {
+    let _lock = ENV_MUTEX.lock().unwrap();
+    std::env::set_var("DASHBOARD_ADMIN_TOKEN", "super-secret-admin-token-12345");
     let base = spawn_test_server().await;
-    let client = reqwest::Client::new();
 
-    for path in &["", "dashboard", "dashboard/"] {
-        let resp = client
-            .get(format!("{}/{}", base, path))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 200);
+    // Use a client that does not follow redirects automatically
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
 
-        let headers = resp.headers();
-        assert!(headers.contains_key("content-security-policy"));
-        assert_eq!(headers.get("x-frame-options").unwrap(), "DENY");
-        assert_eq!(headers.get("x-content-type-options").unwrap(), "nosniff");
-        assert_eq!(headers.get("referrer-policy").unwrap(), "no-referrer");
-    }
+    // 1. Request to `/` (landing page) should return 200 and security headers
+    let resp = client.get(&base).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let headers = resp.headers();
+    assert!(headers.contains_key("content-security-policy"));
+    assert_eq!(headers.get("x-frame-options").unwrap(), "DENY");
+    assert_eq!(headers.get("x-content-type-options").unwrap(), "nosniff");
+    assert_eq!(headers.get("referrer-policy").unwrap(), "no-referrer");
+
+    // 2. Request to `/dashboard/` without cookie should redirect (307) to `/`
+    let resp = client
+        .get(format!("{}/dashboard/", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 307);
+    assert_eq!(resp.headers().get("location").unwrap(), "/");
+
+    // 3. Request to `/dashboard/` with valid cookie should succeed (200) and return security headers
+    let resp = client
+        .get(format!("{}/dashboard/", base))
+        .header(
+            "Cookie",
+            "bridge_admin_token=super-secret-admin-token-12345",
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let headers = resp.headers();
+    assert!(headers.contains_key("content-security-policy"));
+    assert_eq!(headers.get("x-frame-options").unwrap(), "DENY");
+    assert_eq!(headers.get("x-content-type-options").unwrap(), "nosniff");
+    assert_eq!(headers.get("referrer-policy").unwrap(), "no-referrer");
+
+    std::env::remove_var("DASHBOARD_ADMIN_TOKEN");
 }
