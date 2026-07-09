@@ -191,7 +191,7 @@ impl Supervisor {
 
         let pid = child.id();
 
-        if let Err(e) = wait_for_health(pid, &self.host, self.port, Duration::from_secs(5)) {
+        if let Err(e) = wait_for_health(pid, &self.host, self.port, Duration::from_secs(20)) {
             let _ = Command::new("kill")
                 .arg("-TERM")
                 .arg(pid.to_string())

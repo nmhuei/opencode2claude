@@ -2,6 +2,14 @@
 
 All notable changes to opencode2api will be documented in this file.
 
+## [0.4.2] — 2026-07-10
+
+### Fixed
+- Fixed auto-compaction logic for reasoning models (respect original max_tokens for compaction).
+- Disabled include_reasoning for compaction requests.
+- Bypassed system tags stripping and DSML parsing for compaction requests to prevent tag corruption.
+- Increased supervisor health check startup timeout to 20 seconds to prevent premature timeout on slow networks during proxy pool verification.
+
 ## [0.4.1] — 2026-07-08
 
 ### Fixed

@@ -990,7 +990,7 @@ async fn test_tc041_health_check_minimal() {
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["status"], "ok");
-    assert_eq!(body["version"], "0.4.1");
+    assert_eq!(body["version"], "0.4.2");
 }
 
 #[tokio::test]
