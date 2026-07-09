@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export ROOT_DIR
-export RUNTIME_DIR="${RUNTIME_DIR:-$HOME/.opencode2claude}"
+export RUNTIME_DIR="${RUNTIME_DIR:-$ROOT_DIR/.runtime}"
 export VERIFY_LOG_DIR="${VERIFY_LOG_DIR:-$RUNTIME_DIR/verify}"
 export PROFILE="${PROFILE:-local}"
 
@@ -36,7 +36,7 @@ GATES=(
 
 gate_cli_help() {
   info "Gate 2.5: CLI help"
-  local bin="$ROOT_DIR/target/debug/opencode2claude"
+  local bin="$ROOT_DIR/target/debug/opencode2api"
   "$bin" --help >/dev/null 2>&1 || return 1
   "$bin" start --help  >/dev/null 2>&1 || return 1
   "$bin" status --help >/dev/null 2>&1 || return 1
@@ -48,7 +48,7 @@ gate_runtime_dir_created() {
   require_profile local heavy || return 0
   info "Gate 2.6: Runtime directory created on start"
 
-  local bin="$ROOT_DIR/target/debug/opencode2claude"
+  local bin="$ROOT_DIR/target/debug/opencode2api"
   local log_file="$VERIFY_LOG_DIR/phase-2-start.log"
   local port; port="$(pick_free_port)"
 
@@ -82,7 +82,7 @@ gate_pid_file_valid() {
   require_profile local heavy || return 0
   info "Gate 2.7: PID file has correct JSON structure"
 
-  local pid_file="$RUNTIME_DIR/opencode2claude.pid.json"
+  local pid_file="$RUNTIME_DIR/opencode2api.pid.json"
 
   if [[ ! -f "$pid_file" ]]; then
     error "PID file not found: $pid_file"
@@ -91,14 +91,14 @@ gate_pid_file_valid() {
   fi
 
   # Validate JSON structure using the binary's status command
-  local bin="$ROOT_DIR/target/debug/opencode2claude"
+  local bin="$ROOT_DIR/target/debug/opencode2api"
   local status_output
-  status_output="$("$bin" status 2>&1)" || {
+  status_output="$("$bin" server status 2>&1)" || {
     error "status command failed"
     return 1
   }
 
-  if echo "$status_output" | grep -q -E "Running|Online"; then
+  if echo "$status_output" | grep -q -i -E "Running|Online"; then
     pass "PID file valid — bridge is running"
   else
     error "status shows unexpected state: $status_output"

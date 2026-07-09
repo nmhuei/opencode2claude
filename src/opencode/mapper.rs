@@ -7,6 +7,83 @@ use crate::handlers::{ContentVal, MessagesRequest};
 use crate::opencode::types::*;
 use std::collections::HashMap;
 
+const DEFAULT_MIN_REASONING_STREAM_TOKENS: u32 = 1024;
+
+fn is_reasoning_heavy_model(model: &str) -> bool {
+    let name = model.to_ascii_lowercase();
+    (name.contains("deepseek") && (name.contains("r1") || name.contains("reasoner")))
+        || name.contains("reasoning")
+        || name.contains("-r1")
+}
+
+fn min_reasoning_stream_tokens() -> u32 {
+    std::env::var("BRIDGE_MIN_REASONING_STREAM_TOKENS")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_MIN_REASONING_STREAM_TOKENS)
+}
+
+pub fn is_compact_request(payload: &MessagesRequest) -> bool {
+    if let Some(system_val) = &payload.system {
+        let system_str = extract_system_prompt(system_val).to_lowercase();
+        if system_str.contains("compact") || system_str.contains("summari") {
+            return true;
+        }
+    }
+    for msg in &payload.messages {
+        match &msg.content {
+            ContentVal::Single(text) => {
+                let text_lower = text.to_lowercase();
+                if text_lower.contains("compact") || text_lower.contains("summari") {
+                    return true;
+                }
+            }
+            ContentVal::Multiple(blocks) => {
+                for block in blocks {
+                    if block.content_type == "text" {
+                        if let Some(text) = &block.text {
+                            let text_lower = text.to_lowercase();
+                            if text_lower.contains("compact") || text_lower.contains("summari") {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+fn include_reasoning_for_stream(stream: bool, mapped_model: &str, is_compact: bool) -> Option<bool> {
+    if is_compact {
+        return None;
+    }
+    if stream && is_reasoning_heavy_model(mapped_model) {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+fn normalize_upstream_max_tokens(
+    requested: Option<u32>,
+    stream: bool,
+    mapped_model: &str,
+    is_compact: bool,
+) -> Option<u32> {
+    if is_compact {
+        return requested;
+    }
+    if !stream || !is_reasoning_heavy_model(mapped_model) {
+        return requested;
+    }
+
+    let floor = min_reasoning_stream_tokens();
+    Some(requested.map(|v| v.max(floor)).unwrap_or(floor))
+}
+
 pub fn extract_system_prompt(system_val: &serde_json::Value) -> String {
     if let Some(s) = system_val.as_str() {
         return s.to_string();
@@ -122,6 +199,7 @@ pub fn map_anthropic_to_openai(payload: &MessagesRequest, model: String) -> Open
             openai_messages.push(OpenAiMessage {
                 role: "system".to_string(),
                 content: Some(system),
+                reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
@@ -136,6 +214,7 @@ pub fn map_anthropic_to_openai(payload: &MessagesRequest, model: String) -> Open
                 openai_messages.push(OpenAiMessage {
                     role: msg.role.clone(),
                     content: Some(text.clone()),
+                    reasoning_content: None,
                     tool_calls: None,
                     tool_call_id: None,
                     name: None,
@@ -167,6 +246,7 @@ pub fn map_anthropic_to_openai(payload: &MessagesRequest, model: String) -> Open
                                         .content
                                         .as_ref()
                                         .map(tool_result_content_to_string),
+                                    reasoning_content: None,
                                     tool_calls: None,
                                     tool_call_id: block.tool_use_id.clone(),
                                     name,
@@ -179,6 +259,7 @@ pub fn map_anthropic_to_openai(payload: &MessagesRequest, model: String) -> Open
                         openai_messages.push(OpenAiMessage {
                             role: "user".to_string(),
                             content: Some(user_text),
+                            reasoning_content: None,
                             tool_calls: None,
                             tool_call_id: None,
                             name: None,
@@ -186,9 +267,15 @@ pub fn map_anthropic_to_openai(payload: &MessagesRequest, model: String) -> Open
                     }
                 } else if msg.role == "assistant" {
                     let mut assistant_text = String::new();
+                    let mut reasoning_content = String::new();
                     let mut tool_calls = Vec::new();
                     for block in blocks {
                         match block.content_type.as_str() {
+                            "thinking" => {
+                                if let Some(t) = &block.text {
+                                    reasoning_content.push_str(t);
+                                }
+                            }
                             "text" => {
                                 if let Some(t) = &block.text {
                                     if !assistant_text.is_empty() {
@@ -221,6 +308,11 @@ pub fn map_anthropic_to_openai(payload: &MessagesRequest, model: String) -> Open
                             None
                         } else {
                             Some(assistant_text)
+                        },
+                        reasoning_content: if reasoning_content.is_empty() {
+                            None
+                        } else {
+                            Some(reasoning_content)
                         },
                         tool_calls: if tool_calls.is_empty() {
                             None
@@ -279,6 +371,11 @@ pub fn map_anthropic_to_openai(payload: &MessagesRequest, model: String) -> Open
         }
     });
 
+    let is_compact = is_compact_request(payload);
+    let max_tokens =
+        normalize_upstream_max_tokens(payload.max_tokens, payload.stream, &mapped_model, is_compact);
+    let include_reasoning = include_reasoning_for_stream(payload.stream, &mapped_model, is_compact);
+
     OpenAiRequest {
         model: mapped_model,
         messages: openai_messages,
@@ -286,7 +383,8 @@ pub fn map_anthropic_to_openai(payload: &MessagesRequest, model: String) -> Open
         tool_choice,
         stream: payload.stream,
         temperature: payload.temperature,
-        max_tokens: payload.max_tokens,
+        max_tokens,
+        include_reasoning,
     }
 }
 
@@ -294,6 +392,48 @@ pub fn map_anthropic_to_openai(payload: &MessagesRequest, model: String) -> Open
 mod tests {
     use super::*;
     use crate::handlers::{AnthropicTool, ContentVal, Message, MessageContent, MessagesRequest};
+
+    #[test]
+    fn test_streaming_reasoning_model_raises_low_max_tokens() {
+        let payload = MessagesRequest {
+            model: Some("opencode/deepseek-r1-free".to_string()),
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: ContentVal::Single("hi".to_string()),
+            }],
+            system: None,
+            tools: None,
+            tool_choice: None,
+            stream: true,
+            temperature: None,
+            max_tokens: Some(32),
+        };
+
+        let mapped = map_anthropic_to_openai(&payload, "opencode/deepseek-r1-free".to_string());
+        assert_eq!(mapped.max_tokens, Some(DEFAULT_MIN_REASONING_STREAM_TOKENS));
+        assert_eq!(mapped.include_reasoning, Some(true));
+    }
+
+    #[test]
+    fn test_non_streaming_preserves_low_max_tokens() {
+        let payload = MessagesRequest {
+            model: Some("opencode/deepseek-r1-free".to_string()),
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: ContentVal::Single("hi".to_string()),
+            }],
+            system: None,
+            tools: None,
+            tool_choice: None,
+            stream: false,
+            temperature: None,
+            max_tokens: Some(32),
+        };
+
+        let mapped = map_anthropic_to_openai(&payload, "opencode/deepseek-r1-free".to_string());
+        assert_eq!(mapped.max_tokens, Some(32));
+        assert_eq!(mapped.include_reasoning, None);
+    }
 
     #[test]
     fn test_is_web_search_tool() {

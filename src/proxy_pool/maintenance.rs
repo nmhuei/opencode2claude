@@ -33,7 +33,13 @@ impl ProxyPool {
         }
     }
 
-    /// Record a failure for a proxy, potentially triggering cooldown.
+    /// Record a transport failure for a proxy.
+    ///
+    /// Transport failures usually mean the local proxy/container is unhealthy,
+    /// not that the upstream provider rate-limited us. Managed primary proxies
+    /// are therefore moved to `Dead` and queued for automatic restart after the
+    /// failure threshold. Protected warm-standby proxies cannot be restarted by
+    /// policy, so they fall back to a short cooldown.
     pub fn record_failure(&mut self, idx: usize) {
         if idx >= self.proxies.len() {
             return;
@@ -43,12 +49,25 @@ impl ProxyPool {
         self.proxies[idx].consecutive_failures = failures;
 
         if failures >= FAILURE_THRESHOLD {
-            let duration = Duration::from_secs(COOLDOWN_SECS);
-            self.mark_rate_limited(idx, duration);
-            info!(
-                "Proxy #{} ({}) entered cooldown after {} consecutive failures ({}s).",
-                idx, self.proxies[idx].url, failures, COOLDOWN_SECS
-            );
+            if self.proxies[idx].lifecycle == ProxyLifecycle::Managed {
+                self.proxies[idx].status = ProxyStatus::Dead {
+                    restart_attempts: 0,
+                };
+                if !self.restart_queue.contains(&idx) {
+                    self.restart_queue.push(idx);
+                }
+                warn!(
+                    "Proxy #{} ({}) marked dead after {} consecutive transport failures; queued for automatic restart.",
+                    idx, self.proxies[idx].url, failures
+                );
+            } else {
+                let duration = Duration::from_secs(COOLDOWN_SECS);
+                self.mark_rate_limited(idx, duration);
+                info!(
+                    "Protected proxy #{} ({}) entered cooldown after {} consecutive failures ({}s).",
+                    idx, self.proxies[idx].url, failures, COOLDOWN_SECS
+                );
+            }
         }
     }
 
@@ -84,11 +103,35 @@ impl ProxyPool {
     pub fn mark_healthy(&mut self, idx: usize) {
         if idx < self.proxies.len() {
             self.proxies[idx].status = ProxyStatus::Active;
+            self.proxies[idx].consecutive_failures = 0;
+            self.proxies[idx].consecutive_successes = 0;
             info!(
                 "Proxy #{} ({}) marked as healthy.",
                 idx, self.proxies[idx].url
             );
         }
+    }
+
+    /// Recover proxies whose cooldown timer has elapsed.
+    /// Returns the number of nodes recovered.
+    pub fn recover_expired_cooldowns(&mut self) -> usize {
+        let now = Instant::now();
+        let mut recovered = 0usize;
+        for (idx, entry) in self.proxies.iter_mut().enumerate() {
+            if let ProxyStatus::Cooldown(until) = entry.status {
+                if now >= until {
+                    entry.status = ProxyStatus::Active;
+                    entry.consecutive_failures = 0;
+                    entry.consecutive_successes = 0;
+                    recovered += 1;
+                    info!(
+                        "Proxy #{} ({}) recovered automatically after cooldown elapsed.",
+                        idx, entry.url
+                    );
+                }
+            }
+        }
+        recovered
     }
 }
 
@@ -107,12 +150,17 @@ pub async fn process_restart_queue(pool: Arc<TokioRwLock<ProxyPool>>) {
     }
 }
 
-/// TCP health monitor — checks Dead/Starting proxies every 10s.
-/// If TCP connect succeeds, marks proxy as Spare.
+/// Health monitor — recovers expired cooldowns and checks Dead/Starting proxies every 10s.
+/// If TCP connect succeeds, marks restarted proxies as Active.
 pub async fn health_monitor(pool: Arc<TokioRwLock<ProxyPool>>) {
     let mut interval = tokio::time::interval(Duration::from_secs(10));
     loop {
         interval.tick().await;
+
+        {
+            let mut p = pool.write().await;
+            p.recover_expired_cooldowns();
+        }
 
         let targets: Vec<(usize, u16)> = {
             let p = pool.read().await;
@@ -136,12 +184,14 @@ pub async fn health_monitor(pool: Arc<TokioRwLock<ProxyPool>>) {
             {
                 let mut p = pool.write().await;
                 if idx < p.proxies.len() {
-                    // Only mark as Spare if still dead (not manually re-assigned)
+                    // Only mark as Active if still dead/starting (not manually re-assigned).
                     if matches!(
                         p.proxies[idx].status,
                         ProxyStatus::Dead { .. } | ProxyStatus::Starting
                     ) {
-                        p.proxies[idx].status = ProxyStatus::Spare;
+                        p.proxies[idx].status = ProxyStatus::Active;
+                        p.proxies[idx].consecutive_failures = 0;
+                        p.proxies[idx].consecutive_successes = 0;
                         info!(
                             "Proxy #{} ({}) recovered via TCP health check.",
                             idx, p.proxies[idx].container_name
@@ -249,9 +299,11 @@ async fn restart_container(idx: usize, pool: Arc<TokioRwLock<ProxyPool>>) {
     }
 
     if ok {
-        p.proxies[idx].status = ProxyStatus::Spare;
+        p.proxies[idx].status = ProxyStatus::Active;
+        p.proxies[idx].consecutive_failures = 0;
+        p.proxies[idx].consecutive_successes = 0;
         info!(
-            "Proxy #{} ({}) restarted and verified as Spare.",
+            "Proxy #{} ({}) restarted and verified as Active.",
             idx, container_name
         );
     } else {

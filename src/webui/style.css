@@ -577,6 +577,22 @@ html, body {
   letter-spacing: -0.02em;
 }
 
+
+.metric-card.model-card .metric-value {
+  font-size: clamp(18px, 1.7vw, 22px);
+  line-height: 1.25;
+  letter-spacing: -0.03em;
+  padding-right: 38px;
+}
+
+.model-short-name {
+  display: block;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+
 .metric-value .dot {
   width: 8px;
   height: 8px;
@@ -887,6 +903,13 @@ html, body {
   display: none !important;
 }
 
+
+.test-badge.streaming {
+  background: rgba(16, 185, 129, 0.08);
+  border-color: rgba(16, 185, 129, 0.35);
+  color: var(--accent-green);
+}
+
 /* Thinking reasoning box styled like deepseek */
 .thinking-box {
   background: rgba(255, 255, 255, 0.02);
@@ -999,6 +1022,11 @@ html, body {
 .btn-block {
   width: 100%;
 }
+
+.tester-form .btn + .btn {
+  margin-top: 10px;
+}
+
 
 .btn-sm {
   padding: 4px 10px;

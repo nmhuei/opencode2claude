@@ -179,6 +179,10 @@ pub struct ServerStartArgs {
     /// Skip Docker SOCKS5 proxy pool bootstrap
     #[arg(long = "no-proxy")]
     pub no_proxy: bool,
+
+    /// Override max request body size in bytes (0 = unlimited)
+    #[arg(long = "max-body-size")]
+    pub max_body_size: Option<usize>,
 }
 
 /// Arguments for `server stop`.
@@ -269,6 +273,10 @@ pub struct ServeArgs {
     /// SearXNG API key override
     #[arg(long)]
     pub searxng_api_key: Option<String>,
+
+    /// Override max request body size in bytes (0 = unlimited)
+    #[arg(long = "max-body-size")]
+    pub max_body_size: Option<usize>,
 }
 
 /// Base args shared by start/status/stop (legacy, hidden).
@@ -342,7 +350,7 @@ impl std::fmt::Display for CliShellPolicy {
 /// Dashboard management subcommands.
 #[derive(Subcommand, Debug, Clone)]
 pub enum DashboardCommand {
-    /// Start the server (if not running) and open the dashboard in the browser
+    /// Start the server if needed and print the dashboard URL
     Start,
 
     /// Check dashboard service status and active auth token details

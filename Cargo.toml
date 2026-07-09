@@ -2,6 +2,7 @@
 name = "opencode2api"
 version = "0.4.1"
 edition = "2021"
+autobins = false
 description = "Use Claude Code with any LLM (DeepSeek, GPT-4o, Gemini, Llama, etc.) — for free"
 license = "MIT"
 homepage = "https://github.com/nmhuei/opencode2api"
@@ -29,6 +30,7 @@ toml = "0.8"
 clap = { version = "4.4", features = ["derive", "wrap_help", "string"] }
 clap_complete = "4.5"
 yansi = "1.0"
+unicode-width = "0.1"
 comfy-table = "7.1"
 indicatif = "0.17"
 rust-embed = { version = "8", features = ["mime-guess", "interpolate-folder-path"] }
@@ -46,15 +48,7 @@ strip = true
 
 [[bin]]
 name = "opencode2api"
-path = "src/main.rs"
-
-[[bin]]
-name = "oc2api"
-path = "src/main.rs"
-
-[[bin]]
-name = "o2a"
-path = "src/main.rs"
+path = "src/bin/opencode2api.rs"
 
 [[bin]]
 name = "opencode2api-serve"

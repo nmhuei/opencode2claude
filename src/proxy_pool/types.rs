@@ -154,6 +154,11 @@ pub fn is_protected_proxy_port(port: u16) -> bool {
     matches!(port, 40004 | 40005)
 }
 
+/// Returns true if the port is a managed primary proxy (40001-40003).
+pub fn is_managed_proxy_port(port: u16) -> bool {
+    matches!(port, 40001..=40003)
+}
+
 /// Ensures a given port is NOT a protected warm-standby proxy.
 /// Returns an error if it is, preventing destructive operations.
 pub fn ensure_not_protected(port: u16) -> Result<(), String> {

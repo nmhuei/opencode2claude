@@ -51,10 +51,10 @@ impl ProxyPool {
                         } else {
                             ProxyRole::Primary
                         },
-                        lifecycle: if is_protected_proxy_port(port) {
-                            ProxyLifecycle::Protected
-                        } else {
+                        lifecycle: if is_managed_proxy_port(port) {
                             ProxyLifecycle::Managed
+                        } else {
+                            ProxyLifecycle::Protected
                         },
                         consecutive_failures: 0,
                         consecutive_successes: 0,
@@ -501,7 +501,7 @@ mod tests {
     }
 
     #[test]
-    fn test_record_failure_enters_cooldown() {
+    fn test_record_failure_queues_managed_proxy_restart() {
         let urls = make_test_urls(1);
         let mut pool = ProxyPool::new(&urls);
 
@@ -511,9 +511,16 @@ mod tests {
         pool.record_failure(0);
         assert_eq!(pool.proxies[0].consecutive_failures, 1);
         assert!(matches!(pool.proxies[0].status, ProxyStatus::Active));
+        assert!(pool.restart_queue.is_empty());
 
         pool.record_failure(0);
-        assert!(matches!(pool.proxies[0].status, ProxyStatus::Cooldown(_)));
+        assert!(matches!(
+            pool.proxies[0].status,
+            ProxyStatus::Dead {
+                restart_attempts: 0
+            }
+        ));
+        assert_eq!(pool.restart_queue, vec![0]);
     }
 
     #[test]
@@ -575,12 +582,26 @@ mod tests {
     }
 
     #[test]
+    fn test_recover_expired_cooldowns_marks_active() {
+        let urls = make_test_urls(1);
+        let mut pool = ProxyPool::new(&urls);
+
+        pool.mark_rate_limited(0, Duration::from_secs(0));
+        assert!(matches!(pool.proxies[0].status, ProxyStatus::Cooldown(_)));
+
+        let recovered = pool.recover_expired_cooldowns();
+        assert_eq!(recovered, 1);
+        assert!(matches!(pool.proxies[0].status, ProxyStatus::Active));
+        assert_eq!(pool.proxies[0].consecutive_failures, 0);
+        assert_eq!(pool.proxies[0].consecutive_successes, 0);
+    }
+
+    #[test]
     fn test_record_success_recovers_after_threshold() {
         let urls = make_test_urls(1);
         let mut pool = ProxyPool::new(&urls);
 
-        pool.record_failure(0);
-        pool.record_failure(0);
+        pool.mark_rate_limited(0, Duration::from_secs(60));
         assert!(matches!(pool.proxies[0].status, ProxyStatus::Cooldown(_)));
         assert_eq!(pool.proxies[0].consecutive_successes, 0);
 

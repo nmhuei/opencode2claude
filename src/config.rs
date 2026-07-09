@@ -17,12 +17,12 @@ pub const DEFAULT_HOST: &str = "127.0.0.1";
 pub const DEFAULT_MODEL: &str = "claude-3-5-sonnet";
 pub const DEFAULT_STREAM_BUFFER_SIZE: usize = 4096;
 pub const DEFAULT_CHANNEL_CAPACITY: usize = 256;
-pub const DEFAULT_MAX_BODY_SIZE: usize = 1_048_576; // 1MB
+pub const DEFAULT_MAX_BODY_SIZE: usize = 10 * 1024 * 1024; // 10MB (increased from 1MB)
 
 /// Message IDs used in Anthropic SSE protocol responses.
 pub const MSG_ID_SHELL: &str = "msg_local_shell";
 
-/// Schema for `opencode2claude.toml` configuration file.
+/// Schema for `opencode2api.toml` configuration file.
 #[derive(Debug, Deserialize, Default)]
 pub struct TomlConfig {
     pub port: Option<u16>,
@@ -59,6 +59,7 @@ pub struct CliOverrides {
     pub model: Option<String>,
     pub shell_policy: Option<String>,
     pub config_path: Option<String>,
+    pub max_body_size: Option<usize>,
     pub tavily_api_key: Option<String>,
     pub exa_api_key: Option<String>,
     pub serper_api_key: Option<String>,
@@ -128,7 +129,7 @@ impl Default for BridgeConfig {
             serper_api_key: None,
             searxng_url: None,
             searxng_api_key: None,
-            max_search_loops: 5,
+            max_search_loops: 10,
             proxies: None,
             primary_proxies: None,
             warm_standby_proxies: None,
@@ -224,11 +225,19 @@ impl BridgeConfig {
                     .collect()
             });
 
-        let max_body_size = env::var("BRIDGE_MAX_BODY_SIZE")
-            .ok()
-            .and_then(|v| v.parse().ok())
+        let max_body_size = overrides
+            .max_body_size
+            .or_else(|| {
+                env::var("BRIDGE_MAX_BODY_SIZE")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+            })
             .or_else(|| toml_config.as_ref().and_then(|t| t.max_body_size))
             .unwrap_or(DEFAULT_MAX_BODY_SIZE);
+
+        if max_body_size == 0 {
+            warn!("⚠️  Request body limit is disabled (max_body_size=0).");
+        }
 
         let stream_buffer_size = env::var("BRIDGE_STREAM_BUFFER_SIZE")
             .ok()
@@ -481,7 +490,7 @@ mod tests {
 
     #[test]
     fn test_toml_file_loading() {
-        let tmp = std::env::temp_dir().join("opencode2claude_test_loading.toml");
+        let tmp = std::env::temp_dir().join("opencode2api_test_loading.toml");
         let _ = std::fs::remove_file(&tmp);
         std::fs::write(&tmp, b"port = 6000\nhost = \"127.0.0.1\"\n").unwrap();
 
@@ -494,7 +503,7 @@ mod tests {
 
     #[test]
     fn test_toml_file_not_found() {
-        let config = TomlConfig::from_file("/tmp/nonexistent_opencode2claude_test.toml");
+        let config = TomlConfig::from_file("/tmp/nonexistent_opencode2api_test.toml");
         assert!(config.is_none());
     }
 
@@ -504,7 +513,7 @@ mod tests {
         env::remove_var("BRIDGE_PORT");
         env::remove_var("BRIDGE_HOST");
 
-        let tmp = std::env::temp_dir().join("opencode2claude_test_env_override.toml");
+        let tmp = std::env::temp_dir().join("opencode2api_test_env_override.toml");
         let _ = std::fs::remove_file(&tmp);
         std::fs::write(&tmp, b"port = 3000\nhost = \"0.0.0.0\"\n").unwrap();
 
@@ -554,7 +563,7 @@ mod tests {
         env::remove_var("BRIDGE_HOST");
         env::remove_var("BRIDGE_SHELL_POLICY");
 
-        let tmp = std::env::temp_dir().join("opencode2claude_test_defaults.toml");
+        let tmp = std::env::temp_dir().join("opencode2api_test_defaults.toml");
         let _ = std::fs::remove_file(&tmp);
         std::fs::write(&tmp, b"shell_policy = \"disabled\"\n").unwrap();
 

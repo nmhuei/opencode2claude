@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export ROOT_DIR
-export RUNTIME_DIR="${RUNTIME_DIR:-$HOME/.opencode2claude}"
+export RUNTIME_DIR="${RUNTIME_DIR:-$ROOT_DIR/.runtime}"
 export VERIFY_LOG_DIR="${VERIFY_LOG_DIR:-$RUNTIME_DIR/verify}"
 export PROFILE="${PROFILE:-local}"
 
@@ -55,8 +55,8 @@ gate_cooldown_visible_tests() {
 }
 
 gate_status_basic() {
-  info "Gate 6.9: opencode2claude status runs (proxy pool via /health)"
-  "$ROOT_DIR/target/debug/opencode2claude" status >/dev/null 2>&1 || true
+  info "Gate 6.9: opencode2api status runs (proxy pool via /health)"
+  "$ROOT_DIR/target/debug/opencode2api" status >/dev/null 2>&1 || true
   pass "status"
 }
 

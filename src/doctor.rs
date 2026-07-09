@@ -7,6 +7,7 @@
 use crate::config;
 use crate::docker;
 use crate::proxy_pool;
+use crate::tui;
 use serde::Serialize;
 use std::fmt;
 use yansi::Paint;
@@ -59,7 +60,28 @@ impl DoctorSummary {
 
 impl fmt::Display for DoctorReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, " Running diagnostics...\n")?;
+        writeln!(
+            f,
+            "{}",
+            "╭────────────────────────────────────────────────────────────╮"
+                .cyan()
+                .bold()
+        )?;
+        writeln!(
+            f,
+            "{} {} {}",
+            "│".cyan().bold(),
+            "Doctor".bold(),
+            "dependency and runtime diagnostics".dim()
+        )?;
+        writeln!(
+            f,
+            "{}",
+            "╰────────────────────────────────────────────────────────────╯"
+                .cyan()
+                .bold()
+        )?;
+        writeln!(f)?;
         for check in &self.checks {
             writeln!(f, " {}", check)?;
         }
@@ -100,10 +122,10 @@ impl fmt::Display for CheckResult {
         };
         write!(
             f,
-            "{} {:<20} {}",
+            "{} {} {}",
             icon,
-            self.label.cyan().bold(),
-            self.message
+            tui::pad_to_width(&self.label.cyan().bold().to_string(), 22),
+            self.message.dim()
         )
     }
 }
@@ -243,7 +265,7 @@ async fn check_proxies() -> CheckResult {
 fn check_config() -> CheckResult {
     let name = "config-file".to_string();
     let label = "Config File".to_string();
-    let config_paths = ["opencode2claude.toml"];
+    let config_paths = ["opencode2api.toml"];
 
     for path_str in &config_paths {
         let path = std::path::Path::new(path_str);

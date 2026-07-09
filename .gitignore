@@ -18,6 +18,7 @@ Desktop.ini
 
 # ── Runtime & Process State ─────────────────────────
 .runtime/
+.runtime_e2e/
 .opencode2claude/
 .bridge.pids
 client_tools.json

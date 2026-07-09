@@ -5,6 +5,8 @@ use crate::dashboard;
 use crate::handlers;
 use crate::middleware;
 use crate::state::AppState;
+use crate::tui;
+use axum::extract::DefaultBodyLimit;
 use axum::{
     routing::{get, post},
     Router,
@@ -23,6 +25,7 @@ pub struct ServeArgsBridge {
     pub config: Option<String>,
     pub model: Option<String>,
     pub shell_policy: Option<String>,
+    pub max_body_size: Option<usize>,
     pub tavily_api_key: Option<String>,
     pub exa_api_key: Option<String>,
     pub serper_api_key: Option<String>,
@@ -45,6 +48,7 @@ pub async fn run_server(args: ServeArgsBridge) {
         model: args.model,
         shell_policy: args.shell_policy,
         config_path: args.config,
+        max_body_size: args.max_body_size,
         tavily_api_key: args.tavily_api_key,
         exa_api_key: args.exa_api_key,
         serper_api_key: args.serper_api_key,
@@ -68,46 +72,37 @@ pub async fn run_server(args: ServeArgsBridge) {
     );
     info!("╠══════════════════════════════════════════════╣");
     info!(
-        "║  Bridge:  http://{}{}║",
-        addr,
-        " ".repeat(27usize.saturating_sub(addr.to_string().len()))
+        "{}",
+        tui::box_line("║  Bridge:  http://", &addr.to_string(), 48)
     );
     info!(
         "║  Daemon:  port {}                          ║",
         config.opencode_port
     );
     info!(
-        "║  Model:   {}{}║",
-        config.model.as_deref().unwrap_or("(auto)"),
-        " ".repeat(33usize.saturating_sub(config.model.as_deref().unwrap_or("(auto)").len()))
+        "{}",
+        tui::box_line(
+            "║  Model:   ",
+            config.model.as_deref().unwrap_or("(auto)"),
+            48
+        )
     );
     info!(
-        "║  Shell:   {}{}║",
-        config.shell_policy.description(),
-        " ".repeat(33usize.saturating_sub(config.shell_policy.description().len()))
+        "{}",
+        tui::box_line("║  Shell:   ", &config.shell_policy.description(), 48)
     );
     let dashboard_url = format!("http://{}/dashboard", addr);
+    info!("{}", tui::box_line("║  Dashboard: ", &dashboard_url, 48));
     info!(
-        "║  Dashboard: {}{}║",
-        dashboard_url,
-        " ".repeat(27usize.saturating_sub(dashboard_url.len()))
-    );
-    info!(
-        "║  Auth:    {}{}║",
-        if config.auth_enabled() {
-            "enabled"
-        } else {
-            "disabled"
-        },
-        " ".repeat(
-            33usize.saturating_sub(
-                if config.auth_enabled() {
-                    "enabled"
-                } else {
-                    "disabled"
-                }
-                .len()
-            )
+        "{}",
+        tui::box_line(
+            "║  Auth:    ",
+            if config.auth_enabled() {
+                "enabled"
+            } else {
+                "disabled"
+            },
+            48
         )
     );
     info!("╚══════════════════════════════════════════════╝");
@@ -118,7 +113,8 @@ pub async fn run_server(args: ServeArgsBridge) {
     // Spawn dashboard heartbeat task (every 30s)
     dashboard::spawn_heartbeat(state.event_tx.clone());
 
-    let app = Router::new()
+    // API routes (v1 Messages API) — protected by auth middleware + body limit
+    let mut api_routes = Router::new()
         .route("/v1/messages", post(handlers::handle_messages))
         .route(
             "/v1/messages/count_tokens",
@@ -128,10 +124,21 @@ pub async fn run_server(args: ServeArgsBridge) {
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::auth_middleware,
-        ))
+        ));
+
+    if max_body > 0 {
+        api_routes = api_routes
+            .layer(DefaultBodyLimit::max(max_body))
+            .layer(RequestBodyLimitLayer::new(max_body));
+    } else {
+        info!("Request body limit disabled (max_body_size=0)");
+        api_routes = api_routes.layer(DefaultBodyLimit::disable());
+    }
+
+    // Dashboard + health routes — no body limit, no auth middleware
+    let dashboard_routes = Router::new()
         .route("/", get(dashboard::serve_landing))
         .route("/health", get(handlers::handle_health))
-        // Dashboard routes (no auth middleware)
         .route("/dashboard", get(dashboard::serve_webui))
         .route("/dashboard/", get(dashboard::serve_webui))
         .route("/dashboard/*path", get(dashboard::serve_webui))
@@ -158,10 +165,17 @@ pub async fn run_server(args: ServeArgsBridge) {
         )
         .route("/api/dashboard/events", get(dashboard::handler_events))
         .route(
+            "/api/dashboard/test/stream",
+            get(dashboard::handler_test_stream_get).post(dashboard::handler_test_stream_post),
+        )
+        .route(
             "/api/dashboard/proxy/:port/restart",
             post(dashboard::handler_proxy_restart),
-        )
-        .layer(RequestBodyLimitLayer::new(max_body))
+        );
+
+    let app = Router::new()
+        .merge(api_routes)
+        .merge(dashboard_routes)
         .with_state(state);
 
     let listener = match tokio::net::TcpListener::bind(addr).await {

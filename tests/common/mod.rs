@@ -18,9 +18,10 @@ impl TestBridge {
     pub async fn start(env_overrides: HashMap<&str, &str>) -> Self {
         let port = Self::get_free_port();
 
-        let mut cmd = tokio::process::Command::new("./target/release/opencode2claude");
+        let mut cmd = tokio::process::Command::new("./target/release/opencode2api");
         cmd.env("BRIDGE_PORT", port.to_string())
             .env("BRIDGE_HOST", "127.0.0.1")
+            .env("RUNTIME_DIR", format!("/tmp/opencode2api_test_{}", port))
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit());
 
@@ -96,6 +97,7 @@ impl TestBridge {
 impl Drop for TestBridge {
     fn drop(&mut self) {
         std::mem::drop(self.child.kill());
+        let _ = std::fs::remove_dir_all(format!("/tmp/opencode2api_test_{}", self.port));
     }
 }
 

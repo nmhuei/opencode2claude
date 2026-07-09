@@ -2,6 +2,18 @@
 
 All notable changes to opencode2api will be documented in this file.
 
+## [0.4.1] — 2026-07-08
+
+### Fixed
+- Resolved dashboard contract incompatibilities, configuration merge issues, and SSE authentication.
+- Fixed auth bypass on fallback route, unified login flow with server-managed HttpOnly session cookie.
+- Resolved frontend session storage mismatch and read token from cookie in dashboard SPA.
+
+### Added
+- Added automated integration tests for dashboard contract validation (TC-001 to TC-074).
+- Added CodeQL analysis, Dependabot checks, and security-audit workflows.
+- Embedded synthetic SSE stream endpoint for UI testing.
+
 ## [0.4.0] — 2026-07-03
 
 ### Added

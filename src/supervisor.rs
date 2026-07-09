@@ -17,11 +17,16 @@ use std::time::{Duration, Instant};
 /// Possible states of the bridge supervisor.
 pub enum SupervisorStatus {
     /// Bridge is running with the given PID, port, and started-at timestamp.
+    ///
+    /// `pid == None` means the HTTP service is healthy on the expected port,
+    /// but it was not started by this supervisor or the PID file was lost.
     Running {
-        pid: u32,
+        pid: Option<u32>,
         port: u16,
         /// Unix epoch millis when the bridge started.
         started_at: u64,
+        /// Whether this process is tracked by the supervisor PID file.
+        managed: bool,
     },
     /// Bridge is not running.
     Stopped,
@@ -37,8 +42,14 @@ impl SupervisorStatus {
 impl std::fmt::Display for SupervisorStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Running { pid, port, .. } => {
-                write!(f, "Running (PID: {}, port: {})", pid, port)
+            Self::Running {
+                pid, port, managed, ..
+            } => {
+                if *managed {
+                    write!(f, "Running (PID: {}, port: {})", pid.unwrap_or(0), port)
+                } else {
+                    write!(f, "Running (unmanaged, port: {})", port)
+                }
             }
             Self::Stopped => write!(f, "Stopped"),
         }
@@ -51,6 +62,10 @@ pub enum SupervisorError {
     /// Bridge is already running.
     #[error("Bridge is already running (PID: {0})")]
     AlreadyRunning(u32),
+
+    /// Bridge appears to be running on the requested port but is not supervisor-managed.
+    #[error("Bridge is already running on port {0}, but no supervisor PID file tracks it")]
+    AlreadyRunningUnmanaged(u16),
 
     /// Bridge is not running.
     #[allow(dead_code)] // kept for supervisor response matching
@@ -95,13 +110,19 @@ impl Supervisor {
         self
     }
 
-    /// Start the bridge: create `~/.opencode2claude/`, spawn a foreground server
+    /// Start the bridge: create `~/.opencode2api/`, spawn a foreground server
     /// as background child, wait until it is healthy, then write PID.
     pub fn start(&self) -> Result<(), SupervisorError> {
         // Check if already running
         let status = self.status()?;
-        if let SupervisorStatus::Running { pid, .. } = status {
-            return Err(SupervisorError::AlreadyRunning(pid));
+        if let SupervisorStatus::Running {
+            pid, port, managed, ..
+        } = status
+        {
+            if managed {
+                return Err(SupervisorError::AlreadyRunning(pid.unwrap_or(0)));
+            }
+            return Err(SupervisorError::AlreadyRunningUnmanaged(port));
         }
 
         // Ensure runtime directories exist
@@ -223,26 +244,52 @@ impl Supervisor {
         Ok(())
     }
 
-    /// Check bridge status from PID file + process existence.
+    /// Check bridge status from PID file + process existence + `/health`.
     pub fn status(&self) -> Result<SupervisorStatus, SupervisorError> {
         let pidfile_path = self.paths.pid_file();
+
         if !pidfile_path.exists() {
-            return Ok(SupervisorStatus::Stopped);
+            return Ok(self.status_from_health_probe());
         }
 
         let pidfile = PidFile::read(&pidfile_path)?;
         let pid = pidfile.pid;
+        let healthy = health_check(&pidfile.host, pidfile.port);
 
-        if process_exists(pid) {
+        if process_exists(pid) && healthy {
             Ok(SupervisorStatus::Running {
-                pid,
+                pid: Some(pid),
                 port: pidfile.port,
                 started_at: pidfile.started_at,
+                managed: true,
             })
         } else {
-            // Stale PID file — clean up
+            // Stale PID file — clean up. If the service is still healthy on the
+            // PID file port, report it as unmanaged rather than falsely stopped.
             PidFile::remove(&pidfile_path)?;
-            Ok(SupervisorStatus::Stopped)
+            if healthy {
+                Ok(SupervisorStatus::Running {
+                    pid: None,
+                    port: pidfile.port,
+                    started_at: now_millis(),
+                    managed: false,
+                })
+            } else {
+                Ok(self.status_from_health_probe())
+            }
+        }
+    }
+
+    fn status_from_health_probe(&self) -> SupervisorStatus {
+        if health_check(&self.host, self.port) {
+            SupervisorStatus::Running {
+                pid: None,
+                port: self.port,
+                started_at: now_millis(),
+                managed: false,
+            }
+        } else {
+            SupervisorStatus::Stopped
         }
     }
 }
@@ -250,6 +297,13 @@ impl Supervisor {
 /// Check if a process exists on Unix via `/proc/{pid}`.
 fn process_exists(pid: u32) -> bool {
     Path::new(&format!("/proc/{}", pid)).exists()
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 fn wait_for_health(pid: u32, host: &str, port: u16, timeout: Duration) -> Result<(), &'static str> {
@@ -298,5 +352,88 @@ fn health_check(host: &str, port: u16) -> bool {
             response[..n].starts_with(b"HTTP/1.1 200") || response[..n].starts_with(b"HTTP/1.0 200")
         }
         Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::RuntimePaths;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
+    fn temp_runtime_root(name: &str) -> std::path::PathBuf {
+        let mut root = std::env::temp_dir();
+        root.push(format!(
+            "opencode2api-supervisor-test-{}-{}",
+            name,
+            now_millis()
+        ));
+        let _ = std::fs::create_dir_all(&root);
+        root
+    }
+
+    fn spawn_one_health_server() -> u16 {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0_u8; 256];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\nConnection: close\r\n\r\n{\"status\":\"ok\"}",
+                );
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn status_reports_unmanaged_running_when_health_ok_without_pidfile() {
+        let root = temp_runtime_root("unmanaged");
+        let port = spawn_one_health_server();
+        let sup = Supervisor::new(RuntimePaths::from_root(&root), port, "127.0.0.1");
+
+        match sup.status().unwrap() {
+            SupervisorStatus::Running {
+                pid,
+                port: reported_port,
+                managed,
+                ..
+            } => {
+                assert_eq!(pid, None);
+                assert_eq!(reported_port, port);
+                assert!(!managed);
+            }
+            SupervisorStatus::Stopped => panic!("healthy unmanaged server was reported stopped"),
+        }
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn status_cleans_stale_pidfile_and_falls_back_to_health() {
+        let root = temp_runtime_root("stale");
+        let paths = RuntimePaths::from_root(&root);
+        paths.ensure_dirs().unwrap();
+        let port = spawn_one_health_server();
+        PidFile::new(u32::MAX, port, "127.0.0.1")
+            .write(&paths.pid_file())
+            .unwrap();
+        let sup = Supervisor::new(paths, port, "127.0.0.1");
+
+        match sup.status().unwrap() {
+            SupervisorStatus::Running { pid, managed, .. } => {
+                assert_eq!(pid, None);
+                assert!(!managed);
+            }
+            SupervisorStatus::Stopped => {
+                panic!("healthy service behind stale pidfile was reported stopped")
+            }
+        }
+
+        assert!(!root.join(crate::runtime::PID_FILE_NAME).exists());
+        let _ = std::fs::remove_dir_all(root);
     }
 }

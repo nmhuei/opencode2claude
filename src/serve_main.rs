@@ -52,6 +52,10 @@ pub struct ServeArgs {
     /// SearXNG API key override
     #[arg(long = "searxng-api-key")]
     pub searxng_api_key: Option<String>,
+
+    /// Override max request body size in bytes (0 = unlimited)
+    #[arg(long = "max-body-size")]
+    pub max_body_size: Option<usize>,
 }
 
 #[tokio::main]
@@ -69,6 +73,7 @@ async fn main() {
         serper_api_key: args.serper_api_key,
         searxng_url: args.searxng_url,
         searxng_api_key: args.searxng_api_key,
+        max_body_size: args.max_body_size,
     };
 
     run_server(bridge_args).await;

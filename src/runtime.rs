@@ -1,7 +1,7 @@
 //! Runtime directory management for supervisor artifacts.
 //!
 //! Stores PID files, logs, and other runtime state in
-//! `~/.opencode2claude/` (XDG-style), making all supervisor
+//! `~/.opencode2api/` (XDG-style), making all supervisor
 //! commands work regardless of the current working directory.
 
 use std::path::PathBuf;
@@ -33,6 +33,11 @@ impl RuntimePaths {
     pub fn new() -> Self {
         let root = Self::default_root();
         Self { root }
+    }
+
+    /// Create paths from an explicit runtime root.
+    pub fn from_root(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
     }
 
     /// Resolve the default runtime root: `$HOME/.opencode2api`.

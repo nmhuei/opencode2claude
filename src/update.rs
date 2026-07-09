@@ -10,7 +10,7 @@ use std::path::PathBuf;
 /// Info about a single release asset (binary for a specific platform).
 #[derive(Debug, Clone)]
 pub struct AssetInfo {
-    /// File name, e.g. `opencode2claude-linux-amd64`.
+    /// File name, e.g. `opencode2api-linux-amd64`.
     pub name: String,
     /// Download URL for the asset.
     pub download_url: String,
@@ -36,7 +36,7 @@ pub fn current_version() -> &'static str {
 
 /// Build a user-agent string for GitHub API requests.
 fn user_agent() -> String {
-    format!("opencode2claude/{}", current_version())
+    format!("opencode2api/{}", current_version())
 }
 
 /// Determine the expected asset name for the current platform.
@@ -46,17 +46,17 @@ fn platform_asset_name() -> Option<&'static str> {
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
     match (os, arch) {
-        ("linux", "x86_64") => Some("opencode2claude-linux-amd64"),
-        ("linux", "aarch64") => Some("opencode2claude-linux-arm64"),
-        ("macos", "x86_64") => Some("opencode2claude-macos-amd64"),
-        ("macos", "aarch64") => Some("opencode2claude-macos-arm64"),
+        ("linux", "x86_64") => Some("opencode2api-linux-amd64"),
+        ("linux", "aarch64") => Some("opencode2api-linux-arm64"),
+        ("macos", "x86_64") => Some("opencode2api-macos-amd64"),
+        ("macos", "aarch64") => Some("opencode2api-macos-arm64"),
         _ => None,
     }
 }
 
 /// Fetch the latest release from the GitHub API.
 pub async fn fetch_latest_release(client: &reqwest::Client) -> Result<ReleaseInfo> {
-    let url = "https://api.github.com/repos/nmhuei/opencode2claude/releases/latest";
+    let url = "https://api.github.com/repos/nmhuei/opencode2api/releases/latest";
     let resp = client
         .get(url)
         .header("Accept", "application/vnd.github.v3+json")
@@ -313,11 +313,11 @@ mod tests {
             version: "0.4.0".into(),
             assets: vec![
                 AssetInfo {
-                    name: "opencode2claude-linux-amd64".into(),
+                    name: "opencode2api-linux-amd64".into(),
                     download_url: "https://example.com/linux-amd64".into(),
                 },
                 AssetInfo {
-                    name: "opencode2claude-macos-arm64".into(),
+                    name: "opencode2api-macos-arm64".into(),
                     download_url: "https://example.com/macos-arm64".into(),
                 },
             ],

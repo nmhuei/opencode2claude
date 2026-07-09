@@ -18,6 +18,8 @@ pub struct OpenAiRequest {
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_reasoning: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -25,6 +27,8 @@ pub struct OpenAiMessage {
     pub role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<OpenAiToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -78,6 +82,7 @@ pub struct OpenAiChoice {
 #[derive(Debug, Deserialize)]
 pub struct OpenAiResponseMessage {
     pub content: Option<String>,
+    #[serde(default, alias = "reasoning", alias = "thinking")]
     pub reasoning_content: Option<String>,
     pub tool_calls: Option<Vec<OpenAiResponseToolCall>>,
 }
@@ -116,6 +121,7 @@ pub struct OpenAiStreamChoice {
 #[derive(Debug, Deserialize)]
 pub struct OpenAiStreamDelta {
     pub content: Option<String>,
+    #[serde(default, alias = "reasoning", alias = "thinking")]
     pub reasoning_content: Option<String>,
     pub tool_calls: Option<Vec<OpenAiStreamToolCall>>,
 }

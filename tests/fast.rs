@@ -1,4 +1,4 @@
-//! Fast integration tests covering all 74 spec test cases (TC-001 to TC-074).
+//! Fast integration tests covering dashboard/API regression cases.
 //!
 //! Run: `cargo test --test fast`
 
@@ -105,6 +105,11 @@ fn build_test_router(config: opencode2api::config::BridgeConfig) -> Router {
         .route(
             "/api/dashboard/events",
             get(opencode2api::dashboard::handler_events),
+        )
+        .route(
+            "/api/dashboard/test/stream",
+            get(opencode2api::dashboard::handler_test_stream_get)
+                .post(opencode2api::dashboard::handler_test_stream_post),
         )
         .route(
             "/api/dashboard/proxy/:port/restart",
@@ -527,7 +532,13 @@ async fn test_logout_clears_cookie() {
         .await
         .unwrap();
     /* Check that the Set-Cookie header clears the cookie */
-    let set_cookie = resp.headers().get("set-cookie").unwrap().to_str().unwrap().to_string();
+    let set_cookie = resp
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
     assert!(set_cookie.contains("bridge_admin_session="));
     assert!(set_cookie.contains("Max-Age=0"));
     let body: serde_json::Value = resp.json().await.unwrap();
@@ -599,6 +610,12 @@ async fn test_tc021_get_config_correct_token() {
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
     assert!(body["bridge_port"].as_u64().is_some() || body["bridge_port"].is_null());
+    assert!(body["max_body_size"].as_u64().is_some());
+    assert!(body["stream_buffer_size"].as_u64().is_some());
+    assert!(body["channel_capacity"].as_u64().is_some());
+    assert!(body["max_search_loops"].as_u64().is_some());
+    assert!(body["primary_proxies"].is_array());
+    assert!(body["warm_standby_proxies"].is_array());
     env::remove_var("DASHBOARD_ADMIN_TOKEN");
 }
 
@@ -698,7 +715,10 @@ async fn test_tc026_save_config_correct_token_empty_body() {
     assert_eq!(resp.status(), 400);
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["status"], "error");
-    assert!(body["message"].as_str().unwrap().contains("Missing 'content' field"));
+    assert!(body["message"]
+        .as_str()
+        .unwrap()
+        .contains("Missing 'content' field"));
     env::remove_var("DASHBOARD_ADMIN_TOKEN");
 }
 
@@ -970,7 +990,7 @@ async fn test_tc041_health_check_minimal() {
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["status"], "ok");
-    assert_eq!(body["version"], "0.4.0");
+    assert_eq!(body["version"], "0.4.1");
 }
 
 #[tokio::test]
@@ -1337,6 +1357,50 @@ async fn test_tc061_access_events_sse_using_bridge_token() {
         .unwrap();
     assert_eq!(resp.status(), 401);
     env::remove_var("BRIDGE_AUTH_TOKEN");
+    env::remove_var("DASHBOARD_ADMIN_TOKEN");
+}
+
+#[tokio::test]
+async fn test_dashboard_test_stream_no_token() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
+    let base = spawn_test_server_default().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("{}/api/dashboard/test/stream", base))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 401);
+    env::remove_var("DASHBOARD_ADMIN_TOKEN");
+}
+
+#[tokio::test]
+async fn test_dashboard_test_stream_emits_thinking_and_text() {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
+    let base = spawn_test_server_default().await;
+    let client = reqwest::Client::new();
+
+    let body = client
+        .get(format!(
+            "{}/api/dashboard/test/stream?token=test-token&delay_ms=0",
+            base
+        ))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert!(body.contains("event: message_start"));
+    assert!(body.contains("event: content_block_start"));
+    assert!(body.contains("thinking_delta"));
+    assert!(body.contains("text_delta"));
+    assert!(body.contains("event: message_stop"));
     env::remove_var("DASHBOARD_ADMIN_TOKEN");
 }
 

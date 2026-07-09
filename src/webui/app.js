@@ -20,6 +20,7 @@ var state = {
   configEditMode: false, // false = view/form, true = raw TOML editor
   eventCount: 0,
   testStreaming: false,
+  statusReceivedAtMs: null,
 };
 
 /* ==========================================================
@@ -40,6 +41,24 @@ function escapeToml(str) {
   return String(str).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
 }
 
+function tomlStringLine(key, value) {
+  return key + ' = "' + escapeToml(value) + '"';
+}
+
+function parsePositiveInt(value, fallback, allowZero) {
+  var n = parseInt(String(value == null ? '' : value).trim(), 10);
+  if (!Number.isFinite(n) || Number.isNaN(n)) return fallback;
+  if (allowZero ? n < 0 : n <= 0) return fallback;
+  return n;
+}
+
+function listFromTextarea(value) {
+  return String(value || '')
+    .split(/[\n,]+/)
+    .map(function(x) { return x.trim(); })
+    .filter(Boolean);
+}
+
 function formatUptime(seconds) {
   if (seconds == null || seconds < 0) return '--';
   var d = Math.floor(seconds / 86400);
@@ -52,6 +71,44 @@ function formatUptime(seconds) {
   if (m > 0) parts.push(m + 'm');
   parts.push(s + 's');
   return parts.join(' ');
+}
+
+function liveUptimeSeconds(data) {
+  data = data || state.status;
+  if (!data || data.uptime_secs == null) return null;
+  var base = Number(data.uptime_secs);
+  if (!Number.isFinite(base) || base < 0) return null;
+  var receivedAt = state.statusReceivedAtMs || Date.now();
+  var delta = Math.max(0, Math.floor((Date.now() - receivedAt) / 1000));
+  return base + delta;
+}
+
+function updateLiveUptime() {
+  var live = liveUptimeSeconds();
+  if (live == null) return;
+  var text = formatUptime(live);
+
+  var metricUptime = document.getElementById('metricUptimeValue');
+  if (metricUptime) metricUptime.textContent = text;
+
+  var sidebarUptime = document.getElementById('sidebarUptime');
+  if (sidebarUptime) sidebarUptime.textContent = text;
+}
+
+
+function formatModelLabel(model) {
+  if (!model) return '--';
+  var name = String(model).trim();
+  if (!name) return '--';
+
+  // Dashboard cards are narrow; keep the full model available via tooltip,
+  // but display the useful model id without provider/noise suffixes.
+  var parts = name.split('/');
+  name = parts[parts.length - 1] || name;
+  name = name.replace(/-free$/i, '');
+  name = name.replace(/^(claude-|openai-|opencode-)/i, '');
+
+  return name || model;
 }
 
 function getTimestamp() {
@@ -248,7 +305,9 @@ async function loadStatus() {
   try {
     var data = await apiFetch('/api/dashboard/status');
     state.status = data;
+    state.statusReceivedAtMs = Date.now();
     renderMetrics(data);
+    updateLiveUptime();
     renderSidebarStatus(data);
     setConnection('connected');
     
@@ -382,7 +441,7 @@ function renderSidebarStatus(data) {
 
   var sidebarUptime = document.getElementById('sidebarUptime');
   if (sidebarUptime) {
-    sidebarUptime.textContent = formatUptime(data.uptime_secs);
+    sidebarUptime.textContent = formatUptime(liveUptimeSeconds(data));
   }
 }
 
@@ -408,6 +467,9 @@ function renderMetrics(data) {
   var svgTime = '<svg class="metric-watermark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>';
   var svgPort = '<svg class="metric-watermark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/></svg>';
 
+  var modelFullName = data.model || '--';
+  var modelShortName = formatModelLabel(modelFullName);
+
   var cards = [
     {
       label: 'Bridge Status',
@@ -417,13 +479,13 @@ function renderMetrics(data) {
     },
     {
       label: 'Active Model',
-      value: escapeHtml(data.model || '--'),
-      accent: 'accent-indigo',
+      value: '<span class="model-short-name" title="' + escapeHtml(modelFullName) + '">' + escapeHtml(modelShortName) + '</span>',
+      accent: 'accent-indigo model-card',
       watermark: svgModel
     },
     {
       label: 'Uptime',
-      value: escapeHtml(formatUptime(data.uptime_secs)),
+      value: '<span id="metricUptimeValue">' + escapeHtml(formatUptime(liveUptimeSeconds(data))) + '</span>',
       accent: 'accent-plum',
       watermark: svgTime
     },
@@ -568,25 +630,29 @@ function toArray(v) {
 
 function configToToml(config) {
   var lines = [
-    'host = "' + escapeToml(config.host || '127.0.0.1') + '"',
+    tomlStringLine('host', config.host || '127.0.0.1'),
     'port = ' + Number(config.bridge_port || 4000),
-    'model = "' + escapeToml(config.model || '') + '"',
-    'shell_policy = "' + (config.shell_policy || 'disabled') + '"',
+    tomlStringLine('model', config.model || ''),
+    tomlStringLine('shell_policy', config.shell_policy || 'disabled'),
+    'max_body_size = ' + Number(config.max_body_size != null ? config.max_body_size : 10485760),
+    'stream_buffer_size = ' + Number(config.stream_buffer_size || 4096),
+    'channel_capacity = ' + Number(config.channel_capacity || 256),
+    'max_search_loops = ' + Number(config.max_search_loops || 10),
   ];
   if (config.shell_allowlist) {
-    lines.push('shell_allowlist = "' + escapeToml(config.shell_allowlist) + '"');
+    lines.push(tomlStringLine('shell_allowlist', config.shell_allowlist));
   }
   if (config.searxng_url) {
-    lines.push('searxng_url = "' + escapeToml(config.searxng_url) + '"');
+    lines.push(tomlStringLine('searxng_url', config.searxng_url));
   }
   // Handle proxies as arrays (backend now returns them as arrays)
   var primaryProxies = toArray(config.primary_proxies);
   primaryProxies.forEach(function(p) {
-    lines.push('primary_proxies = "' + escapeToml(p) + '"');
+    lines.push(tomlStringLine('primary_proxies', p));
   });
   var warmStandbyProxies = toArray(config.warm_standby_proxies);
   warmStandbyProxies.forEach(function(p) {
-    lines.push('warm_standby_proxies = "' + escapeToml(p) + '"');
+    lines.push(tomlStringLine('warm_standby_proxies', p));
   });
   lines.push('');
   lines.push('# Secrets (API keys, auth tokens) are omitted for security.');
@@ -647,6 +713,37 @@ function renderConfig(config) {
     html += '      </select>';
     html += '    </div>';
     html += '  </div>';
+    html += '  <div class="form-group">';
+    html += '    <label for="cfgShellAllowlist">Shell Allowlist</label>';
+    html += '    <input type="text" id="cfgShellAllowlist" value="' + escapeHtml(config.shell_allowlist || '') + '" placeholder="git,ls,pwd,cat">';
+    html += '    <p class="form-help">Used only when Shell Interception Policy is Allow List Only.</p>';
+    html += '  </div>';
+    html += '</div>';
+
+    // Runtime tuning Group
+    html += '<div style="display: flex; flex-direction: column; gap: 14px; border-top: 1px solid var(--border); padding-top: 20px;">';
+    html += '<div class="config-section-title" style="margin-bottom: 4px;">Runtime Limits</div>';
+    html += '  <div class="form-row">';
+    html += '    <div class="form-group flex-1">';
+    html += '      <label for="cfgMaxBodySize">Max Body Size Bytes</label>';
+    html += '      <input type="number" id="cfgMaxBodySize" min="0" value="' + (config.max_body_size != null ? config.max_body_size : 10485760) + '">';
+    html += '      <p class="form-help">0 disables request body limit.</p>';
+    html += '    </div>';
+    html += '    <div class="form-group flex-1">';
+    html += '      <label for="cfgMaxSearchLoops">Max Search Loops</label>';
+    html += '      <input type="number" id="cfgMaxSearchLoops" min="1" value="' + (config.max_search_loops || 10) + '">';
+    html += '    </div>';
+    html += '  </div>';
+    html += '  <div class="form-row">';
+    html += '    <div class="form-group flex-1">';
+    html += '      <label for="cfgStreamBufferSize">Stream Buffer Size</label>';
+    html += '      <input type="number" id="cfgStreamBufferSize" min="1" value="' + (config.stream_buffer_size || 4096) + '">';
+    html += '    </div>';
+    html += '    <div class="form-group flex-1">';
+    html += '      <label for="cfgChannelCapacity">SSE Channel Capacity</label>';
+    html += '      <input type="number" id="cfgChannelCapacity" min="1" value="' + (config.channel_capacity || 256) + '">';
+    html += '    </div>';
+    html += '  </div>';
     html += '</div>';
 
     // Search integrations Group
@@ -672,6 +769,27 @@ function renderConfig(config) {
     html += '      <input type="text" id="cfgSearxng" value="' + escapeHtml(config.searxng_url || '') + '" placeholder="http://searxng.local">';
     html += '    </div>';
     html += '  </div>';
+    html += '  <div class="form-group">';
+    html += '    <label for="cfgSearxngApiKey">SearXNG API Key</label>';
+    html += '    <input type="password" id="cfgSearxngApiKey" placeholder="' + (config.searxng_api_key_configured ? '•••••••• (Saved)' : 'Optional SearXNG API key') + '">';
+    html += '  </div>';
+    html += '</div>';
+
+    // Proxy topology Group
+    html += '<div style="display: flex; flex-direction: column; gap: 14px; border-top: 1px solid var(--border); padding-top: 20px;">';
+    html += '<div class="config-section-title" style="margin-bottom: 4px;">Proxy Topology</div>';
+    html += '  <div class="form-row">';
+    html += '    <div class="form-group flex-1">';
+    html += '      <label for="cfgPrimaryProxies">Primary Proxies</label>';
+    html += '      <textarea id="cfgPrimaryProxies" rows="3" placeholder="socks5://127.0.0.1:40001">' + escapeHtml(toArray(config.primary_proxies).join('\n')) + '</textarea>';
+    html += '      <p class="form-help">One proxy per line or comma-separated.</p>';
+    html += '    </div>';
+    html += '    <div class="form-group flex-1">';
+    html += '      <label for="cfgWarmStandbyProxies">Warm-Standby Proxies</label>';
+    html += '      <textarea id="cfgWarmStandbyProxies" rows="3" placeholder="socks5://127.0.0.1:40005">' + escapeHtml(toArray(config.warm_standby_proxies).join('\n')) + '</textarea>';
+    html += '      <p class="form-help">Protected standby pool; dashboard restart avoids these.</p>';
+    html += '    </div>';
+    html += '  </div>';
     html += '</div>';
 
     // Security Group
@@ -680,7 +798,7 @@ function renderConfig(config) {
     html += '  <div class="form-group">';
     html += '    <label for="cfgAuthTokens">Authorized Bearer Tokens</label>';
     html += '    <input type="password" id="cfgAuthTokens" placeholder="' + (config.auth_tokens_configured ? '•••••••• (Tokens configured)' : 'Comma-separated authorized keys (e.g. sk-1, sk-2)') + '">';
-    html += '    <p class="form-help">Require clients to authenticate via Bearer token to use bridge. Leave blank to disable auth.</p>';
+    html += '    <p class="form-help">Require clients to authenticate via Bearer token to use bridge. Blank preserves existing tokens; edit raw TOML to remove them.</p>';
     html += '  </div>';
     html += '</div>';
 
@@ -723,32 +841,52 @@ async function handleBasicConfigSave(e) {
   e.preventDefault();
   
   var host = document.getElementById('cfgHost').value.trim();
-  var port = parseInt(document.getElementById('cfgPort').value, 10);
+  var port = parsePositiveInt(document.getElementById('cfgPort').value, 4000, false);
   var model = document.getElementById('cfgModel').value.trim();
   var shellPolicy = document.getElementById('cfgShellPolicy').value;
+  var shellAllowlist = document.getElementById('cfgShellAllowlist').value.trim();
   var searxng = document.getElementById('cfgSearxng').value.trim();
+  var maxBodySize = parsePositiveInt(document.getElementById('cfgMaxBodySize').value, 10485760, true);
+  var maxSearchLoops = parsePositiveInt(document.getElementById('cfgMaxSearchLoops').value, 10, false);
+  var streamBufferSize = parsePositiveInt(document.getElementById('cfgStreamBufferSize').value, 4096, false);
+  var channelCapacity = parsePositiveInt(document.getElementById('cfgChannelCapacity').value, 256, false);
+  var primaryProxies = listFromTextarea(document.getElementById('cfgPrimaryProxies').value);
+  var warmStandbyProxies = listFromTextarea(document.getElementById('cfgWarmStandbyProxies').value);
   
   var tavily = document.getElementById('cfgTavily').value;
   var exa = document.getElementById('cfgExa').value;
   var serper = document.getElementById('cfgSerper').value;
+  var searxngApiKey = document.getElementById('cfgSearxngApiKey').value;
   var authTokens = document.getElementById('cfgAuthTokens').value.trim();
 
-  // Re-generate TOML dynamically based on inputs
+  // Re-generate TOML dynamically based on inputs. Omitted secrets are preserved by backend merge.
+  if (!host || !model) {
+    showToast('Host and model are required', 'error');
+    return;
+  }
   var tomlLines = [
     '# OpenCode2API Configuration Settings',
-    'host = "' + host + '"',
+    tomlStringLine('host', host),
     'port = ' + port,
-    'model = "' + model + '"',
-    'shell_policy = "' + shellPolicy + '"',
+    tomlStringLine('model', model),
+    tomlStringLine('shell_policy', shellPolicy),
+    'max_body_size = ' + maxBodySize,
+    'stream_buffer_size = ' + streamBufferSize,
+    'channel_capacity = ' + channelCapacity,
+    'max_search_loops = ' + maxSearchLoops,
   ];
   
-  if (searxng) tomlLines.push('searxng_url = "' + searxng + '"');
+  if (shellAllowlist) tomlLines.push(tomlStringLine('shell_allowlist', shellAllowlist));
+  if (searxng) tomlLines.push(tomlStringLine('searxng_url', searxng));
+  primaryProxies.forEach(function(p) { tomlLines.push(tomlStringLine('primary_proxies', p)); });
+  warmStandbyProxies.forEach(function(p) { tomlLines.push(tomlStringLine('warm_standby_proxies', p)); });
   
   // Secrets: only include if user explicitly typed a new value
   if (tavily) tomlLines.push('tavily_api_key = "' + escapeToml(tavily) + '"');
   if (exa) tomlLines.push('exa_api_key = "' + escapeToml(exa) + '"');
   if (serper) tomlLines.push('serper_api_key = "' + escapeToml(serper) + '"');
-  if (authTokens) tomlLines.push('auth_tokens = "' + authTokens + '"');
+  if (searxngApiKey) tomlLines.push(tomlStringLine('searxng_api_key', searxngApiKey));
+  if (authTokens) tomlLines.push(tomlStringLine('auth_tokens', authTokens));
 
   var fullToml = tomlLines.join('\n');
   
@@ -776,6 +914,15 @@ async function handleBasicConfigSave(e) {
    ========================================================== */
 async function handleTesterSubmit(e) {
   e.preventDefault();
+  return runTesterStream(false);
+}
+
+async function handleSyntheticTesterClick(e) {
+  e.preventDefault();
+  return runTesterStream(true);
+}
+
+async function runTesterStream(useSynthetic) {
   if (state.testStreaming) return;
   
   var model = document.getElementById('testerModel').value.trim();
@@ -783,26 +930,50 @@ async function handleTesterSubmit(e) {
   var tokens = parseInt(document.getElementById('testerTokens').value || '2048', 10);
   var prompt = document.getElementById('testerPrompt').value.trim();
   
-  if (!model || !prompt) return;
+  if (!prompt) return;
+  if (!useSynthetic && !model) return;
 
   state.testStreaming = true;
   var submitBtn = document.getElementById('testerSubmitBtn');
+  var syntheticBtn = document.getElementById('testerSyntheticBtn');
   submitBtn.disabled = true;
-  submitBtn.querySelector('span').textContent = 'Generating...';
+  if (syntheticBtn) syntheticBtn.disabled = true;
+  submitBtn.querySelector('span').textContent = useSynthetic ? 'Waiting...' : 'Generating...';
+  if (syntheticBtn) syntheticBtn.querySelector('span').textContent = useSynthetic ? 'Streaming...' : 'Synthetic disabled...';
 
   var outputArea = document.getElementById('testResponseArea');
   outputArea.innerHTML = '';
   
   var latencyBadge = document.getElementById('testLatencyBadge');
-  latencyBadge.textContent = '--- ms';
+  latencyBadge.textContent = 'STREAMING • connecting';
   latencyBadge.classList.remove('hidden');
+  latencyBadge.classList.add('streaming');
 
   var startTime = Date.now();
   var firstTokenTime = null;
+  var streamStats = {
+    chunks: 0,
+    events: 0,
+    thinkingChars: 0,
+    textChars: 0,
+    phase: 'connecting'
+  };
+
+  function updateStreamingBadge(phase) {
+    if (phase) streamStats.phase = phase;
+    var elapsed = Date.now() - startTime;
+    latencyBadge.textContent = 'STREAMING • ' + streamStats.phase
+      + ' • think ' + streamStats.thinkingChars
+      + ' • text ' + streamStats.textChars
+      + ' • ' + elapsed + ' ms';
+  }
 
   // Render collapsible thinking process box
   var thinkingBox = null;
   var thinkingContent = null;
+  var renderQueue = [];
+  var renderTimer = null;
+  var renderDrainResolver = null;
   
   function getOrCreateThinkingBox() {
     if (thinkingBox) return thinkingContent;
@@ -827,32 +998,112 @@ async function handleTesterSubmit(e) {
     return thinkingContent;
   }
 
-  // Anthropic compatibility endpoint
-  var url = '/v1/messages';
-  var headers = {
-    'Content-Type': 'application/json',
-  };
-
-  if (state.bridgeToken) {
-    headers['Authorization'] = 'Bearer ' + state.bridgeToken;
+  function scheduleRenderDrain() {
+    if (renderTimer) return;
+    renderTimer = setTimeout(drainRenderQueue, 16);
   }
 
-  var body = {
-    model: model,
-    messages: [
-      { role: 'user', content: prompt }
-    ],
-    temperature: temp,
-    max_tokens: tokens,
-    stream: true
-  };
+  function appendRenderedText(kind, text) {
+    if (!text) return;
+    if (kind === 'thinking') {
+      getOrCreateThinkingBox().appendChild(document.createTextNode(text));
+    } else {
+      outputArea.appendChild(document.createTextNode(text));
+    }
+  }
+
+  function drainRenderQueue() {
+    renderTimer = null;
+    var started = performance.now();
+    var charBudget = 120;
+
+    while (renderQueue.length > 0 && charBudget > 0 && performance.now() - started < 12) {
+      var item = renderQueue[0];
+      if (!item.text) {
+        renderQueue.shift();
+        continue;
+      }
+
+      var takeLen = Math.min(item.text.length, charBudget);
+      var piece = item.text.slice(0, takeLen);
+      item.text = item.text.slice(takeLen);
+      appendRenderedText(item.kind, piece);
+      charBudget -= takeLen;
+
+      if (!item.text) {
+        renderQueue.shift();
+      }
+    }
+
+    outputArea.scrollTop = outputArea.scrollHeight;
+
+    if (renderQueue.length > 0) {
+      scheduleRenderDrain();
+    } else if (renderDrainResolver) {
+      var resolve = renderDrainResolver;
+      renderDrainResolver = null;
+      resolve();
+    }
+  }
+
+  function enqueueRenderedText(kind, text) {
+    if (!text) return;
+    renderQueue.push({ kind: kind, text: String(text) });
+    scheduleRenderDrain();
+  }
+
+  function waitForRenderDrain() {
+    if (renderQueue.length === 0 && !renderTimer) {
+      return Promise.resolve();
+    }
+    return new Promise(function(resolve) {
+      renderDrainResolver = resolve;
+      scheduleRenderDrain();
+    });
+  }
+
+  var url = useSynthetic ? '/api/dashboard/test/stream' : '/v1/messages';
+  var headers = { 'Content-Type': 'application/json' };
+  var body;
+
+  if (useSynthetic) {
+    body = {
+      thinking: 'Synthetic thinking stream: I received the prompt, split the work into small steps, and will emit text after this thinking block.',
+      text: 'Synthetic response stream is working. Prompt received: ' + prompt,
+      delay_ms: 35
+    };
+  } else {
+    if (state.bridgeToken) {
+      headers['Authorization'] = 'Bearer ' + state.bridgeToken;
+    }
+    body = {
+      model: model,
+      messages: [
+        { role: 'user', content: prompt }
+      ],
+      temperature: temp,
+      max_tokens: tokens,
+      stream: true
+    };
+  }
+
+  var controller = new AbortController();
+  var requestTimeout = null;
 
   try {
+    updateStreamingBadge(useSynthetic ? 'synthetic requesting' : 'requesting');
+    requestTimeout = setTimeout(function() {
+      controller.abort();
+    }, useSynthetic ? 15000 : 60000);
     var response = await fetch(url, {
       method: 'POST',
       headers: headers,
-      body: JSON.stringify(body)
+      credentials: 'same-origin',
+      body: JSON.stringify(body),
+      signal: controller.signal
     });
+    clearTimeout(requestTimeout);
+    requestTimeout = null;
 
     if (!response.ok) {
       var errText = await response.text();
@@ -862,16 +1113,18 @@ async function handleTesterSubmit(e) {
     var reader = response.body.getReader();
     var decoder = new TextDecoder();
     var buffer = '';
+    var currentEvent = null;
+    updateStreamingBadge('connected');
 
     while (true) {
       var chunk = await reader.read();
       if (chunk.done) break;
 
+      streamStats.chunks++;
+      updateStreamingBadge('receiving');
       buffer += decoder.decode(chunk.value, { stream: true });
       var lines = buffer.split('\n');
       buffer = lines.pop(); // keep last partial line
-
-      var currentEvent = null;
 
       for (var i = 0; i < lines.length; i++) {
         var line = lines[i].trim();
@@ -885,11 +1138,12 @@ async function handleTesterSubmit(e) {
           if (firstTokenTime === null) {
             firstTokenTime = Date.now();
             var ttft = firstTokenTime - startTime;
-            latencyBadge.textContent = 'TTFT: ' + ttft + ' ms';
+            latencyBadge.textContent = 'STREAMING • first event ' + ttft + ' ms';
           }
 
           try {
             var dataObj = JSON.parse(dataStr);
+            streamStats.events++;
             handleSseEvent(currentEvent, dataObj);
           } catch (e) {
             console.error('Failed to parse SSE data:', dataStr, e);
@@ -898,41 +1152,63 @@ async function handleTesterSubmit(e) {
       }
     }
     
+    await waitForRenderDrain();
     var totalTime = Date.now() - startTime;
-    latencyBadge.textContent = 'Total: ' + totalTime + ' ms';
+    latencyBadge.textContent = 'DONE • think ' + streamStats.thinkingChars
+      + ' • text ' + streamStats.textChars
+      + ' • total ' + totalTime + ' ms';
     showToast('Testing completed', 'success');
   } catch (err) {
-    showToast('Test failed: ' + err.message, 'error');
+    var message = err.name === 'AbortError'
+      ? 'Request timed out before the stream started. Try Synthetic Stream, reduce Max Tokens, or check upstream/proxy logs.'
+      : err.message;
+    showToast('Test failed: ' + message, 'error');
     var errDiv = document.createElement('div');
     errDiv.style.color = 'var(--accent-red)';
     errDiv.style.marginTop = '10px';
-    errDiv.textContent = 'Error: ' + err.message;
+    errDiv.textContent = 'Error: ' + message;
     outputArea.appendChild(errDiv);
   } finally {
+    if (renderTimer) {
+      clearTimeout(renderTimer);
+      renderTimer = null;
+    }
+    renderQueue = [];
+    if (requestTimeout) clearTimeout(requestTimeout);
     state.testStreaming = false;
+    latencyBadge.classList.remove('streaming');
     submitBtn.disabled = false;
+    if (syntheticBtn) syntheticBtn.disabled = false;
     submitBtn.querySelector('span').textContent = 'Run Prompt Test';
+    if (syntheticBtn) syntheticBtn.querySelector('span').textContent = 'Run Synthetic Stream';
   }
 
   function handleSseEvent(event, data) {
+    if (event === 'message_start') {
+      updateStreamingBadge('message_start');
+    } else if (event === 'content_block_start') {
+      var blockType = data.content_block && data.content_block.type;
+      updateStreamingBadge(blockType === 'thinking' ? 'streaming thinking' : 'streaming text');
+    } else if (event === 'content_block_stop') {
+      updateStreamingBadge('block closed');
+    } else if (event === 'message_stop') {
+      updateStreamingBadge('message_stop');
+    }
+
     if (data.type === 'content_block_delta') {
       var delta = data.delta || {};
       
       // Support deepseek reasoning thinking tags
       if (delta.type === 'thinking_delta' || delta.thinking) {
         var thinkText = delta.thinking || '';
-        var block = getOrCreateThinkingBox();
-        block.appendChild(document.createTextNode(thinkText));
-        outputArea.scrollTop = outputArea.scrollHeight;
+        streamStats.thinkingChars += thinkText.length;
+        updateStreamingBadge('streaming thinking');
+        enqueueRenderedText('thinking', thinkText);
       } else if (delta.type === 'text_delta' || delta.text) {
         var text = delta.text || '';
-        // If there's an active thinking box, collapse it when text starts to save space
-        if (thinkingBox && !thinkingBox.classList.contains('collapsed')) {
-          thinkingBox.classList.add('collapsed');
-        }
-        
-        outputArea.appendChild(document.createTextNode(text));
-        outputArea.scrollTop = outputArea.scrollHeight;
+        streamStats.textChars += text.length;
+        updateStreamingBadge('streaming text');
+        enqueueRenderedText('text', text);
       }
     }
   }
@@ -1137,6 +1413,8 @@ function bindEvents() {
 
   // API Tester Form submit
   document.getElementById('testerForm').addEventListener('submit', handleTesterSubmit);
+  var syntheticBtn = document.getElementById('testerSyntheticBtn');
+  if (syntheticBtn) syntheticBtn.addEventListener('click', handleSyntheticTesterClick);
 
   // Settings action
   document.getElementById('settingsBtn').addEventListener('click', showTokenModal);
@@ -1246,6 +1524,9 @@ function init() {
     loadConfig();
     connectSSE();
   });
+
+  // Local live uptime ticker — no API refresh needed.
+  setInterval(updateLiveUptime, 1000);
 
   // Auto-refresh stats/proxies every 30s
   setInterval(function() {

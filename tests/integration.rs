@@ -21,7 +21,7 @@ async fn test_bridge_binary_health() {
     assert_eq!(resp.status(), 200);
 
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["status"], "healthy");
+    assert_eq!(body["status"], "ok");
 }
 
 /// Test non-streaming shell command via `!echo`.
@@ -427,12 +427,18 @@ async fn test_auth_with_streaming() {
         .contains("text/event-stream"));
 }
 
-/// Verify daemon status trong health check response.
+/// Verify daemon status trong diagnostics response.
 #[tokio::test]
 #[ignore]
 async fn test_health_daemon_status() {
-    let bridge = TestBridge::start(HashMap::new()).await;
-    let resp = bridge.get_health().await.unwrap();
+    let bridge = TestBridge::start(HashMap::from([("DASHBOARD_ADMIN_TOKEN", "test-token")])).await;
+    let resp = bridge
+        .client
+        .get(bridge.url("/api/dashboard/diagnostics"))
+        .header("X-Dashboard-Token", "test-token")
+        .send()
+        .await
+        .unwrap();
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["status"], "healthy");
     assert!(body["daemon"]["status"].as_str().is_some());

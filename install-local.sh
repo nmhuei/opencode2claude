@@ -26,12 +26,24 @@ err()  { printf '%sERR%s  %s\n' "${RED}" "${NC}" "$*"; }
 
 # 1. Build project in release mode
 info "Compiling opencode2api in release mode..."
-cargo build --release
+cargo build --release --bin opencode2api --bin opencode2api-serve
 
-if [ ! -f "target/release/opencode2api" ]; then
-    err "Compilation failed. Target binary not found."
-    exit 1
-fi
+BINARIES=(opencode2api opencode2api-serve)
+ALIASES=(oc2api o2a)
+STALE_BINARIES=(opencode2claude oc2api o2a)
+
+# Cargo does not delete old binary artifacts after target names are removed.
+# If target/release is in PATH, stale artifacts can shadow the installed symlinks.
+for stale in "${STALE_BINARIES[@]}"; do
+    rm -f "target/release/${stale}" "target/debug/${stale}"
+done
+
+for bin in "${BINARIES[@]}"; do
+    if [ ! -f "target/release/${bin}" ]; then
+        err "Compilation failed. Target binary not found: ${bin}"
+        exit 1
+    fi
+done
 
 # 2. Determine installation directory
 INSTALL_DIR=""
@@ -55,33 +67,49 @@ mkdir -p "$INSTALL_DIR"
 
 if [ "$USE_SUDO" = true ]; then
     if command -v sudo >/dev/null 2>&1; then
-        sudo cp target/release/opencode2api "$INSTALL_DIR/"
-        sudo cp target/release/oc2api "$INSTALL_DIR/"
-        sudo cp target/release/o2a "$INSTALL_DIR/"
-        sudo cp target/release/opencode2api-serve "$INSTALL_DIR/"
-        sudo chmod +x "$INSTALL_DIR/opencode2api"
-        sudo chmod +x "$INSTALL_DIR/oc2api"
-        sudo chmod +x "$INSTALL_DIR/o2a"
-        sudo chmod +x "$INSTALL_DIR/opencode2api-serve"
+        for bin in "${BINARIES[@]}"; do
+            sudo cp "target/release/${bin}" "$INSTALL_DIR/"
+            sudo chmod +x "$INSTALL_DIR/${bin}"
+        done
+        for alias in "${ALIASES[@]}"; do
+            sudo rm -f "$INSTALL_DIR/${alias}"
+            sudo ln -s "opencode2api" "$INSTALL_DIR/${alias}"
+        done
     else
         err "Cannot write to ${INSTALL_DIR} and 'sudo' is not available."
         exit 1
     fi
 else
-    cp target/release/opencode2api "$INSTALL_DIR/"
-    cp target/release/oc2api "$INSTALL_DIR/"
-    cp target/release/o2a "$INSTALL_DIR/"
-    cp target/release/opencode2api-serve "$INSTALL_DIR/"
-    chmod +x "$INSTALL_DIR/opencode2api"
-    chmod +x "$INSTALL_DIR/oc2api"
-    chmod +x "$INSTALL_DIR/o2a"
-    chmod +x "$INSTALL_DIR/opencode2api-serve"
+    for bin in "${BINARIES[@]}"; do
+        cp "target/release/${bin}" "$INSTALL_DIR/"
+        chmod +x "$INSTALL_DIR/${bin}"
+    done
+    for alias in "${ALIASES[@]}"; do
+        rm -f "$INSTALL_DIR/${alias}"
+        ln -s "opencode2api" "$INSTALL_DIR/${alias}"
+    done
 fi
 
 # 4. Verify installation
 case ":${PATH:-}:" in
     *":${INSTALL_DIR}:"*)
-        ok "Installation successful! ${BOLD}oc2api${NC} is now available globally."
+        ok "Installation successful! ${BOLD}opencode2api${NC} installed; ${BOLD}oc2api${NC} and ${BOLD}o2a${NC} are symlink aliases."
+        for bin in opencode2api oc2api o2a; do
+            resolved="$(command -v "$bin" 2>/dev/null || true)"
+            if [ -n "$resolved" ] && [ "$resolved" != "$INSTALL_DIR/$bin" ]; then
+                warn "${bin} resolves to ${resolved}, not ${INSTALL_DIR}/${bin}. Check PATH order if you still see stale behavior."
+            fi
+        done
+        for alias in "${ALIASES[@]}"; do
+            if [ ! -L "$INSTALL_DIR/${alias}" ]; then
+                warn "${alias} is not a symlink. Re-run ./uninstall-local.sh --all-path then ./install-local.sh if stale behavior remains."
+            fi
+        done
+        case ":${PATH:-}:" in
+            *"target/release"*|*"target/debug"*)
+                warn "Your PATH contains a Cargo target directory. It can shadow installed CLI aliases with stale build artifacts. Prefer ${INSTALL_DIR} before target/*, or remove target/* from PATH."
+                ;;
+        esac
         ;;
     *)
         warn "Installation successful, but ${BOLD}${INSTALL_DIR}${NC} is not in your PATH."

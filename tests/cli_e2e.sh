@@ -16,13 +16,14 @@
 set -Euo pipefail
 
 PROFILE="${1:-release}"
-BIN="./target/${PROFILE}/opencode2claude"
+BIN="./target/${PROFILE}/opencode2api"
 
 # Use a non-default port to avoid conflicts
 TEST_PORT="${TEST_PORT:-4077}"
-PID_DIR="$HOME/.opencode2claude"
-PID_FILE="$PID_DIR/opencode2claude.pid.json"
-LOG_FILE="$PID_DIR/opencode2claude.log"
+PID_DIR="$(pwd)/.runtime_e2e"
+export RUNTIME_DIR="$PID_DIR"
+PID_FILE="$PID_DIR/opencode2api.pid.json"
+LOG_FILE="$PID_DIR/opencode2api.log"
 
 PASS=0
 FAIL=0
@@ -66,6 +67,7 @@ cleanup() {
   "$BIN" server stop --port "$TEST_PORT" 2>/dev/null || true
   # Kill any stragglers on our test port
   lsof -ti :"$TEST_PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+  rm -rf "$PID_DIR"
   sleep 0.5
 }
 
@@ -389,18 +391,18 @@ section "10. Completion Command"
 
 # 10.1 completion bash produces output
 COMP_OUT=$("$BIN" completion bash 2>/dev/null || true)
-if [[ -n "$COMP_OUT" ]] && echo "$COMP_OUT" | grep -q "opencode2claude"; then
+if [[ -n "$COMP_OUT" ]] && echo "$COMP_OUT" | grep -q "opencode2api"; then
   pass "10.1 completion bash → script output"
 else
-  fail "10.1 completion bash" "No opencode2claude in output (len=${#COMP_OUT})"
+  fail "10.1 completion bash" "No opencode2api in output (len=${#COMP_OUT})"
 fi
 
 # 10.2 completion zsh produces output
 COMP_OUT=$("$BIN" completion zsh 2>&1 || true)
-if echo "$COMP_OUT" | grep -q "opencode2claude"; then
+if echo "$COMP_OUT" | grep -q "opencode2api"; then
   pass "10.2 completion zsh → script output"
 else
-  fail "10.2 completion zsh" "No opencode2claude in output"
+  fail "10.2 completion zsh" "No opencode2api in output"
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════

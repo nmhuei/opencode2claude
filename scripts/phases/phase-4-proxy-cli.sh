@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export ROOT_DIR
-export RUNTIME_DIR="${RUNTIME_DIR:-$HOME/.opencode2claude}"
+export RUNTIME_DIR="${RUNTIME_DIR:-$ROOT_DIR/.runtime}"
 export VERIFY_LOG_DIR="${VERIFY_LOG_DIR:-$RUNTIME_DIR/verify}"
 export PROFILE="${PROFILE:-local}"
 
@@ -42,16 +42,16 @@ GATES=(
 )
 
 gate_proxy_help() {
-  info "Gate 4.6: opencode2claude proxy --help works"
-  "$ROOT_DIR/target/debug/opencode2claude" proxy --help >/dev/null 2>&1 || return 1
+  info "Gate 4.6: opencode2api proxy --help works"
+  "$ROOT_DIR/target/debug/opencode2api" proxy --help >/dev/null 2>&1 || return 1
   pass "proxy --help"
 }
 
 gate_proxy_ps() {
   require_profile local heavy || return 0
-  info "Gate 4.7: opencode2claude proxy ps lists proxies"
+  info "Gate 4.7: opencode2api proxy ps lists proxies"
   local output
-  output="$("$ROOT_DIR/target/debug/opencode2claude" proxy ps 2>&1)" || {
+  output="$("$ROOT_DIR/target/debug/opencode2api" proxy ps 2>&1)" || {
     error "proxy ps failed"
     return 1
   }

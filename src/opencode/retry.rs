@@ -78,6 +78,49 @@ fn is_rate_limit_body(body: &str) -> bool {
 /// Maximum retries for 400 provider errors (distinct from rate-limit retries).
 const MAX_PROVIDER_RETRIES: u32 = 1;
 
+fn is_reasoning_heavy_model(model: &str) -> bool {
+    let name = model.to_ascii_lowercase();
+    (name.contains("deepseek") && (name.contains("r1") || name.contains("reasoner")))
+        || name.contains("reasoning")
+        || name.contains("-r1")
+}
+
+fn default_fallbacks_enabled() -> bool {
+    std::env::var("OPENCODE_ENABLE_DEFAULT_FALLBACKS")
+        .ok()
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+fn build_model_retry_list(req_body: &OpenAiRequest) -> Vec<String> {
+    let fallbacks = std::env::var("OPENCODE_MODEL_FALLBACKS")
+        .ok()
+        .map(|s| {
+            s.split(',')
+                .map(|m| crate::opencode::mapper::map_model_name(m.trim()))
+                .filter(|m| !m.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let mut model_list = vec![req_body.model.clone()];
+    if !fallbacks.is_empty() {
+        model_list.extend(fallbacks);
+    } else if default_fallbacks_enabled()
+        && !(req_body.stream && is_reasoning_heavy_model(&req_body.model))
+    {
+        let m = req_body.model.clone();
+        if m.contains("deepseek-v4-flash-free") || m.contains("nemotron-3-ultra-free") {
+            model_list.push("deepseek-v4-flash-free".to_string());
+            model_list.push("nemotron-3-ultra-free".to_string());
+        }
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    model_list.retain(|x| seen.insert(x.clone()));
+    model_list
+}
+
 /// Execute a request with exponential-backoff retry, proxy cooldown, and WARP IP rotation.
 ///
 /// Retry strategy:
@@ -97,28 +140,12 @@ pub(super) async fn execute_with_warp_retry(
     };
     let max_retries = pool_size.max(3) + 2;
 
-    let fallbacks = std::env::var("OPENCODE_MODEL_FALLBACKS")
-        .ok()
-        .map(|s| {
-            s.split(',')
-                .map(|m| crate::opencode::mapper::map_model_name(m.trim()))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-
-    let mut model_list = vec![req_body.model.clone()];
-    if fallbacks.is_empty() {
-        let m = req_body.model.clone();
-        if m.contains("deepseek-v4-flash-free") || m.contains("nemotron-3-ultra-free") {
-            model_list.push("deepseek-v4-flash-free".to_string());
-            model_list.push("nemotron-3-ultra-free".to_string());
-            let mut seen = std::collections::HashSet::new();
-            model_list.retain(|x| seen.insert(x.clone()));
-        }
-    } else {
-        model_list.extend(fallbacks);
-        let mut seen = std::collections::HashSet::new();
-        model_list.retain(|x| seen.insert(x.clone()));
+    let model_list = build_model_retry_list(req_body);
+    if req_body.stream && is_reasoning_heavy_model(&req_body.model) && model_list.len() == 1 {
+        info!(
+            "Streaming reasoning model {} will not use implicit non-reasoning fallback; preserving thinking_delta semantics.",
+            req_body.model
+        );
     }
 
     let mut model_index = 0;
@@ -348,5 +375,66 @@ pub(super) async fn execute_with_warp_retry(
                 )));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::opencode::types::OpenAiRequest;
+    use std::sync::Mutex;
+
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    fn request(model: &str, stream: bool) -> OpenAiRequest {
+        OpenAiRequest {
+            model: model.to_string(),
+            messages: vec![],
+            tools: None,
+            tool_choice: None,
+            stream,
+            temperature: None,
+            max_tokens: Some(32),
+            include_reasoning: None,
+        }
+    }
+
+    #[test]
+    fn test_streaming_reasoning_model_has_no_implicit_non_reasoning_fallback() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("OPENCODE_MODEL_FALLBACKS");
+        std::env::remove_var("OPENCODE_ENABLE_DEFAULT_FALLBACKS");
+
+        let models = build_model_retry_list(&request("deepseek-v4-flash-free", true));
+
+        assert_eq!(models, vec!["deepseek-v4-flash-free"]);
+    }
+
+    #[test]
+    fn test_explicit_fallbacks_are_respected_for_reasoning_stream() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(
+            "OPENCODE_MODEL_FALLBACKS",
+            "opencode/deepseek-v4-flash-free",
+        );
+        std::env::remove_var("OPENCODE_ENABLE_DEFAULT_FALLBACKS");
+
+        let models = build_model_retry_list(&request("deepseek-v4-flash-free", true));
+
+        assert_eq!(models, vec!["deepseek-v4-flash-free"]);
+        std::env::remove_var("OPENCODE_MODEL_FALLBACKS");
+    }
+
+    #[test]
+    fn test_default_fallbacks_can_be_enabled_for_non_reasoning_requests() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("OPENCODE_MODEL_FALLBACKS");
+        std::env::set_var("OPENCODE_ENABLE_DEFAULT_FALLBACKS", "true");
+
+        let models = build_model_retry_list(&request("nemotron-3-ultra-free", false));
+
+        assert!(models.contains(&"nemotron-3-ultra-free".to_string()));
+        assert!(models.contains(&"deepseek-v4-flash-free".to_string()));
+        std::env::remove_var("OPENCODE_ENABLE_DEFAULT_FALLBACKS");
     }
 }

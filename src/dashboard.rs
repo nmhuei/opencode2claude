@@ -11,6 +11,7 @@
 //! | GET | `/api/dashboard/config/raw` | Raw config file content |
 //! | POST | `/api/dashboard/config/save` | Merge-atomic TOML config write |
 //! | GET | `/api/dashboard/events` | Server-Sent Events stream |
+//! | GET/POST | `/api/dashboard/test/stream` | Synthetic Anthropic SSE stream for UI/debug testing |
 //! | POST | `/api/dashboard/proxy/:port/restart` | Restart a managed proxy container |
 
 use crate::proxy_pool::is_protected_proxy_port;
@@ -224,7 +225,8 @@ pub async fn handler_rest_status(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, (StatusCode, Json<Value>)> {
     check_admin_token(&headers, None)?;
-    let pool = state.proxy_pool.read().await;
+    let mut pool = state.proxy_pool.write().await;
+    pool.recover_expired_cooldowns();
     let snapshot = pool.snapshot();
     let uptime_secs = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -267,7 +269,8 @@ pub async fn handler_proxies(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, (StatusCode, Json<Value>)> {
     check_admin_token(&headers, None)?;
-    let pool = state.proxy_pool.read().await;
+    let mut pool = state.proxy_pool.write().await;
+    pool.recover_expired_cooldowns();
     let nodes: Vec<Value> = pool
         .proxies
         .iter()
@@ -311,10 +314,13 @@ pub async fn handler_config(
         "tavily_api_key_configured": cfg.tavily_api_key.is_some(),
         "exa_api_key_configured": cfg.exa_api_key.is_some(),
         "serper_api_key_configured": cfg.serper_api_key.is_some(),
-        "auth_tokens_configured": cfg.auth_tokens.as_ref().map_or(false, |t| !t.is_empty()),
+        "auth_tokens_configured": cfg.auth_tokens.as_ref().is_some_and(|t| !t.is_empty()),
         "searxng_url": cfg.searxng_url,
         "searxng_api_key_configured": cfg.searxng_api_key.is_some(),
         "shell_allowlist": cfg.shell_policy.allowlist_string(),
+        "max_body_size": cfg.max_body_size,
+        "stream_buffer_size": cfg.stream_buffer_size,
+        "channel_capacity": cfg.channel_capacity,
         "max_search_loops": cfg.max_search_loops,
         "primary_proxies": primary_proxies,
         "warm_standby_proxies": warm_standby_proxies,
@@ -351,29 +357,38 @@ pub async fn handler_config_save(
         Some(Json(ref payload)) => match payload.get("content").and_then(|v| v.as_str()) {
             Some(c) => c.to_string(),
             None => {
-                return Err((StatusCode::BAD_REQUEST, Json(json!({
-                    "status": "error",
-                    "success": false,
-                    "message": "Missing 'content' field in JSON body",
-                }))));
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "status": "error",
+                        "success": false,
+                        "message": "Missing 'content' field in JSON body",
+                    })),
+                ));
             }
         },
         None => {
-            return Err((StatusCode::BAD_REQUEST, Json(json!({
-                "status": "error",
-                "success": false,
-                "message": "Request body is required",
-            }))));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "status": "error",
+                    "success": false,
+                    "message": "Request body is required",
+                })),
+            ));
         }
     };
 
     // Validate that the body parses as valid TOML
     if let Err(e) = incoming_toml.parse::<toml::Table>() {
-        return Err((StatusCode::BAD_REQUEST, Json(json!({
-            "status": "error",
-            "success": false,
-            "message": format!("Invalid TOML: {}", e),
-        }))));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "status": "error",
+                "success": false,
+                "message": format!("Invalid TOML: {}", e),
+            })),
+        ));
     }
 
     // Read existing config file content
@@ -400,7 +415,9 @@ pub async fn handler_config_save(
                     let _ = state.event_tx.send(DashboardEvent::ConfigSaved {
                         timestamp: ts.clone(),
                     });
-                    Ok(Json(json!({ "status": "ok", "path": config_path, "success": true })))
+                    Ok(Json(
+                        json!({ "status": "ok", "path": config_path, "success": true }),
+                    ))
                 }
                 Err(e) => {
                     error!("Dashboard: failed to rename config file: {}", e);
@@ -574,6 +591,200 @@ pub async fn handler_events(
     Ok(sse)
 }
 
+/// GET /api/dashboard/test/stream — synthetic Anthropic SSE stream for UI testing.
+pub async fn handler_test_stream_get(
+    headers: HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<
+    Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>,
+    (StatusCode, Json<Value>),
+> {
+    let token = params.get("token").map(|s| s.as_str());
+    check_admin_token(&headers, token)?;
+
+    let thinking = params
+        .get("thinking")
+        .cloned()
+        .unwrap_or_else(default_test_thinking);
+    let text = params
+        .get("text")
+        .cloned()
+        .unwrap_or_else(default_test_text);
+    let delay_ms = parse_test_delay(params.get("delay_ms"));
+
+    Ok(synthetic_test_stream(thinking, text, delay_ms))
+}
+
+/// POST /api/dashboard/test/stream — synthetic Anthropic SSE stream for UI testing.
+pub async fn handler_test_stream_post(
+    headers: HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    body: Option<Json<Value>>,
+) -> Result<
+    Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>,
+    (StatusCode, Json<Value>),
+> {
+    let token = params.get("token").map(|s| s.as_str());
+    check_admin_token(&headers, token)?;
+
+    let body_value = body.as_ref().map(|b| b.0.clone());
+    let thinking = body_value
+        .as_ref()
+        .and_then(|v| v.get("thinking"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| params.get("thinking").cloned())
+        .unwrap_or_else(default_test_thinking);
+    let text = body_value
+        .as_ref()
+        .and_then(|v| v.get("text"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| params.get("text").cloned())
+        .unwrap_or_else(default_test_text);
+    let delay_ms = body_value
+        .as_ref()
+        .and_then(|v| v.get("delay_ms"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or_else(|| parse_test_delay(params.get("delay_ms")));
+
+    Ok(synthetic_test_stream(thinking, text, delay_ms))
+}
+
+fn default_test_thinking() -> String {
+    "I will add the three request counts step by step: 12 + 18 = 30, then 30 + 25 = 55.".to_string()
+}
+
+fn default_test_text() -> String {
+    "The total number of requests is 55.".to_string()
+}
+
+fn parse_test_delay(value: Option<&String>) -> u64 {
+    value
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(40)
+        .clamp(0, 1000)
+}
+
+fn synthetic_test_stream(
+    thinking: String,
+    text: String,
+    delay_ms: u64,
+) -> Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>> {
+    let stream = async_stream::stream! {
+        let sleep = Duration::from_millis(delay_ms);
+        yield Ok(Event::default()
+            .event("message_start")
+            .json_data(json!({
+                "type": "message_start",
+                "message": {
+                    "id": "msg_dashboard_test_stream",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "dashboard/synthetic-stream",
+                    "content": [],
+                    "stop_reason": null,
+                    "stop_sequence": null,
+                    "usage": { "input_tokens": 0, "output_tokens": 0 }
+                }
+            }))
+            .unwrap_or_else(|_| Event::default().data("{}")));
+        tokio::time::sleep(sleep).await;
+
+        yield Ok(Event::default()
+            .event("content_block_start")
+            .json_data(json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": { "type": "thinking", "thinking": "" }
+            }))
+            .unwrap_or_else(|_| Event::default().data("{}")));
+
+        for chunk in chunk_text_for_stream(&thinking) {
+            tokio::time::sleep(sleep).await;
+            yield Ok(Event::default()
+                .event("content_block_delta")
+                .json_data(json!({
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": { "type": "thinking_delta", "thinking": chunk }
+                }))
+                .unwrap_or_else(|_| Event::default().data("{}")));
+        }
+
+        tokio::time::sleep(sleep).await;
+        yield Ok(Event::default()
+            .event("content_block_stop")
+            .json_data(json!({ "type": "content_block_stop", "index": 0 }))
+            .unwrap_or_else(|_| Event::default().data("{}")));
+
+        tokio::time::sleep(sleep).await;
+        yield Ok(Event::default()
+            .event("content_block_start")
+            .json_data(json!({
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": { "type": "text", "text": "" }
+            }))
+            .unwrap_or_else(|_| Event::default().data("{}")));
+
+        for chunk in chunk_text_for_stream(&text) {
+            tokio::time::sleep(sleep).await;
+            yield Ok(Event::default()
+                .event("content_block_delta")
+                .json_data(json!({
+                    "type": "content_block_delta",
+                    "index": 1,
+                    "delta": { "type": "text_delta", "text": chunk }
+                }))
+                .unwrap_or_else(|_| Event::default().data("{}")));
+        }
+
+        tokio::time::sleep(sleep).await;
+        yield Ok(Event::default()
+            .event("content_block_stop")
+            .json_data(json!({ "type": "content_block_stop", "index": 1 }))
+            .unwrap_or_else(|_| Event::default().data("{}")));
+
+        tokio::time::sleep(sleep).await;
+        let output_tokens = ((thinking.len() + text.len()) / 4).max(1);
+        yield Ok(Event::default()
+            .event("message_delta")
+            .json_data(json!({
+                "type": "message_delta",
+                "delta": { "stop_reason": "end_turn", "stop_sequence": null },
+                "usage": { "output_tokens": output_tokens }
+            }))
+            .unwrap_or_else(|_| Event::default().data("{}")));
+
+        yield Ok(Event::default()
+            .event("message_stop")
+            .json_data(json!({ "type": "message_stop" }))
+            .unwrap_or_else(|_| Event::default().data("{}")));
+    };
+
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default().interval(Duration::from_secs(SSE_KEEPALIVE_SECS)))
+}
+
+fn chunk_text_for_stream(text: &str) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut current_len = 0usize;
+    for ch in text.chars() {
+        current.push(ch);
+        current_len += ch.len_utf8();
+        if current_len >= 8 || matches!(ch, ' ' | '.' | ',' | ':' | ';' | '\n') {
+            chunks.push(std::mem::take(&mut current));
+            current_len = 0;
+        }
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
+}
+
 // ── Background Tasks ──
 
 /// Spawn a heartbeat task that sends a `Heartbeat` event every 30 seconds.
@@ -634,7 +845,10 @@ pub async fn handler_login(
 
     // Extract token: JSON body first, then header/cookie fallback
     let token = body
-        .and_then(|b| b.get("token").and_then(|v| v.as_str().map(|s| s.to_string())))
+        .and_then(|b| {
+            b.get("token")
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+        })
         .or_else(|| {
             // Fallback: try X-Dashboard-Token header
             headers
@@ -657,19 +871,19 @@ pub async fn handler_login(
             Ok(res)
         }
         Some(_) => Err((
-                StatusCode::UNAUTHORIZED,
-                Json(json!({
-                    "status": "error",
-                    "message": "Invalid password",
-                })),
-            )),
+            StatusCode::UNAUTHORIZED,
+            Json(json!({
+                "status": "error",
+                "message": "Invalid password",
+            })),
+        )),
         None => Err((
-                StatusCode::UNAUTHORIZED,
-                Json(json!({
-                    "status": "error",
-                    "message": "Please enter password to login",
-                })),
-            )),
+            StatusCode::UNAUTHORIZED,
+            Json(json!({
+                "status": "error",
+                "message": "Please enter password to login",
+            })),
+        )),
     }
 }
 
@@ -681,7 +895,8 @@ pub async fn handler_logout() -> Response {
         HeaderValue::from_str(&format!(
             "{}={}; Path=/; HttpOnly; SameSite=Strict; Max-Age=0",
             SESSION_COOKIE, ""
-        )).unwrap(),
+        ))
+        .unwrap(),
     );
     res
 }
@@ -695,7 +910,11 @@ pub async fn handler_dashboard_diagnostics(
 
     let daemon_ok =
         crate::opencode::check_daemon(&state.http_client, state.config.opencode_port).await;
-    let proxy_pool_stats = state.proxy_pool.read().await.snapshot();
+    let proxy_pool_stats = {
+        let mut pool = state.proxy_pool.write().await;
+        pool.recover_expired_cooldowns();
+        pool.snapshot()
+    };
 
     Ok(Json(json!({
         "status": "healthy",
@@ -721,12 +940,12 @@ pub async fn handler_auth_status(headers: HeaderMap) -> Json<Value> {
     let configured = !admin_token.is_empty();
 
     let authenticated = if configured {
-        let cookie_token = extract_cookie(&headers, SESSION_COOKIE)
-            .or_else(|| {
-                headers.get("X-Dashboard-Token")
-                    .and_then(|v| v.to_str().ok())
-                    .map(|s| s.to_string())
-            });
+        let cookie_token = extract_cookie(&headers, SESSION_COOKIE).or_else(|| {
+            headers
+                .get("X-Dashboard-Token")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string())
+        });
         cookie_token.as_deref() == Some(&admin_token)
     } else {
         false

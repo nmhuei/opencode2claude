@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export ROOT_DIR
-export RUNTIME_DIR="${RUNTIME_DIR:-$HOME/.opencode2claude}"
+export RUNTIME_DIR="${RUNTIME_DIR:-$ROOT_DIR/.runtime}"
 export VERIFY_LOG_DIR="${VERIFY_LOG_DIR:-$RUNTIME_DIR/verify}"
 export PROFILE="${PROFILE:-local}"
 
@@ -38,7 +38,7 @@ GATES=(
 
 gate_cli_help() {
   info "Gate 1.5: CLI help"
-  local bin="$ROOT_DIR/target/debug/opencode2claude"
+  local bin="$ROOT_DIR/target/debug/opencode2api"
   # Top-level help (entry-point showing all subcommands)
   "$bin" --help >/dev/null 2>&1 || return 1
   # Each subcommand should have valid --help (will fail until Phase 1 Rust code)
@@ -54,7 +54,7 @@ gate_cli_help() {
 gate_cli_smoke() {
   require_profile local heavy || return 0
   info "Gate 1.6: CLI smoke"
-  local bin="$ROOT_DIR/target/debug/opencode2claude"
+  local bin="$ROOT_DIR/target/debug/opencode2api"
   local port; port="$(pick_free_port)"
   local pid; local log_file="$VERIFY_LOG_DIR/phase-1-cli-smoke.log"
   "$bin" serve --port "$port" >"$log_file" 2>&1 & pid=$!

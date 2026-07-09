@@ -27,6 +27,8 @@ pub struct SseBlockTracker {
     tool_indices: HashMap<usize, (usize, String, String)>,
     /// Next content block index to assign.
     next_idx: usize,
+    /// Whether any block has ever been opened (tracked for fallback detection).
+    ever_opened: bool,
 }
 
 impl SseBlockTracker {
@@ -37,13 +39,22 @@ impl SseBlockTracker {
             text_idx: None,
             tool_indices: HashMap::new(),
             next_idx: 0,
+            ever_opened: false,
         }
+    }
+
+    /// Return true if any block has ever been opened since creation.
+    /// Used to detect "empty stream" scenarios where message_start was sent
+    /// but upstream returned zero content deltas.
+    pub fn has_any_blocks_ever_opened(&self) -> bool {
+        self.ever_opened
     }
 
     /// Allocate and return the next content block index.
     pub fn next_index(&mut self) -> usize {
         let i = self.next_idx;
         self.next_idx += 1;
+        self.ever_opened = true;
         i
     }
 
@@ -175,6 +186,21 @@ impl SseBlockTracker {
         let block_idx = self.next_index();
         self.tool_indices.insert(call_idx, (block_idx, id, name));
         (block_idx, closed_thinking, closed_text)
+    }
+
+    // ── Full Reset ──
+
+    /// Fully reset the tracker to its initial state.
+    ///
+    /// Unlike `close_all()` which only closes active blocks, this also resets
+    /// `ever_opened` and `next_idx` back to zero. Used between search intercept
+    /// loop iterations so the next stream starts with a clean slate.
+    pub fn reset(&mut self) {
+        self.thinking_idx = None;
+        self.text_idx = None;
+        self.tool_indices.clear();
+        self.next_idx = 0;
+        self.ever_opened = false;
     }
 }
 
@@ -371,5 +397,43 @@ mod tests {
         t.close_thinking();
         t.open_thinking(); // idx 1
         assert_eq!(t.thinking_idx(), Some(1));
+    }
+
+    #[test]
+    fn test_reset_clears_all_state() {
+        let mut t = SseBlockTracker::new();
+        t.open_thinking(); // idx 0
+        t.open_text(); // idx 1, closes thinking
+        t.open_tool_use(0, "toolu_abc".into(), "bash".into()); // idx 2
+        assert!(t.has_any_blocks_ever_opened());
+
+        t.reset();
+
+        // Everything should be back to initial state
+        assert!(!t.has_any_blocks_ever_opened());
+        assert!(!t.has_open_blocks());
+        assert!(t.thinking_idx().is_none());
+        assert!(t.text_idx().is_none());
+        assert!(t.tool_idx(0).is_none());
+        // next_index should start from 0 again
+        assert_eq!(t.next_index(), 0);
+    }
+
+    #[test]
+    fn test_reset_between_search_loops() {
+        let mut t = SseBlockTracker::new();
+
+        // Simulate loop 1: open thinking + text, then close_all + reset
+        t.open_thinking(); // idx 0
+        t.open_text(); // idx 1
+        let closed = t.close_all();
+        assert_eq!(closed.len(), 1); // only text (thinking auto-closed by open_text)
+        t.reset();
+
+        // Simulate loop 2: tracker should behave as fresh
+        assert!(!t.has_any_blocks_ever_opened());
+        let (idx, _, _) = t.ensure_text();
+        assert_eq!(idx, 0); // starts from 0 again
+        assert!(t.has_any_blocks_ever_opened());
     }
 }

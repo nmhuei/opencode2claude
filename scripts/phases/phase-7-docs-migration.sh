@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export ROOT_DIR
-export RUNTIME_DIR="${RUNTIME_DIR:-$HOME/.opencode2claude}"
+export RUNTIME_DIR="${RUNTIME_DIR:-$ROOT_DIR/.runtime}"
 export VERIFY_LOG_DIR="${VERIFY_LOG_DIR:-$RUNTIME_DIR/verify}"
 export PROFILE="${PROFILE:-local}"
 
@@ -117,6 +117,10 @@ gate_no_40010() {
 
 gate_stop_sh_no_standby_stop() {
   info "Gate 7.14: stop.sh does not stop WarmStandby 40004-40005"
+  if [[ ! -f "$ROOT_DIR/stop.sh" ]]; then
+    pass "stop.sh has been removed (deprecated)"
+    return 0
+  fi
   # stop.sh must exclude warm-standby containers from docker stop/purge
   if ! grep -q "grep -v .opencode-warp-4\|grep -v .opencode-warp-5" "$ROOT_DIR/stop.sh" 2>/dev/null; then
     error "stop.sh does not exclude warm-standby containers (40004-40005)"

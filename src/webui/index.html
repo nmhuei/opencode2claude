@@ -293,7 +293,7 @@
               </div>
               <div class="form-group">
                 <label for="testerPrompt">User Prompt</label>
-                <textarea id="testerPrompt" rows="5" placeholder="Type a prompt for the model..." required>Write a short, engaging description of how opencode2api translates API requests.</textarea>
+                <textarea id="testerPrompt" rows="5" placeholder="Type a prompt for the model..." required>Solve this small routing puzzle: three agents send 12, 18, and 25 requests. Explain briefly how you calculate the total, then give the final number.</textarea>
               </div>
               
               <button type="submit" class="btn btn-primary btn-block" id="testerSubmitBtn">
@@ -301,6 +301,13 @@
                   <polygon points="5 3 19 12 5 21 5 3"/>
                 </svg>
                 <span>Run Prompt Test</span>
+              </button>
+              <button type="button" class="btn btn-secondary btn-block" id="testerSyntheticBtn">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="23 4 23 10 17 10"/>
+                  <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                </svg>
+                <span>Run Synthetic Stream</span>
               </button>
             </form>
           </div>
@@ -335,6 +342,6 @@
   <option value="opencode/nemotron-3-ultra-free">Nemotron 3 Ultra (Free)</option>
 </datalist>
 
-<script src="/dashboard/app.js?v=1.1.2"></script>
+<script src="/dashboard/app.js?v=1.1.10"></script>
 </body>
 </html>

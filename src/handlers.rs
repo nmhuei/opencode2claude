@@ -71,7 +71,7 @@ pub struct AnthropicTool {
 }
 
 /// Request body for POST /v1/messages, matching the Anthropic Messages API schema.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct MessagesRequest {
     /// Optional model override (falls back to DEFAULT_MODEL when absent).
     pub model: Option<String>,

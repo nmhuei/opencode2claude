@@ -14,18 +14,19 @@ use opencode2api::output::{setup_color, OutputFormat};
 use opencode2api::proxy_pool;
 use opencode2api::runtime::RuntimePaths;
 use opencode2api::server::{run_server, ServeArgsBridge};
-use opencode2api::supervisor::{Supervisor, SupervisorStatus};
+use opencode2api::supervisor::{Supervisor, SupervisorError, SupervisorStatus};
 
 use clap::CommandFactory;
 use clap::Parser;
 use clap_complete::generate;
 
-use comfy_table::{presets, Cell as CtCell, Color as CtColor, ContentArrangement, Table};
+use comfy_table::{
+    modifiers, presets, Cell as CtCell, Color as CtColor, ContentArrangement, Table,
+};
 use indicatif::{ProgressBar, ProgressStyle};
 use yansi::Paint;
 
-#[tokio::main]
-async fn main() {
+pub async fn run_cli() {
     // Load environment variables from .env file if present
     let _ = dotenvy::dotenv();
 
@@ -104,7 +105,9 @@ async fn main() {
             cmd_logs_legacy(fmt)
         }
 
-        // Default: run server in foreground
+        // Default: keep legacy foreground behavior, but do not try to bind over
+        // an already-running bridge. This avoids confusing "address in use"
+        // errors when users type `o2a` after `o2a server start`.
         None => cmd_run_server(ServeArgsBridge::default()).await,
     }
 }
@@ -124,6 +127,7 @@ async fn cmd_server(cmd: ServerCommand, fmt: OutputFormat) {
                     config: args.config,
                     model: args.model,
                     shell_policy: args.shell_policy.map(|p| p.to_string()),
+                    max_body_size: args.max_body_size,
                     tavily_api_key: args.tavily_api_key,
                     exa_api_key: args.exa_api_key,
                     serper_api_key: args.serper_api_key,
@@ -253,10 +257,19 @@ async fn start_daemon(mut args: cli::ServerStartArgs, fmt: OutputFormat) {
                     println!("{s}");
                 }
             }
+            Err(
+                SupervisorError::AlreadyRunning(_) | SupervisorError::AlreadyRunningUnmanaged(_),
+            ) => {
+                let status = sup.status().unwrap_or(SupervisorStatus::Stopped);
+                let info = ServerStatusInfo::from(Ok(status));
+                if let Ok(s) = serde_json::to_string_pretty(&info) {
+                    println!("{s}");
+                }
+            }
             Err(e) => {
                 eprintln!("{} start: {}", "✗".red().bold(), e);
                 eprintln!(
-                    "   Hint: Check if the bridge is already running. Try: `oc2api server stop`"
+                    "   Hint: Check if the bridge is already running. Try: `oc2api server status`"
                 );
                 std::process::exit(1);
             }
@@ -284,10 +297,19 @@ async fn start_daemon(mut args: cli::ServerStartArgs, fmt: OutputFormat) {
             ));
             maybe_print_proxy_table(fmt).await;
         }
+        Err(SupervisorError::AlreadyRunning(_) | SupervisorError::AlreadyRunningUnmanaged(_)) => {
+            let status = sup.status().unwrap_or(SupervisorStatus::Stopped);
+            spinner.finish_with_message(format!(
+                "{} Bridge already running. {}",
+                "✓".green().bold(),
+                status
+            ));
+            maybe_print_proxy_table(fmt).await;
+        }
         Err(e) => {
             spinner.finish_and_clear();
             eprintln!("{} start: {}", "✗".red().bold(), e);
-            eprintln!("   Hint: Check if the bridge is already running. Try: `oc2api server stop`");
+            eprintln!("   Hint: Check status with `oc2api server status` or stop with `oc2api server stop`");
             std::process::exit(1);
         }
     }
@@ -428,6 +450,13 @@ async fn cmd_init(args: InitArgs) {
 }
 
 fn cmd_env(fmt: OutputFormat) {
+    if fmt == OutputFormat::Quiet {
+        for line in shell_export_lines() {
+            println!("{}", line);
+        }
+        return;
+    }
+
     if fmt == OutputFormat::Json {
         #[derive(serde::Serialize)]
         struct EnvInfo {
@@ -813,6 +842,7 @@ async fn cmd_serve_legacy(args: cli::ServeArgs) {
         config: args.config,
         model: args.model,
         shell_policy: args.shell_policy.map(|p| p.to_string()),
+        max_body_size: args.max_body_size,
         tavily_api_key: args.tavily_api_key,
         exa_api_key: args.exa_api_key,
         serper_api_key: args.serper_api_key,
@@ -907,6 +937,86 @@ fn uptime_str(started_at: u64) -> String {
     }
 }
 
+fn print_brand_header(title: &str, subtitle: &str) {
+    println!();
+    println!(
+        "{}",
+        "╭────────────────────────────────────────────────────────────╮"
+            .cyan()
+            .bold()
+    );
+    println!(
+        "{} {} {} {}",
+        "│".cyan().bold(),
+        title.bold(),
+        subtitle.dim(),
+        "│".cyan().bold()
+    );
+    println!(
+        "{}",
+        "╰────────────────────────────────────────────────────────────╯"
+            .cyan()
+            .bold()
+    );
+}
+
+fn print_section(title: &str) {
+    println!();
+    println!("{} {}", "◆".cyan().bold(), title.bold());
+}
+
+fn print_tip(message: &str) {
+    println!("{} {}", "➜".cyan().bold(), message.dim());
+}
+
+fn status_cell(label: &str, color: CtColor) -> CtCell {
+    CtCell::new(label).fg(color)
+}
+
+fn key_value_table(headers: (&str, &str), rows: Vec<(&str, String)>) -> Table {
+    let mut table = Table::new();
+    table
+        .load_preset(presets::UTF8_FULL_CONDENSED)
+        .apply_modifier(modifiers::UTF8_ROUND_CORNERS)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(vec![
+            CtCell::new(headers.0).fg(CtColor::Cyan),
+            CtCell::new(headers.1).fg(CtColor::Cyan),
+        ]);
+    for (key, value) in rows {
+        table.add_row(vec![CtCell::new(key).fg(CtColor::Blue), CtCell::new(value)]);
+    }
+    table
+}
+
+fn masked_configured_label(value: &str) -> String {
+    if value.trim().is_empty() {
+        "not configured".yellow().bold().to_string()
+    } else {
+        "configured".green().bold().to_string()
+    }
+}
+
+fn shell_export_lines() -> Vec<String> {
+    let port = std::env::var("BRIDGE_PORT")
+        .ok()
+        .and_then(|v| v.parse::<u16>().ok())
+        .unwrap_or(config::DEFAULT_BRIDGE_PORT);
+    let mut lines = vec![
+        "export ANTHROPIC_API_KEY=\"opencode-bridge\"".to_string(),
+        format!("export ANTHROPIC_BASE_URL=\"http://127.0.0.1:{}/v1\"", port),
+    ];
+    if let Ok(model) = std::env::var("OPENCODE_MODEL") {
+        if !model.trim().is_empty() {
+            lines.push(format!(
+                "export OPENCODE_MODEL=\"{}\"",
+                model.replace('"', "\\\"")
+            ));
+        }
+    }
+    lines
+}
+
 /// Print proxy pool status table (used by `server status` and `proxy ps`).
 async fn print_proxy_table() -> Table {
     let primary_ports = proxy_pool::get_primary_ports();
@@ -920,9 +1030,15 @@ async fn print_proxy_table() -> Table {
 
     let mut table = Table::new();
     table
-        .load_preset(presets::NOTHING)
+        .load_preset(presets::UTF8_FULL_CONDENSED)
+        .apply_modifier(modifiers::UTF8_ROUND_CORNERS)
         .set_content_arrangement(ContentArrangement::Dynamic)
-        .set_header(vec!["Node", "Role", "Status", "Port"]);
+        .set_header(vec![
+            CtCell::new("Node").fg(CtColor::Cyan),
+            CtCell::new("Role").fg(CtColor::Cyan),
+            CtCell::new("Status").fg(CtColor::Cyan),
+            CtCell::new("Port").fg(CtColor::Cyan),
+        ]);
 
     for (port, name, running) in &containers {
         let short_name = name.strip_prefix("opencode-warp-").unwrap_or(name);
@@ -938,10 +1054,10 @@ async fn print_proxy_table() -> Table {
         };
 
         table.add_row(vec![
-            CtCell::new(short_name),
+            CtCell::new(short_name).fg(CtColor::Blue),
             CtCell::new(role),
-            CtCell::new(status_str).fg(status_color),
-            CtCell::new(port.to_string()),
+            status_cell(status_str, status_color),
+            CtCell::new(port.to_string()).fg(CtColor::Magenta),
         ]);
     }
 
@@ -951,8 +1067,7 @@ async fn print_proxy_table() -> Table {
 /// Print proxy pool table in Human mode; no-op in Json/Quiet.
 async fn maybe_print_proxy_table(fmt: OutputFormat) {
     if fmt == OutputFormat::Human {
-        println!();
-        println!(" {}", " Proxy Pool".cyan().bold());
+        print_section("Proxy pool");
         let proxy_table = print_proxy_table().await;
         println!("{}", proxy_table);
     }
@@ -967,16 +1082,17 @@ async fn cmd_print_status(status: SupervisorStatus, fmt: OutputFormat) {
         }
         return;
     }
-    println!();
+
     match status {
         SupervisorStatus::Running {
             pid,
             port,
             started_at,
+            managed,
         } => {
             let uptime = uptime_str(started_at);
             let model = std::env::var("OPENCODE_MODEL").unwrap_or_else(|_| "auto".into());
-            let auth = if std::env::var("BRIDGE_AUTH_TOKEN")
+            let bridge_auth = if std::env::var("BRIDGE_AUTH_TOKEN")
                 .ok()
                 .filter(|t| !t.is_empty())
                 .is_some()
@@ -985,29 +1101,57 @@ async fn cmd_print_status(status: SupervisorStatus, fmt: OutputFormat) {
             } else {
                 "disabled".yellow().bold().to_string()
             };
+            let dashboard_auth = masked_configured_label(
+                &std::env::var("DASHBOARD_ADMIN_TOKEN").unwrap_or_default(),
+            );
+            let managed_label = if managed {
+                "supervisor-managed".green().bold().to_string()
+            } else {
+                "unmanaged / recovered by health probe"
+                    .yellow()
+                    .bold()
+                    .to_string()
+            };
 
-            // Bridge dashboard header
-            println!(
-                " {}            PID: {:<10} Uptime: {}",
-                "● Online".green().bold(),
-                pid.to_string().yellow().bold(),
-                uptime.cyan().bold()
+            print_brand_header("OpenCode2API Bridge", "local Anthropic-compatible gateway");
+            println!("{} {}", "●".green().bold(), "ONLINE".green().bold());
+            let table = key_value_table(
+                ("Runtime", "Value"),
+                vec![
+                    ("Endpoint", format!("http://127.0.0.1:{}/v1", port)),
+                    ("Dashboard", format!("http://127.0.0.1:{}/dashboard/", port)),
+                    (
+                        "PID",
+                        pid.map(|p| p.to_string())
+                            .unwrap_or_else(|| "unmanaged".to_string()),
+                    ),
+                    ("Supervisor", managed_label),
+                    ("Uptime", uptime),
+                    ("Model", model),
+                    ("Bridge auth", bridge_auth),
+                    ("Dashboard auth", dashboard_auth),
+                ],
             );
-            println!(
-                "  Port: {:<14} Model: {}",
-                port.to_string().cyan().bold(),
-                model.blue().bold()
-            );
-            println!("  Auth: {}", auth);
+            println!("{}", table);
             maybe_print_proxy_table(fmt).await;
+            print_tip("Use `eval \"$(opencode2api --quiet env)\"` to configure Claude Code.");
         }
         SupervisorStatus::Stopped => {
-            println!(" {}  Bridge is not running", "● Stopped".red().bold());
+            print_brand_header("OpenCode2API Bridge", "daemon status");
+            println!("{} {}", "●".red().bold(), "STOPPED".red().bold());
+            let table = key_value_table(
+                ("Check", "Value"),
+                vec![
+                    ("Bridge", "not running".red().bold().to_string()),
+                    ("Next step", "opencode2api server start".to_string()),
+                    ("Dashboard", "opencode2api dashboard start".to_string()),
+                ],
+            );
+            println!("{}", table);
         }
     }
     println!();
 }
-
 #[derive(serde::Serialize)]
 struct ServerStatusInfo {
     status: String,
@@ -1020,12 +1164,19 @@ impl From<Result<SupervisorStatus, String>> for ServerStatusInfo {
     fn from(result: Result<SupervisorStatus, String>) -> Self {
         match result {
             Ok(SupervisorStatus::Running {
-                pid, started_at, ..
+                pid,
+                started_at,
+                managed,
+                ..
             }) => Self {
                 status: "running".to_string(),
-                pid: Some(pid),
+                pid,
                 uptime: Some(uptime_str(started_at)),
-                message: None,
+                message: if managed {
+                    None
+                } else {
+                    Some("running but not tracked by supervisor PID file".to_string())
+                },
             },
             Ok(SupervisorStatus::Stopped) => Self {
                 status: "stopped".to_string(),
@@ -1048,72 +1199,86 @@ fn cmd_print_env() {
         .ok()
         .and_then(|v| v.parse::<u16>().ok())
         .unwrap_or(config::DEFAULT_BRIDGE_PORT);
-    let model = std::env::var("OPENCODE_MODEL").ok();
+    let model = std::env::var("OPENCODE_MODEL").unwrap_or_else(|_| "auto".to_string());
 
-    println!();
-    println!(" {}", "Environment Configuration".cyan().bold());
-    println!("{}", "─".repeat(40).cyan().dim());
-    println!(
-        " {} = {}",
-        "ANTHROPIC_API_KEY".bold(),
-        "opencode-bridge".green().dim()
+    print_brand_header(
+        "Claude Code Environment",
+        "copy these values into your shell session",
     );
-    println!(
-        " {} = {}",
-        "ANTHROPIC_BASE_URL".bold(),
-        format!("http://127.0.0.1:{}/v1", port).cyan().bold()
+    let table = key_value_table(
+        ("Variable", "Value"),
+        vec![
+            (
+                "ANTHROPIC_API_KEY",
+                "opencode-bridge".green().dim().to_string(),
+            ),
+            (
+                "ANTHROPIC_BASE_URL",
+                format!("http://127.0.0.1:{}/v1", port)
+                    .cyan()
+                    .bold()
+                    .to_string(),
+            ),
+            ("OPENCODE_MODEL", model.yellow().bold().to_string()),
+        ],
     );
-    if let Some(m) = model {
-        println!(" {} = {}", "OPENCODE_MODEL".bold(), m.yellow().bold());
-    }
-    println!();
-    println!(" {}", "eval \"$(oc2api env)\"".green().bold());
+    println!("{}", table);
+    print_section("Shell setup");
+    println!("{}", "eval \"$(opencode2api --quiet env)\"".green().bold());
+    print_tip("Human mode is for reading; --quiet prints eval-safe export lines.");
     println!();
 }
 
 fn cmd_print_config() {
     let config = BridgeConfig::from_env_and_cli(config::CliOverrides::default());
-    println!();
-    println!(" {}", "Server Configuration".cyan().bold());
-    println!("{}", "─".repeat(40).cyan().dim());
-    println!(
-        " {} = {}",
-        "BRIDGE_PORT".bold(),
-        config.bridge_port.to_string().cyan().bold()
+    let model = config
+        .model
+        .clone()
+        .unwrap_or_else(|| "auto (claude-3-5-sonnet)".to_string());
+    let auth = if config.auth_enabled() {
+        "enabled".green().bold().to_string()
+    } else {
+        "disabled".yellow().bold().to_string()
+    };
+
+    print_brand_header("Server Configuration", "effective runtime settings");
+    let table = key_value_table(
+        ("Setting", "Value"),
+        vec![
+            (
+                "Bridge host",
+                config.host.to_string().cyan().bold().to_string(),
+            ),
+            (
+                "Bridge port",
+                config.bridge_port.to_string().cyan().bold().to_string(),
+            ),
+            ("API auth", auth),
+            (
+                "Shell policy",
+                config.shell_policy.description().cyan().bold().to_string(),
+            ),
+            ("Model", model.yellow().bold().to_string()),
+            (
+                "Max body size",
+                format!("{} bytes", config.max_body_size)
+                    .cyan()
+                    .bold()
+                    .to_string(),
+            ),
+            (
+                "Search loops",
+                config
+                    .max_search_loops
+                    .to_string()
+                    .cyan()
+                    .bold()
+                    .to_string(),
+            ),
+        ],
     );
-    println!(
-        " {} = {}",
-        "BRIDGE_HOST".bold(),
-        config.host.to_string().cyan().bold()
-    );
-    println!(
-        " {} = {}",
-        "BRIDGE_AUTH_TOKEN".bold(),
-        if config.auth_enabled() {
-            "enabled".green().bold()
-        } else {
-            "disabled".yellow().bold()
-        }
-    );
-    println!(
-        " {} = {}",
-        "BRIDGE_SHELL_POLICY".bold(),
-        config.shell_policy.description().cyan().bold()
-    );
-    println!(
-        " {} = {}",
-        "OPENCODE_MODEL".bold(),
-        config
-            .model
-            .unwrap_or_else(|| "auto (claude-3-5-sonnet)".to_string())
-            .yellow()
-            .bold()
-    );
-    println!(
-        " {} = {}",
-        "MAX_BODY_SIZE".bold(),
-        format!("{} bytes", config.max_body_size).cyan().bold()
-    );
+    println!("{}", table);
+    print_tip("Use `opencode2api init --force` to regenerate a config template.");
     println!();
 }
 
@@ -1158,6 +1323,12 @@ fn show_logs(fmt: OutputFormat) {
                 return;
             }
 
+            if fmt == OutputFormat::Human {
+                print_brand_header("Bridge Logs", "last 100 daemon lines");
+                println!("{} {}", "File".cyan().bold(), log_path.display());
+                println!();
+            }
+
             for line in tail {
                 let colored = if line.contains("ERROR") {
                     line.replace("ERROR", &"ERROR".red().bold().to_string())
@@ -1182,6 +1353,16 @@ fn show_logs(fmt: OutputFormat) {
 // ── Core server ──
 
 async fn cmd_run_server(args: ServeArgsBridge) {
+    let sup = resolve_runtime(args.port, args.host.clone());
+    if let Ok(status @ SupervisorStatus::Running { .. }) = sup.status() {
+        eprintln!(
+            "{} Bridge is already running. {}",
+            "✓".green().bold(),
+            status
+        );
+        eprintln!("   Use `o2a server status`, `o2a server stop`, or `o2a server start -f --port <port>`.");
+        return;
+    }
     run_server(args).await;
 }
 
@@ -1256,6 +1437,7 @@ fn resolve_runtime_for_start(args: &cli::ServerStartArgs) -> Supervisor {
         "--searxng-api-key",
         args.searxng_api_key.as_deref(),
     );
+    push_opt_arg_usize(&mut child_args, "--max-body-size", args.max_body_size);
 
     let paths = RuntimePaths::new();
     Supervisor::new(paths, p, h).with_child_args(child_args)
@@ -1263,6 +1445,13 @@ fn resolve_runtime_for_start(args: &cli::ServerStartArgs) -> Supervisor {
 
 fn push_opt_arg(argv: &mut Vec<String>, flag: &str, value: Option<&str>) {
     if let Some(value) = value.filter(|v| !v.is_empty()) {
+        argv.push(flag.to_string());
+        argv.push(value.to_string());
+    }
+}
+
+fn push_opt_arg_usize(argv: &mut Vec<String>, flag: &str, value: Option<usize>) {
+    if let Some(value) = value {
         argv.push(flag.to_string());
         argv.push(value.to_string());
     }
@@ -1293,11 +1482,17 @@ async fn cmd_dashboard(cmd: DashboardCommand, fmt: OutputFormat) {
     // Load .env if present
     let _ = dotenvy::dotenv();
 
-    let default_port = 4000;
-    let default_host = std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
-    let supervisor = resolve_runtime(Some(default_port), Some(default_host.to_string()));
+    let supervisor = resolve_runtime(None, None);
+    let status = supervisor.status().unwrap_or(SupervisorStatus::Stopped);
+    let default_port = match &status {
+        SupervisorStatus::Running { port, .. } => *port,
+        SupervisorStatus::Stopped => std::env::var("BRIDGE_PORT")
+            .ok()
+            .and_then(|v| v.parse::<u16>().ok())
+            .unwrap_or(config::DEFAULT_BRIDGE_PORT),
+    };
 
-    let is_running = matches!(supervisor.status(), Ok(SupervisorStatus::Running { .. }));
+    let is_running = status.is_running();
 
     match cmd {
         DashboardCommand::Start => {
@@ -1318,50 +1513,27 @@ async fn cmd_dashboard(cmd: DashboardCommand, fmt: OutputFormat) {
             let url = format!("http://127.0.0.1:{}/dashboard/", default_port);
 
             if fmt == OutputFormat::Human {
-                println!("🚀 Opening dashboard in browser: {}", url.cyan().bold());
-
                 let token = std::env::var("DASHBOARD_ADMIN_TOKEN").unwrap_or_default();
+                print_brand_header("Dashboard", "admin control plane");
+                let table = key_value_table(
+                    ("Item", "Value"),
+                    vec![
+                        ("Status", "ready".green().bold().to_string()),
+                        ("URL", url.cyan().bold().to_string()),
+                        ("Admin auth", masked_configured_label(&token)),
+                    ],
+                );
+                println!("{}", table);
                 if token.is_empty() {
-                    println!(
-                        "{} {} DASHBOARD_ADMIN_TOKEN is unset. The dashboard is in fail-closed mode and disabled!",
-                        "⚠️".yellow().bold(),
-                        "WARNING:".red().bold()
-                    );
-                    println!(
-                        "   To fix: Set DASHBOARD_ADMIN_TOKEN in your environment or .env file."
-                    );
-                } else {
-                    println!("🔑 Admin Token: {}", token.green().bold());
+                    print_tip("Set DASHBOARD_ADMIN_TOKEN before exposing or using the dashboard.");
                 }
 
-                // Open browser
-                let opened = if cfg!(target_os = "macos") {
-                    std::process::Command::new("open")
-                        .arg(&url)
-                        .status()
-                        .is_ok()
-                } else if cfg!(target_os = "windows") {
-                    std::process::Command::new("cmd")
-                        .args(["/C", "start", &url])
-                        .status()
-                        .is_ok()
-                } else {
-                    std::process::Command::new("xdg-open")
-                        .arg(&url)
-                        .status()
-                        .is_ok()
-                };
-
-                if !opened {
-                    println!(
-                        "   Failed to open browser automatically. Please open the URL manually."
-                    );
-                }
+                print_tip("Open the Dashboard URL manually when you need the UI.");
             } else if fmt == OutputFormat::Json {
                 println!(
                     "{}",
                     serde_json::json!({
-                        "status": "started",
+                        "status": "ready",
                         "url": url,
                         "token": std::env::var("DASHBOARD_ADMIN_TOKEN").unwrap_or_default()
                     })
@@ -1373,25 +1545,31 @@ async fn cmd_dashboard(cmd: DashboardCommand, fmt: OutputFormat) {
             let token = std::env::var("DASHBOARD_ADMIN_TOKEN").unwrap_or_default();
 
             if fmt == OutputFormat::Human {
+                print_brand_header("Dashboard", "admin control plane");
                 if is_running {
-                    println!(
-                        "{} Bridge Status: {}",
-                        "✓".green(),
-                        "RUNNING".green().bold()
+                    let table = key_value_table(
+                        ("Item", "Value"),
+                        vec![
+                            ("Bridge", "running".green().bold().to_string()),
+                            ("URL", url.cyan().bold().to_string()),
+                            ("Admin auth", masked_configured_label(&token)),
+                        ],
                     );
-                    println!("🔗 Dashboard URL: {}", url.cyan().bold());
+                    println!("{}", table);
                     if token.is_empty() {
-                        println!(
-                            "{} {} DASHBOARD_ADMIN_TOKEN is unset. The dashboard is in fail-closed mode and disabled!",
-                            "⚠️".yellow().bold(),
-                            "WARNING:".red().bold()
+                        print_tip(
+                            "Dashboard is fail-closed until DASHBOARD_ADMIN_TOKEN is configured.",
                         );
-                    } else {
-                        println!("🔑 Admin Token:  {}", token.green().bold());
                     }
                 } else {
-                    println!("{} Bridge Status: {}", "✗".red(), "STOPPED".red().bold());
-                    println!("💡 Hint: Run `oc2api dashboard start` to launch the server and open the UI.");
+                    let table = key_value_table(
+                        ("Item", "Value"),
+                        vec![
+                            ("Bridge", "stopped".red().bold().to_string()),
+                            ("Next step", "opencode2api dashboard start".to_string()),
+                        ],
+                    );
+                    println!("{}", table);
                 }
             } else if fmt == OutputFormat::Json {
                 println!(
