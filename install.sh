@@ -166,8 +166,9 @@ confirm() {
 # ══════════════════════════════════════════════════════════════════════
 choose_install_dir() {
     # 1. Env-var override
-    if [ -n "${OPENCODE2CLAUDE_BINDIR:-}" ]; then
-        installdir="$OPENCODE2CLAUDE_BINDIR"
+    local env_override="${OPENCODE2API_BINDIR:-${OPENCODE2CLAUDE_BINDIR:-}}"
+    if [ -n "$env_override" ]; then
+        installdir="$env_override"
         use_sudo=false
         mkdir -p "$installdir"
         return
@@ -210,7 +211,7 @@ choose_install_dir() {
 do_install() {
     tmpdir="$(mktemp -d "/tmp/${PROJECT}.XXXXXX")"
 
-    version="${OPENCODE2CLAUDE_VERSION:-latest}"
+    version="${OPENCODE2API_VERSION:-${OPENCODE2CLAUDE_VERSION:-latest}}"
     if [ "$version" = "latest" ]; then
         download_url="${GITHUB}/releases/latest/download/${binary}"
     else
