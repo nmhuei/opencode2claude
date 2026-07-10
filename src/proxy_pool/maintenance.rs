@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock as TokioRwLock;
 use tracing::{error, info, warn};
 
+const MAX_RESTART_ATTEMPTS: u32 = 3;
+
 impl ProxyPool {
     /// Record a success for a proxy, building toward recovery threshold.
     pub fn record_success(&mut self, idx: usize) {
@@ -205,12 +207,20 @@ pub async fn health_monitor(pool: Arc<TokioRwLock<ProxyPool>>) {
 
 /// Restart a single Docker container by proxy pool index.
 async fn restart_container(idx: usize, pool: Arc<TokioRwLock<ProxyPool>>) {
-    let (port, container_name) = {
+    let (port, container_name, restart_attempt) = {
         let p = pool.read().await;
         if idx >= p.proxies.len() {
             return;
         }
-        (p.proxies[idx].port, p.proxies[idx].container_name.clone())
+        let previous_attempts = match p.proxies[idx].status {
+            ProxyStatus::Dead { restart_attempts } => restart_attempts,
+            _ => 0,
+        };
+        (
+            p.proxies[idx].port,
+            p.proxies[idx].container_name.clone(),
+            previous_attempts.saturating_add(1),
+        )
     };
 
     if port == 0 {
@@ -277,7 +287,7 @@ async fn restart_container(idx: usize, pool: Arc<TokioRwLock<ProxyPool>>) {
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
             error!("Failed to create container {}: {}", container_name, stderr);
-            requeue_or_giveup(idx, &pool, "docker create failed").await;
+            requeue_or_giveup(idx, &pool, restart_attempt, "docker create failed").await;
             return;
         }
         Err(e) => {
@@ -285,7 +295,7 @@ async fn restart_container(idx: usize, pool: Arc<TokioRwLock<ProxyPool>>) {
                 "Docker command failed for {}: {}. Is docker installed?",
                 container_name, e
             );
-            requeue_or_giveup(idx, &pool, "docker command error").await;
+            requeue_or_giveup(idx, &pool, restart_attempt, "docker command error").await;
             return;
         }
     }
@@ -307,59 +317,64 @@ async fn restart_container(idx: usize, pool: Arc<TokioRwLock<ProxyPool>>) {
             idx, container_name
         );
     } else {
-        let attempts = match p.proxies[idx].status {
-            ProxyStatus::Dead {
-                restart_attempts: n,
-            } => n + 1,
-            _ => 1,
-        };
-        if attempts < 3 {
-            p.proxies[idx].status = ProxyStatus::Dead {
-                restart_attempts: attempts,
-            };
-            p.restart_queue.push(idx);
+        let requeued = apply_restart_failure(&mut p, idx, restart_attempt);
+        if requeued {
             warn!(
-                "Proxy #{} restart verify failed, re-queuing (attempt {}/3)",
-                idx, attempts
+                "Proxy #{} restart verify failed, re-queuing (attempt {}/{})",
+                idx, restart_attempt, MAX_RESTART_ATTEMPTS
             );
         } else {
-            p.proxies[idx].status = ProxyStatus::Dead {
-                restart_attempts: attempts,
-            };
-            error!("Proxy #{} failed restart after 3 attempts. Giving up.", idx);
+            error!(
+                "Proxy #{} failed restart after {} attempts. Giving up.",
+                idx, MAX_RESTART_ATTEMPTS
+            );
         }
     }
 }
 
-/// Re-queue a failed restart or give up after 3 attempts.
-async fn requeue_or_giveup(idx: usize, pool: &Arc<TokioRwLock<ProxyPool>>, reason: &str) {
+/// Re-queue a failed restart or give up after the configured maximum attempts.
+async fn requeue_or_giveup(
+    idx: usize,
+    pool: &Arc<TokioRwLock<ProxyPool>>,
+    restart_attempt: u32,
+    reason: &str,
+) {
     let mut p = pool.write().await;
     if idx >= p.proxies.len() {
         return;
     }
-    let attempts = match p.proxies[idx].status {
-        ProxyStatus::Dead {
-            restart_attempts: n,
-        } => n + 1,
-        _ => 1,
-    };
-    if attempts < 3 {
-        p.proxies[idx].status = ProxyStatus::Dead {
-            restart_attempts: attempts,
-        };
-        p.restart_queue.push(idx);
+
+    if apply_restart_failure(&mut p, idx, restart_attempt) {
         warn!(
             "Proxy #{} restart queued (attempt {}/{}): {}",
-            idx, attempts, 3, reason
+            idx, restart_attempt, MAX_RESTART_ATTEMPTS, reason
         );
     } else {
-        p.proxies[idx].status = ProxyStatus::Dead {
-            restart_attempts: attempts,
-        };
         error!(
-            "Proxy #{} failed restart after 3 attempts ({}). Giving up.",
-            idx, reason
+            "Proxy #{} failed restart after {} attempts ({}). Giving up.",
+            idx, MAX_RESTART_ATTEMPTS, reason
         );
+    }
+}
+
+fn apply_restart_failure(pool: &mut ProxyPool, idx: usize, restart_attempt: u32) -> bool {
+    if idx >= pool.proxies.len() {
+        return false;
+    }
+
+    let attempt = restart_attempt.min(MAX_RESTART_ATTEMPTS);
+    pool.proxies[idx].status = ProxyStatus::Dead {
+        restart_attempts: attempt,
+    };
+
+    if attempt < MAX_RESTART_ATTEMPTS {
+        if !pool.restart_queue.contains(&idx) {
+            pool.restart_queue.push(idx);
+        }
+        true
+    } else {
+        pool.restart_queue.retain(|queued| *queued != idx);
+        false
     }
 }
 
@@ -409,4 +424,49 @@ async fn verify_proxy_socks(port: u16) -> bool {
         port
     );
     false
+}
+
+#[cfg(test)]
+mod restart_tests {
+    use super::*;
+
+    fn pool() -> ProxyPool {
+        ProxyPool::new(&[
+            "socks5://127.0.0.1:40001".to_string(),
+            "socks5://127.0.0.1:40002".to_string(),
+            "socks5://127.0.0.1:40003".to_string(),
+        ])
+    }
+
+    #[test]
+    fn restart_failure_preserves_attempts_and_stops_after_third_try() {
+        let mut pool = pool();
+
+        assert!(apply_restart_failure(&mut pool, 0, 1));
+        assert!(matches!(
+            pool.proxies[0].status,
+            ProxyStatus::Dead {
+                restart_attempts: 1
+            }
+        ));
+        assert_eq!(pool.drain_restart_queue(), vec![0]);
+
+        assert!(apply_restart_failure(&mut pool, 0, 2));
+        assert!(matches!(
+            pool.proxies[0].status,
+            ProxyStatus::Dead {
+                restart_attempts: 2
+            }
+        ));
+        assert_eq!(pool.drain_restart_queue(), vec![0]);
+
+        assert!(!apply_restart_failure(&mut pool, 0, 3));
+        assert!(matches!(
+            pool.proxies[0].status,
+            ProxyStatus::Dead {
+                restart_attempts: 3
+            }
+        ));
+        assert!(pool.drain_restart_queue().is_empty());
+    }
 }
