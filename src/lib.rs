@@ -4,6 +4,7 @@
 //! This library is re-exported by the binary for integration testing.
 //! All public API items are exposed through their respective modules.
 
+pub mod app;
 pub mod cli;
 pub mod config;
 pub mod dashboard;
