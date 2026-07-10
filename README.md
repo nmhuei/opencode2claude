@@ -516,6 +516,7 @@ opencode2api config path       # Show config file path
 | [WARP Pool Operations](docs/warp-pool.md) | Pool sizing, failover tuning, manual proxies |
 | [Custom Tool Mappings](docs/custom-tools.md) | Casing resolver, custom schemas, fallback strategies |
 | [Shell Policy Guide](docs/shell-policy.md) | Security model, allowlist patterns, unrestricted mode |
+| [Architecture Overhaul](docs/architecture/) | Source audit, current boundaries, target architecture, and migration rules |
 | [Architecture Decision Records](docs/adr/) | Design decisions & trade-offs |
 
 ---
