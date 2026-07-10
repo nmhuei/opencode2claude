@@ -10,7 +10,6 @@ use crate::runtime::RuntimePaths;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -230,7 +229,7 @@ impl Supervisor {
         // Wait briefly for graceful shutdown
         std::thread::sleep(Duration::from_millis(500));
 
-        // Force kill if still alive (check /proc/{pid})
+        // Force kill if the process did not exit after the graceful signal.
         if process_exists(pid) {
             let _ = Command::new("kill")
                 .arg("-KILL")
@@ -294,9 +293,43 @@ impl Supervisor {
     }
 }
 
-/// Check if a process exists on Unix via `/proc/{pid}`.
+/// Check whether a process exists without relying on Linux-only `/proc`.
+#[cfg(unix)]
 fn process_exists(pid: u32) -> bool {
-    Path::new(&format!("/proc/{}", pid)).exists()
+    // Unix `pid_t` is signed; values above i32::MAX may be interpreted as
+    // negative process-group selectors by the `kill` utility.
+    if pid == 0 || pid > i32::MAX as u32 {
+        return false;
+    }
+
+    match Command::new("kill").arg("-0").arg(pid.to_string()).output() {
+        Ok(output) if output.status.success() => true,
+        Ok(output) => {
+            // A process owned by another user can exist even when signalling it is denied.
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            stderr.contains("Operation not permitted") || stderr.contains("not permitted")
+        }
+        Err(_) => false,
+    }
+}
+
+#[cfg(windows)]
+fn process_exists(pid: u32) -> bool {
+    Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+        .output()
+        .map(|output| {
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .any(|line| line.contains(&format!("\"{pid}\"")))
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn process_exists(_pid: u32) -> bool {
+    false
 }
 
 fn now_millis() -> u64 {
@@ -387,6 +420,18 @@ mod tests {
             }
         });
         port
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_probe_detects_current_process() {
+        assert!(process_exists(std::process::id()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_probe_rejects_impossible_pid() {
+        assert!(!process_exists(u32::MAX));
     }
 
     #[test]
