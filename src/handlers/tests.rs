@@ -1,4 +1,3 @@
-
 use super::prompt::last_user_shell_cmd;
 use super::*;
 

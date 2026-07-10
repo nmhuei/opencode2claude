@@ -49,27 +49,6 @@ impl ProxyPool {
             .max_by_key(|idx| stable_rendezvous_score(routing_key, &self.proxies[*idx].url))
     }
 
-    /// Select the best WarmStandby failover for a routing key via Rendezvous hashing.
-    pub(crate) fn rendezvous_warm_standby(&self, routing_key: &str) -> Option<usize> {
-        let candidates: Vec<usize> = self
-            .proxies
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| {
-                p.role == ProxyRole::WarmStandby
-                    && matches!(p.status, ProxyStatus::Active | ProxyStatus::Spare)
-            })
-            .map(|(i, _)| i)
-            .collect();
-        if candidates.is_empty() {
-            return None;
-        }
-        candidates
-            .iter()
-            .copied()
-            .max_by_key(|idx| stable_rendezvous_score(routing_key, &self.proxies[*idx].url))
-    }
-
     /// Select a proxy for the given routing key following the Phase 5 routing contract:
     ///
     /// 1. Use Primary proxies 40001–40003 for normal traffic.
@@ -85,62 +64,97 @@ impl ProxyPool {
         &self,
         routing_key: &str,
     ) -> Option<(reqwest::Client, String, usize)> {
+        self.select_proxy_for_key_excluding(routing_key, None)
+    }
+
+    fn select_proxy_for_key_excluding(
+        &self,
+        routing_key: &str,
+        excluded: Option<usize>,
+    ) -> Option<(reqwest::Client, String, usize)> {
         if self.proxies.is_empty() {
             return None;
         }
 
-        // Step 1: Rendezvous → assigned primary (all primaries, healthy or not)
         let assigned = self.rendezvous_assigned_primary(routing_key);
-
-        if let Some(primary_idx) = assigned {
+        if let Some(primary_idx) = assigned.filter(|index| Some(*index) != excluded) {
             let entry = &self.proxies[primary_idx];
-
-            // If cooldown has expired, the proxy is healthy again
-            let is_healthy = match entry.status {
-                ProxyStatus::Active => true,
-                ProxyStatus::Cooldown(until) => std::time::Instant::now() >= until,
-                _ => false,
-            };
-
-            if is_healthy {
-                return Some((entry.client.clone(), entry.url.clone(), primary_idx));
+            if proxy_is_healthy(entry) {
+                return Some(proxy_selection(entry, primary_idx));
             }
-
-            // Primary is unhealthy → step 2: failover to WarmStandby
             info!(
-                "Rendezvous primary #{} ({}) for key '{}' is unavailable (status={:?}). Failing over to WarmStandby.",
-                primary_idx, entry.url, routing_key, entry.status
+                primary_index = primary_idx,
+                proxy_url = %entry.url,
+                %routing_key,
+                status = ?entry.status,
+                "assigned primary unavailable"
             );
         }
 
-        // Step 2: Rendezvous → assigned WarmStandby
-        if let Some(standby_idx) = self.rendezvous_warm_standby(routing_key) {
-            let entry = &self.proxies[standby_idx];
-            let is_healthy = match entry.status {
-                ProxyStatus::Active => true,
-                ProxyStatus::Cooldown(until) => std::time::Instant::now() >= until,
-                _ => false,
-            };
-
-            if is_healthy {
-                return Some((entry.client.clone(), entry.url.clone(), standby_idx));
+        // A retry must remain primary-first. If the sticky primary is excluded,
+        // choose the best other healthy primary before consuming standby capacity.
+        if assigned == excluded {
+            if let Some(index) =
+                self.best_healthy_candidate(routing_key, ProxyRole::Primary, excluded)
+            {
+                return Some(proxy_selection(&self.proxies[index], index));
             }
         }
 
-        // Step 3: Degraded — pick any usable proxy
-        if let Some(idx) = self.select_degraded() {
+        if let Some(index) =
+            self.best_healthy_candidate(routing_key, ProxyRole::WarmStandby, excluded)
+        {
+            return Some(proxy_selection(&self.proxies[index], index));
+        }
+
+        if let Some(index) = self.select_degraded_excluding(excluded) {
             warn!(
-                "CRITICAL: All proxies unavailable for key '{}'. Degraded mode, using proxy #{} ({})",
-                routing_key, idx, self.proxies[idx].url
+                %routing_key,
+                proxy_index = index,
+                proxy_url = %self.proxies[index].url,
+                "all preferred proxies unavailable; using degraded route"
             );
-            return Some((
-                self.proxies[idx].client.clone(),
-                self.proxies[idx].url.clone(),
-                idx,
-            ));
+            return Some(proxy_selection(&self.proxies[index], index));
         }
 
         None
+    }
+
+    fn best_healthy_candidate(
+        &self,
+        routing_key: &str,
+        role: ProxyRole,
+        excluded: Option<usize>,
+    ) -> Option<usize> {
+        self.proxies
+            .iter()
+            .enumerate()
+            .filter(|(index, proxy)| {
+                Some(*index) != excluded && proxy.role == role && proxy_is_healthy(proxy)
+            })
+            .max_by_key(|(_, proxy)| stable_rendezvous_score(routing_key, &proxy.url))
+            .map(|(index, _)| index)
+    }
+
+    fn select_degraded_excluding(&self, excluded: Option<usize>) -> Option<usize> {
+        self.proxies
+            .iter()
+            .enumerate()
+            .filter(|(index, proxy)| {
+                Some(*index) != excluded
+                    && matches!(
+                        proxy.status,
+                        ProxyStatus::Active | ProxyStatus::Spare | ProxyStatus::Cooldown(_)
+                    )
+            })
+            .min_by_key(|(_, proxy)| match proxy.status {
+                ProxyStatus::Cooldown(until) => until
+                    .checked_duration_since(std::time::Instant::now())
+                    .unwrap_or_default(),
+                ProxyStatus::Active => std::time::Duration::ZERO,
+                _ => std::time::Duration::MAX,
+            })
+            .map(|(index, _)| index)
     }
 
     /// Legacy compatibility: selects proxy for a routing key.
@@ -155,10 +169,20 @@ impl ProxyPool {
     pub fn get_client_excluding(
         &mut self,
         api_key: &str,
-        _exclude_idx: usize,
+        exclude_idx: usize,
     ) -> Option<(reqwest::Client, String, usize)> {
-        // Falls through to WarmStandby or degraded if excluded index
-        // happens to be the rendezvous primary.
-        self.select_proxy_for_key(api_key)
+        self.select_proxy_for_key_excluding(api_key, Some(exclude_idx))
     }
+}
+
+fn proxy_is_healthy(proxy: &ProxyEntry) -> bool {
+    match proxy.status {
+        ProxyStatus::Active => true,
+        ProxyStatus::Cooldown(until) => std::time::Instant::now() >= until,
+        ProxyStatus::Spare | ProxyStatus::Dead { .. } | ProxyStatus::Starting => false,
+    }
+}
+
+fn proxy_selection(proxy: &ProxyEntry, index: usize) -> (reqwest::Client, String, usize) {
+    (proxy.client.clone(), proxy.url.clone(), index)
 }
