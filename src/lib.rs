@@ -13,6 +13,7 @@ pub mod doctor;
 pub mod error;
 pub mod handlers;
 pub mod init;
+pub mod management;
 pub mod middleware;
 pub mod opencode;
 pub mod output;
