@@ -8,7 +8,7 @@ use axum::Router;
 use tower_http::limit::RequestBodyLimitLayer;
 use tracing::info;
 
-pub(crate) fn build_router(state: AppState) -> Router {
+pub fn build_router(state: AppState) -> Router {
     Router::new()
         .merge(anthropic_routes(&state))
         .merge(dashboard_routes())

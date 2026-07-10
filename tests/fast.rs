@@ -2,19 +2,17 @@
 //!
 //! Run: `cargo test --test fast`
 
-use axum::routing::{get, post};
 use axum::Router;
 use serde_json::{json, Value};
 use std::env;
 use std::fs;
 use std::path::Path;
-use std::sync::Mutex;
 use std::time::Duration;
 use tokio::net::TcpListener;
+use tokio::sync::Mutex;
 use tokio::time::sleep;
-use tower_http::limit::RequestBodyLimitLayer;
 
-static ENV_MUTEX: Mutex<()> = Mutex::new(());
+static ENV_MUTEX: Mutex<()> = Mutex::const_new(());
 
 /// Safe backup guard for opencode2api.toml
 struct ConfigBackupGuard {
@@ -44,79 +42,10 @@ impl Drop for ConfigBackupGuard {
     }
 }
 
-/// Build the same router structure used in production, with custom test config.
+/// Build the production router with custom test configuration.
 fn build_test_router(config: opencode2api::config::BridgeConfig) -> Router {
     let state = opencode2api::state::AppState::new(config);
-
-    Router::new()
-        .route(
-            "/v1/messages",
-            post(opencode2api::handlers::handle_messages),
-        )
-        .route(
-            "/v1/messages/count_tokens",
-            post(opencode2api::handlers::handle_count_tokens),
-        )
-        .route("/v1/models", get(opencode2api::handlers::handle_models))
-        .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            opencode2api::middleware::auth_middleware,
-        ))
-        .route("/", get(opencode2api::dashboard::serve_landing))
-        .route("/health", get(opencode2api::handlers::handle_health))
-        .route("/dashboard", get(opencode2api::dashboard::serve_webui))
-        .route("/dashboard/", get(opencode2api::dashboard::serve_webui))
-        .route(
-            "/dashboard/*path",
-            get(opencode2api::dashboard::serve_webui),
-        )
-        .route(
-            "/api/dashboard/status",
-            get(opencode2api::dashboard::handler_rest_status),
-        )
-        .route(
-            "/api/dashboard/proxies",
-            get(opencode2api::dashboard::handler_proxies),
-        )
-        .route(
-            "/api/dashboard/config",
-            get(opencode2api::dashboard::handler_config),
-        )
-        .route(
-            "/api/dashboard/login",
-            post(opencode2api::dashboard::handler_login),
-        )
-        .route(
-            "/api/dashboard/logout",
-            post(opencode2api::dashboard::handler_logout),
-        )
-        .route(
-            "/api/dashboard/auth/status",
-            get(opencode2api::dashboard::handler_auth_status),
-        )
-        .route(
-            "/api/dashboard/diagnostics",
-            get(opencode2api::dashboard::handler_dashboard_diagnostics),
-        )
-        .route(
-            "/api/dashboard/config/save",
-            post(opencode2api::dashboard::handler_config_save),
-        )
-        .route(
-            "/api/dashboard/events",
-            get(opencode2api::dashboard::handler_events),
-        )
-        .route(
-            "/api/dashboard/test/stream",
-            get(opencode2api::dashboard::handler_test_stream_get)
-                .post(opencode2api::dashboard::handler_test_stream_post),
-        )
-        .route(
-            "/api/dashboard/proxy/:port/restart",
-            post(opencode2api::dashboard::handler_proxy_restart),
-        )
-        .layer(RequestBodyLimitLayer::new(1_048_576))
-        .with_state(state)
+    opencode2api::server::build_router(state)
 }
 
 /// Start test server on a random port, return base_url.
@@ -144,10 +73,11 @@ async fn spawn_test_server(config: opencode2api::config::BridgeConfig) -> String
 }
 
 async fn spawn_test_server_default() -> String {
-    spawn_test_server(opencode2api::config::BridgeConfig::from_env_and_cli(
+    let mut config = opencode2api::config::BridgeConfig::from_env_and_cli(
         opencode2api::config::CliOverrides::default(),
-    ))
-    .await
+    );
+    config.max_body_size = 1_048_576;
+    spawn_test_server(config).await
 }
 
 // ──────────────────────────────────────────────────────────
@@ -171,7 +101,7 @@ async fn test_tc001_get_root() {
 
 #[tokio::test]
 async fn test_tc002_get_dashboard_no_cookie() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::builder()
@@ -190,7 +120,7 @@ async fn test_tc002_get_dashboard_no_cookie() {
 
 #[tokio::test]
 async fn test_tc003_get_dashboard_slash_no_cookie() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::builder()
@@ -209,7 +139,7 @@ async fn test_tc003_get_dashboard_slash_no_cookie() {
 
 #[tokio::test]
 async fn test_tc004_get_dashboard_index_no_cookie() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::builder()
@@ -260,7 +190,7 @@ async fn test_tc006_get_static_asset_js() {
 
 #[tokio::test]
 async fn test_tc007_spa_fallback_behavior() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -295,7 +225,7 @@ async fn test_tc008_cache_control_headers() {
 
 #[tokio::test]
 async fn test_tc009_status_no_token() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -312,7 +242,7 @@ async fn test_tc009_status_no_token() {
 
 #[tokio::test]
 async fn test_tc010_status_wrong_token() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -330,7 +260,7 @@ async fn test_tc010_status_wrong_token() {
 
 #[tokio::test]
 async fn test_tc011_status_correct_token() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -348,7 +278,7 @@ async fn test_tc011_status_correct_token() {
 
 #[tokio::test]
 async fn test_tc012_status_legacy_default_token() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -366,7 +296,7 @@ async fn test_tc012_status_legacy_default_token() {
 
 #[tokio::test]
 async fn test_tc013_login_no_token() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -381,7 +311,7 @@ async fn test_tc013_login_no_token() {
 
 #[tokio::test]
 async fn test_tc014_login_wrong_token() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -397,7 +327,7 @@ async fn test_tc014_login_wrong_token() {
 
 #[tokio::test]
 async fn test_tc015_login_correct_token() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -415,7 +345,7 @@ async fn test_tc015_login_correct_token() {
 
 #[tokio::test]
 async fn test_tc016_events_no_token() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -430,7 +360,7 @@ async fn test_tc016_events_no_token() {
 
 #[tokio::test]
 async fn test_tc017_events_wrong_token() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -445,7 +375,7 @@ async fn test_tc017_events_wrong_token() {
 
 #[tokio::test]
 async fn test_tc018_events_correct_token() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -464,7 +394,7 @@ async fn test_tc018_events_correct_token() {
 
 #[tokio::test]
 async fn test_auth_status_no_token() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -482,7 +412,7 @@ async fn test_auth_status_no_token() {
 
 #[tokio::test]
 async fn test_auth_status_authenticated() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -501,7 +431,7 @@ async fn test_auth_status_authenticated() {
 
 #[tokio::test]
 async fn test_auth_status_no_admin_token_configured() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::remove_var("DASHBOARD_ADMIN_TOKEN");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -518,7 +448,7 @@ async fn test_auth_status_no_admin_token_configured() {
 
 #[tokio::test]
 async fn test_logout_clears_cookie() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::builder()
@@ -548,7 +478,7 @@ async fn test_logout_clears_cookie() {
 
 #[tokio::test]
 async fn test_logout_no_auth() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
     let resp = client
@@ -566,7 +496,7 @@ async fn test_logout_no_auth() {
 
 #[tokio::test]
 async fn test_tc019_get_config_no_token() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -581,7 +511,7 @@ async fn test_tc019_get_config_no_token() {
 
 #[tokio::test]
 async fn test_tc020_get_config_wrong_token() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -597,7 +527,7 @@ async fn test_tc020_get_config_wrong_token() {
 
 #[tokio::test]
 async fn test_tc021_get_config_correct_token() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -621,7 +551,7 @@ async fn test_tc021_get_config_correct_token() {
 
 #[tokio::test]
 async fn test_tc022_save_config_no_token() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -637,7 +567,7 @@ async fn test_tc022_save_config_no_token() {
 
 #[tokio::test]
 async fn test_tc023_save_config_wrong_token() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -654,7 +584,7 @@ async fn test_tc023_save_config_wrong_token() {
 
 #[tokio::test]
 async fn test_tc024_save_config_correct_token_valid_toml() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     let _backup = ConfigBackupGuard::new();
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
@@ -675,7 +605,7 @@ async fn test_tc024_save_config_correct_token_valid_toml() {
 
 #[tokio::test]
 async fn test_tc025_save_config_correct_token_invalid_toml() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     let _backup = ConfigBackupGuard::new();
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
@@ -698,7 +628,7 @@ async fn test_tc025_save_config_correct_token_invalid_toml() {
 
 #[tokio::test]
 async fn test_tc026_save_config_correct_token_empty_body() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     let _backup = ConfigBackupGuard::new();
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
@@ -724,7 +654,7 @@ async fn test_tc026_save_config_correct_token_empty_body() {
 
 #[tokio::test]
 async fn test_tc027_sensitive_config_masking() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     env::set_var("TAVILY_API_KEY", "super-secret-tavily");
     env::set_var("SERPER_API_KEY", "super-secret-serper");
@@ -747,7 +677,7 @@ async fn test_tc027_sensitive_config_masking() {
 
 #[tokio::test]
 async fn test_tc028_config_reload_verification() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     let _backup = ConfigBackupGuard::new();
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
@@ -779,7 +709,7 @@ async fn test_tc028_config_reload_verification() {
 
 #[tokio::test]
 async fn test_tc029_get_models_anonymous_auth_disabled() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::remove_var("BRIDGE_AUTH_TOKEN");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -793,7 +723,7 @@ async fn test_tc029_get_models_anonymous_auth_disabled() {
 
 #[tokio::test]
 async fn test_tc030_post_messages_anonymous_auth_disabled() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::remove_var("BRIDGE_AUTH_TOKEN");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -813,7 +743,7 @@ async fn test_tc030_post_messages_anonymous_auth_disabled() {
 
 #[tokio::test]
 async fn test_tc031_get_models_valid_bearer() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("BRIDGE_AUTH_TOKEN", "valid-bearer-key");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -829,7 +759,7 @@ async fn test_tc031_get_models_valid_bearer() {
 
 #[tokio::test]
 async fn test_tc032_get_models_invalid_bearer() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("BRIDGE_AUTH_TOKEN", "valid-bearer-key");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -850,7 +780,7 @@ async fn test_tc032_get_models_invalid_bearer() {
 
 #[tokio::test]
 async fn test_tc033_get_models_missing_bearer() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("BRIDGE_AUTH_TOKEN", "valid-bearer-key");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -1007,7 +937,7 @@ async fn test_tc042_health_check_zero_topology_leak() {
 
 #[tokio::test]
 async fn test_tc043_diagnostics_no_token() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -1022,7 +952,7 @@ async fn test_tc043_diagnostics_no_token() {
 
 #[tokio::test]
 async fn test_tc044_diagnostics_wrong_token() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -1038,7 +968,7 @@ async fn test_tc044_diagnostics_wrong_token() {
 
 #[tokio::test]
 async fn test_tc045_diagnostics_correct_token() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -1057,7 +987,7 @@ async fn test_tc045_diagnostics_correct_token() {
 
 #[tokio::test]
 async fn test_tc046_diagnostics_daemon_status() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -1076,7 +1006,7 @@ async fn test_tc046_diagnostics_daemon_status() {
 
 #[tokio::test]
 async fn test_tc047_diagnostics_config_properties() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -1095,7 +1025,7 @@ async fn test_tc047_diagnostics_config_properties() {
 
 #[tokio::test]
 async fn test_tc048_diagnostics_proxy_node_roles() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -1132,7 +1062,7 @@ async fn test_tc049_restart_proxy_no_token() {
 
 #[tokio::test]
 async fn test_tc050_restart_proxy_wrong_token() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -1148,7 +1078,7 @@ async fn test_tc050_restart_proxy_wrong_token() {
 
 #[tokio::test]
 async fn test_tc051_restart_proxy_valid_node_40001() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -1166,7 +1096,7 @@ async fn test_tc051_restart_proxy_valid_node_40001() {
 
 #[tokio::test]
 async fn test_tc052_restart_proxy_valid_node_40003() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -1184,7 +1114,7 @@ async fn test_tc052_restart_proxy_valid_node_40003() {
 
 #[tokio::test]
 async fn test_tc053_restart_proxy_out_of_range_9999() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -1206,7 +1136,7 @@ async fn test_tc053_restart_proxy_out_of_range_9999() {
 
 #[tokio::test]
 async fn test_tc054_restart_proxy_non_numeric() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -1222,7 +1152,7 @@ async fn test_tc054_restart_proxy_non_numeric() {
 
 #[tokio::test]
 async fn test_tc055_restart_proxy_out_of_range_40000() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -1244,7 +1174,7 @@ async fn test_tc055_restart_proxy_out_of_range_40000() {
 
 #[tokio::test]
 async fn test_tc056_restart_proxy_out_of_range_40006() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -1270,7 +1200,7 @@ async fn test_tc056_restart_proxy_out_of_range_40006() {
 
 #[tokio::test]
 async fn test_tc057_access_bridge_api_using_dashboard_token() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("BRIDGE_AUTH_TOKEN", "valid-bridge-token");
     env::set_var("DASHBOARD_ADMIN_TOKEN", "valid-dashboard-token");
     let base = spawn_test_server_default().await;
@@ -1288,7 +1218,7 @@ async fn test_tc057_access_bridge_api_using_dashboard_token() {
 
 #[tokio::test]
 async fn test_tc058_access_dashboard_api_using_bridge_token() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("BRIDGE_AUTH_TOKEN", "valid-bridge-token");
     env::set_var("DASHBOARD_ADMIN_TOKEN", "valid-dashboard-token");
     let base = spawn_test_server_default().await;
@@ -1306,7 +1236,7 @@ async fn test_tc058_access_dashboard_api_using_bridge_token() {
 
 #[tokio::test]
 async fn test_tc059_access_config_api_using_bridge_token() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("BRIDGE_AUTH_TOKEN", "valid-bridge-token");
     env::set_var("DASHBOARD_ADMIN_TOKEN", "valid-dashboard-token");
     let base = spawn_test_server_default().await;
@@ -1324,7 +1254,7 @@ async fn test_tc059_access_config_api_using_bridge_token() {
 
 #[tokio::test]
 async fn test_tc060_access_diagnostics_api_using_bridge_token() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("BRIDGE_AUTH_TOKEN", "valid-bridge-token");
     env::set_var("DASHBOARD_ADMIN_TOKEN", "valid-dashboard-token");
     let base = spawn_test_server_default().await;
@@ -1342,7 +1272,7 @@ async fn test_tc060_access_diagnostics_api_using_bridge_token() {
 
 #[tokio::test]
 async fn test_tc061_access_events_sse_using_bridge_token() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("BRIDGE_AUTH_TOKEN", "valid-bridge-token");
     env::set_var("DASHBOARD_ADMIN_TOKEN", "valid-dashboard-token");
     let base = spawn_test_server_default().await;
@@ -1362,7 +1292,7 @@ async fn test_tc061_access_events_sse_using_bridge_token() {
 
 #[tokio::test]
 async fn test_dashboard_test_stream_no_token() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -1379,7 +1309,7 @@ async fn test_dashboard_test_stream_no_token() {
 
 #[tokio::test]
 async fn test_dashboard_test_stream_emits_thinking_and_text() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -1406,7 +1336,7 @@ async fn test_dashboard_test_stream_emits_thinking_and_text() {
 
 #[tokio::test]
 async fn test_tc062_access_status_api_anonymously() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "valid-dashboard-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -1421,7 +1351,7 @@ async fn test_tc062_access_status_api_anonymously() {
 
 #[tokio::test]
 async fn test_tc063_access_config_api_anonymously() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "valid-dashboard-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -1436,7 +1366,7 @@ async fn test_tc063_access_config_api_anonymously() {
 
 #[tokio::test]
 async fn test_tc064_access_restart_api_anonymously() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "valid-dashboard-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -1455,7 +1385,7 @@ async fn test_tc064_access_restart_api_anonymously() {
 
 #[tokio::test]
 async fn test_tc065_fail_closed_when_unset_default_token() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::remove_var("DASHBOARD_ADMIN_TOKEN");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -1475,7 +1405,7 @@ async fn test_tc065_fail_closed_when_unset_default_token() {
 
 #[tokio::test]
 async fn test_tc066_reject_123456_when_strong_token_configured() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "strong-configured-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -1504,7 +1434,7 @@ async fn test_tc067_security_headers_on_landing() {
 
 #[tokio::test]
 async fn test_tc068_security_headers_on_dashboard_spa() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -1537,9 +1467,9 @@ async fn test_tc069_safe_error_responses_no_stack_traces() {
     assert!(!body.contains("panicked"));
     assert!(!body.contains("stack backtrace"));
 }
-#[test]
-fn test_tc070_public_binding_abort_on_weak_token() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+#[tokio::test]
+async fn test_tc070_public_binding_abort_on_weak_token() {
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("BRIDGE_HOST", "0.0.0.0");
     env::set_var("DASHBOARD_ADMIN_TOKEN", "1234");
 
@@ -1554,9 +1484,9 @@ fn test_tc070_public_binding_abort_on_weak_token() {
     env::remove_var("DASHBOARD_ADMIN_TOKEN");
 }
 
-#[test]
-fn test_tc071_public_binding_abort_on_empty_token() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+#[tokio::test]
+async fn test_tc071_public_binding_abort_on_empty_token() {
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("BRIDGE_HOST", "0.0.0.0");
     env::remove_var("DASHBOARD_ADMIN_TOKEN");
 
@@ -1586,7 +1516,7 @@ async fn test_tc072_unsupported_http_method() {
 
 #[tokio::test]
 async fn test_tc073_fail_closed_on_diagnostics_unset() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::remove_var("DASHBOARD_ADMIN_TOKEN");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
@@ -1606,7 +1536,7 @@ async fn test_tc073_fail_closed_on_diagnostics_unset() {
 
 #[tokio::test]
 async fn test_tc074_content_type_validation() {
-    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_MUTEX.lock().await;
     env::set_var("DASHBOARD_ADMIN_TOKEN", "test-token");
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();

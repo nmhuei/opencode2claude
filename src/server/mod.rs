@@ -5,5 +5,5 @@ mod routes;
 mod runtime;
 
 pub use args::ServeArgsBridge;
-pub(crate) use routes::build_router;
+pub use routes::build_router;
 pub use runtime::run_server;
