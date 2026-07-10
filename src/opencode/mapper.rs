@@ -56,7 +56,11 @@ pub fn is_compact_request(payload: &MessagesRequest) -> bool {
     false
 }
 
-fn include_reasoning_for_stream(stream: bool, mapped_model: &str, is_compact: bool) -> Option<bool> {
+fn include_reasoning_for_stream(
+    stream: bool,
+    mapped_model: &str,
+    is_compact: bool,
+) -> Option<bool> {
     if is_compact {
         return None;
     }
@@ -240,17 +244,34 @@ pub fn map_anthropic_to_openai(payload: &MessagesRequest, model: String) -> Open
                                         .as_ref()
                                         .and_then(|id| tool_name_map.get(id).cloned())
                                 });
-                                openai_messages.push(OpenAiMessage {
-                                    role: "tool".to_string(),
-                                    content: block
-                                        .content
-                                        .as_ref()
-                                        .map(tool_result_content_to_string),
-                                    reasoning_content: None,
-                                    tool_calls: None,
-                                    tool_call_id: block.tool_use_id.clone(),
-                                    name,
-                                });
+                                let content_str = block
+                                    .content
+                                    .as_ref()
+                                    .map(tool_result_content_to_string)
+                                    .unwrap_or_default();
+
+                                let mapped_model =
+                                    map_model_name(&payload.model.clone().unwrap_or_default());
+                                if mapped_model.contains("-free") {
+                                    // Fallback: convert tool result into a standard user message prompt block
+                                    if !user_text.is_empty() {
+                                        user_text.push('\n');
+                                    }
+                                    user_text.push_str(&format!(
+                                        "[Tool Result for tool '{}']\n{}",
+                                        name.unwrap_or_else(|| "unknown".to_string()),
+                                        content_str
+                                    ));
+                                } else {
+                                    openai_messages.push(OpenAiMessage {
+                                        role: "tool".to_string(),
+                                        content: Some(content_str),
+                                        reasoning_content: None,
+                                        tool_calls: None,
+                                        tool_call_id: block.tool_use_id.clone(),
+                                        name,
+                                    });
+                                }
                             }
                             _ => {}
                         }
@@ -288,15 +309,26 @@ pub fn map_anthropic_to_openai(payload: &MessagesRequest, model: String) -> Open
                                 if let (Some(id), Some(name), Some(input)) =
                                     (&block.id, &block.name, &block.input)
                                 {
-                                    tool_calls.push(OpenAiToolCall {
-                                        id: id.clone(),
-                                        tool_type: "function".to_string(),
-                                        function: OpenAiFunctionCall {
-                                            name: name.clone(),
-                                            arguments: serde_json::to_string(input)
-                                                .unwrap_or_default(),
-                                        },
-                                    });
+                                    if mapped_model.contains("-free") {
+                                        if !assistant_text.is_empty() {
+                                            assistant_text.push('\n');
+                                        }
+                                        assistant_text.push_str(&format!(
+                                            "[Requesting Tool execution: '{}' with arguments: {}]",
+                                            name,
+                                            serde_json::to_string(input).unwrap_or_default()
+                                        ));
+                                    } else {
+                                        tool_calls.push(OpenAiToolCall {
+                                            id: id.clone(),
+                                            tool_type: "function".to_string(),
+                                            function: OpenAiFunctionCall {
+                                                name: name.clone(),
+                                                arguments: serde_json::to_string(input)
+                                                    .unwrap_or_default(),
+                                            },
+                                        });
+                                    }
                                 }
                             }
                             _ => {}
@@ -372,8 +404,12 @@ pub fn map_anthropic_to_openai(payload: &MessagesRequest, model: String) -> Open
     });
 
     let is_compact = is_compact_request(payload);
-    let max_tokens =
-        normalize_upstream_max_tokens(payload.max_tokens, payload.stream, &mapped_model, is_compact);
+    let max_tokens = normalize_upstream_max_tokens(
+        payload.max_tokens,
+        payload.stream,
+        &mapped_model,
+        is_compact,
+    );
     let include_reasoning = include_reasoning_for_stream(payload.stream, &mapped_model, is_compact);
 
     OpenAiRequest {
@@ -563,8 +599,8 @@ mod tests {
             max_tokens: None,
         };
 
-        let result = map_anthropic_to_openai(&payload, "deepseek-v4-flash".to_string());
-        assert_eq!(result.model, "deepseek-v4-flash-free"); // Mapped model name
+        let result = map_anthropic_to_openai(&payload, "deepseek-chat".to_string());
+        assert_eq!(result.model, "deepseek-chat"); // Mapped model name
         assert_eq!(result.messages.len(), 3);
 
         // First user message

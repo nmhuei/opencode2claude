@@ -314,6 +314,50 @@ opencode2api start
 
 ---
 
+## 🔌 REST Management API
+
+The bridge exposes a versioned management API under `/api/v1`. This API is separate from the Anthropic-compatible `/v1/*` endpoints and from the browser dashboard's internal `/api/dashboard/*` routes.
+
+Set a management token before using it:
+
+```bash
+export REST_API_TOKEN="replace-with-a-long-random-token"
+```
+
+Clients authenticate with a standard Bearer header:
+
+```bash
+curl -H "Authorization: Bearer $REST_API_TOKEN" \
+  http://127.0.0.1:4000/api/v1/status
+```
+
+If `REST_API_TOKEN` is unset, the API falls back to `DASHBOARD_ADMIN_TOKEN`. If neither token is configured, the REST API fails closed with HTTP `401`.
+
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| GET | `/api/v1/status` | Bridge uptime, model, bind information, and proxy-pool snapshot |
+| GET | `/api/v1/proxies` | Primary and warm-standby proxy status |
+| GET | `/api/v1/config` | Safe operational configuration; secret values are never returned |
+| POST | `/api/v1/proxies/:port/restart` | Restart a configured managed primary proxy |
+| GET | `/api/v1/openapi.json` | OpenAPI 3.1 document for the management API |
+
+Examples:
+
+```bash
+# List proxy state
+curl -H "Authorization: Bearer $REST_API_TOKEN" \
+  http://127.0.0.1:4000/api/v1/proxies
+
+# Restart managed primary proxy 40001
+curl -X POST \
+  -H "Authorization: Bearer $REST_API_TOKEN" \
+  http://127.0.0.1:4000/api/v1/proxies/40001/restart
+```
+
+Protected warm-standby ports cannot be restarted through this API. Unknown or unconfigured ports return an explicit `4xx` response instead of invoking Docker.
+
+---
+
 ## 📊 Benchmarks
 
 | Scenario | Latency (p50) | Latency (p99) | Throughput | Notes |

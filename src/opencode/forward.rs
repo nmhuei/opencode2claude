@@ -5,7 +5,9 @@
 
 use crate::error::BridgeError;
 use crate::handlers::{ContentVal, MessagesRequest};
-use crate::opencode::mapper::{extract_search_query, is_web_search_tool, map_anthropic_to_openai, is_compact_request};
+use crate::opencode::mapper::{
+    extract_search_query, is_compact_request, is_web_search_tool, map_anthropic_to_openai,
+};
 use crate::opencode::retry::execute_with_warp_retry;
 use crate::opencode::sanitize::{extract_and_clean_dsml, parse_dsml_tool_calls, strip_system_tags};
 use crate::opencode::search::SearchClient;
@@ -452,7 +454,11 @@ impl StreamContext {
                 let text_to_yield = &self.text_stream_buffer[..start_pos];
                 let remainder = &self.text_stream_buffer[start_pos..];
 
-                let cleaned = if self.is_compact { text_to_yield.to_string() } else { strip_system_tags(text_to_yield) };
+                let cleaned = if self.is_compact {
+                    text_to_yield.to_string()
+                } else {
+                    strip_system_tags(text_to_yield)
+                };
                 if !cleaned.is_empty() {
                     self.accumulated_text.push_str(&cleaned);
                     if !self.intercepting_search {
@@ -475,7 +481,11 @@ impl StreamContext {
                 self.text_stream_buffer = String::new();
             } else {
                 let (to_yield, pending) = split_pending_text(&self.text_stream_buffer);
-                let cleaned = if self.is_compact { to_yield.to_string() } else { strip_system_tags(&to_yield) };
+                let cleaned = if self.is_compact {
+                    to_yield.to_string()
+                } else {
+                    strip_system_tags(&to_yield)
+                };
                 if !cleaned.is_empty() {
                     self.accumulated_text.push_str(&cleaned);
                     if !self.intercepting_search {
@@ -584,7 +594,11 @@ impl StreamContext {
         payload: &MessagesRequest,
     ) {
         // Flush any remaining text in text_stream_buffer
-        let cleaned = if self.is_compact { self.text_stream_buffer.clone() } else { strip_system_tags(&self.text_stream_buffer) };
+        let cleaned = if self.is_compact {
+            self.text_stream_buffer.clone()
+        } else {
+            strip_system_tags(&self.text_stream_buffer)
+        };
         if !cleaned.is_empty() {
             self.accumulated_text.push_str(&cleaned);
             if !self.intercepting_search {
@@ -759,7 +773,13 @@ pub async fn forward_to_llm_sync(
             let is_compact = is_compact_request(&payload);
             let text_cleaned = cleaned_message_content
                 .as_deref()
-                .map(|t| if is_compact { t.to_string() } else { strip_system_tags(t) })
+                .map(|t| {
+                    if is_compact {
+                        t.to_string()
+                    } else {
+                        strip_system_tags(t)
+                    }
+                })
                 .unwrap_or_default();
 
             inject_search_results(
@@ -792,7 +812,11 @@ pub async fn forward_to_llm_sync(
         // 2. Text block
         if let Some(text) = &cleaned_message_content {
             let is_compact = is_compact_request(&payload);
-            let cleaned = if is_compact { text.to_string() } else { strip_system_tags(text) };
+            let cleaned = if is_compact {
+                text.to_string()
+            } else {
+                strip_system_tags(text)
+            };
             if !cleaned.is_empty() {
                 content_blocks.push(serde_json::json!({
                     "type": "text",

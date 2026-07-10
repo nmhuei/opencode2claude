@@ -17,6 +17,7 @@ pub mod opencode;
 pub mod output;
 pub mod pidfile;
 pub mod proxy_pool;
+pub mod rest_api;
 pub mod runtime;
 pub mod server;
 pub mod shell;

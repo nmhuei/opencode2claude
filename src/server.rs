@@ -4,6 +4,7 @@ use crate::config::{self, BridgeConfig};
 use crate::dashboard;
 use crate::handlers;
 use crate::middleware;
+use crate::rest_api;
 use crate::state::AppState;
 use crate::tui;
 use axum::extract::DefaultBodyLimit;
@@ -176,6 +177,7 @@ pub async fn run_server(args: ServeArgsBridge) {
     let app = Router::new()
         .merge(api_routes)
         .merge(dashboard_routes)
+        .merge(rest_api::router())
         .with_state(state);
 
     let listener = match tokio::net::TcpListener::bind(addr).await {
