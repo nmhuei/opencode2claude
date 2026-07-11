@@ -7,7 +7,16 @@ use axum::middleware::Next;
 use axum::response::Response;
 use serde::Serialize;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
+pub struct SearchProviderMetricsSnapshot {
+    pub attempts: u64,
+    pub successes: u64,
+    pub failures: u64,
+    pub no_results: u64,
+}
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct MetricsSnapshot {
@@ -20,6 +29,87 @@ pub struct MetricsSnapshot {
     pub latency_total_ms: u64,
     pub latency_max_ms: u64,
     pub generated_request_ids: u64,
+    pub streams_started: u64,
+    pub streams_completed: u64,
+    pub streams_cancelled: u64,
+    pub streams_failed: u64,
+    pub active_streams: usize,
+    pub peak_active_streams: usize,
+    pub retry_transport: u64,
+    pub retry_timeout: u64,
+    pub retry_rate_limit: u64,
+    pub retry_provider_client: u64,
+    pub retry_provider_server: u64,
+    pub retry_malformed_response: u64,
+    pub model_fallbacks: u64,
+    pub proxy_restart_attempts: u64,
+    pub proxy_restart_successes: u64,
+    pub proxy_restart_failures: u64,
+    pub search_tavily: SearchProviderMetricsSnapshot,
+    pub search_exa: SearchProviderMetricsSnapshot,
+    pub search_serper: SearchProviderMetricsSnapshot,
+    pub search_searxng: SearchProviderMetricsSnapshot,
+    pub search_duckduckgo: SearchProviderMetricsSnapshot,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryMetricClass {
+    Transport,
+    Timeout,
+    RateLimit,
+    ProviderClient,
+    ProviderServer,
+    MalformedResponse,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchMetricProvider {
+    Tavily,
+    Exa,
+    Serper,
+    SearXng,
+    DuckDuckGo,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchMetricOutcome {
+    Success,
+    Failure,
+    NoResults,
+}
+
+#[derive(Debug, Default)]
+struct SearchProviderCounters {
+    attempts: AtomicU64,
+    successes: AtomicU64,
+    failures: AtomicU64,
+    no_results: AtomicU64,
+}
+
+impl SearchProviderCounters {
+    fn snapshot(&self) -> SearchProviderMetricsSnapshot {
+        SearchProviderMetricsSnapshot {
+            attempts: self.attempts.load(Ordering::Relaxed),
+            successes: self.successes.load(Ordering::Relaxed),
+            failures: self.failures.load(Ordering::Relaxed),
+            no_results: self.no_results.load(Ordering::Relaxed),
+        }
+    }
+
+    fn record(&self, outcome: SearchMetricOutcome) {
+        self.attempts.fetch_add(1, Ordering::Relaxed);
+        match outcome {
+            SearchMetricOutcome::Success => {
+                self.successes.fetch_add(1, Ordering::Relaxed);
+            }
+            SearchMetricOutcome::Failure => {
+                self.failures.fetch_add(1, Ordering::Relaxed);
+            }
+            SearchMetricOutcome::NoResults => {
+                self.no_results.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -34,6 +124,27 @@ pub struct Metrics {
     latency_max_ms: AtomicU64,
     generated_request_ids: AtomicU64,
     request_sequence: AtomicU64,
+    streams_started: AtomicU64,
+    streams_completed: AtomicU64,
+    streams_cancelled: AtomicU64,
+    streams_failed: AtomicU64,
+    active_streams: AtomicUsize,
+    peak_active_streams: AtomicUsize,
+    retry_transport: AtomicU64,
+    retry_timeout: AtomicU64,
+    retry_rate_limit: AtomicU64,
+    retry_provider_client: AtomicU64,
+    retry_provider_server: AtomicU64,
+    retry_malformed_response: AtomicU64,
+    model_fallbacks: AtomicU64,
+    proxy_restart_attempts: AtomicU64,
+    proxy_restart_successes: AtomicU64,
+    proxy_restart_failures: AtomicU64,
+    search_tavily: SearchProviderCounters,
+    search_exa: SearchProviderCounters,
+    search_serper: SearchProviderCounters,
+    search_searxng: SearchProviderCounters,
+    search_duckduckgo: SearchProviderCounters,
 }
 
 impl Metrics {
@@ -48,6 +159,77 @@ impl Metrics {
             latency_total_ms: self.latency_total_ms.load(Ordering::Relaxed),
             latency_max_ms: self.latency_max_ms.load(Ordering::Relaxed),
             generated_request_ids: self.generated_request_ids.load(Ordering::Relaxed),
+            streams_started: self.streams_started.load(Ordering::Relaxed),
+            streams_completed: self.streams_completed.load(Ordering::Relaxed),
+            streams_cancelled: self.streams_cancelled.load(Ordering::Relaxed),
+            streams_failed: self.streams_failed.load(Ordering::Relaxed),
+            active_streams: self.active_streams.load(Ordering::Relaxed),
+            peak_active_streams: self.peak_active_streams.load(Ordering::Relaxed),
+            retry_transport: self.retry_transport.load(Ordering::Relaxed),
+            retry_timeout: self.retry_timeout.load(Ordering::Relaxed),
+            retry_rate_limit: self.retry_rate_limit.load(Ordering::Relaxed),
+            retry_provider_client: self.retry_provider_client.load(Ordering::Relaxed),
+            retry_provider_server: self.retry_provider_server.load(Ordering::Relaxed),
+            retry_malformed_response: self.retry_malformed_response.load(Ordering::Relaxed),
+            model_fallbacks: self.model_fallbacks.load(Ordering::Relaxed),
+            proxy_restart_attempts: self.proxy_restart_attempts.load(Ordering::Relaxed),
+            proxy_restart_successes: self.proxy_restart_successes.load(Ordering::Relaxed),
+            proxy_restart_failures: self.proxy_restart_failures.load(Ordering::Relaxed),
+            search_tavily: self.search_tavily.snapshot(),
+            search_exa: self.search_exa.snapshot(),
+            search_serper: self.search_serper.snapshot(),
+            search_searxng: self.search_searxng.snapshot(),
+            search_duckduckgo: self.search_duckduckgo.snapshot(),
+        }
+    }
+
+    pub fn begin_stream(self: &Arc<Self>) -> StreamMetricsGuard {
+        self.streams_started.fetch_add(1, Ordering::Relaxed);
+        let active = self.active_streams.fetch_add(1, Ordering::AcqRel) + 1;
+        self.peak_active_streams
+            .fetch_max(active, Ordering::Relaxed);
+        StreamMetricsGuard {
+            metrics: self.clone(),
+            outcome: StreamOutcome::Failed,
+            finished: false,
+        }
+    }
+
+    pub fn record_retry(&self, class: RetryMetricClass) {
+        let counter = match class {
+            RetryMetricClass::Transport => &self.retry_transport,
+            RetryMetricClass::Timeout => &self.retry_timeout,
+            RetryMetricClass::RateLimit => &self.retry_rate_limit,
+            RetryMetricClass::ProviderClient => &self.retry_provider_client,
+            RetryMetricClass::ProviderServer => &self.retry_provider_server,
+            RetryMetricClass::MalformedResponse => &self.retry_malformed_response,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_model_fallback(&self) {
+        self.model_fallbacks.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_proxy_restart_attempt(&self) {
+        self.proxy_restart_attempts.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_proxy_restart_success(&self) {
+        self.proxy_restart_successes.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_proxy_restart_failure(&self) {
+        self.proxy_restart_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_search(&self, provider: SearchMetricProvider, outcome: SearchMetricOutcome) {
+        match provider {
+            SearchMetricProvider::Tavily => self.search_tavily.record(outcome),
+            SearchMetricProvider::Exa => self.search_exa.record(outcome),
+            SearchMetricProvider::Serper => self.search_serper.record(outcome),
+            SearchMetricProvider::SearXng => self.search_searxng.record(outcome),
+            SearchMetricProvider::DuckDuckGo => self.search_duckduckgo.record(outcome),
         }
     }
 
@@ -81,6 +263,66 @@ impl Metrics {
         self.generated_request_ids.fetch_add(1, Ordering::Relaxed);
         let sequence = self.request_sequence.fetch_add(1, Ordering::Relaxed) + 1;
         format!("req-{:x}-{sequence:x}", std::process::id())
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum StreamOutcome {
+    Completed,
+    Cancelled,
+    Failed,
+}
+
+#[derive(Debug)]
+pub struct StreamMetricsGuard {
+    metrics: Arc<Metrics>,
+    outcome: StreamOutcome,
+    finished: bool,
+}
+
+impl StreamMetricsGuard {
+    pub fn completed(&mut self) {
+        self.outcome = StreamOutcome::Completed;
+        self.finish();
+    }
+
+    pub fn cancelled(&mut self) {
+        self.outcome = StreamOutcome::Cancelled;
+        self.finish();
+    }
+
+    pub fn failed(&mut self) {
+        self.outcome = StreamOutcome::Failed;
+        self.finish();
+    }
+
+    fn finish(&mut self) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        self.metrics.active_streams.fetch_sub(1, Ordering::AcqRel);
+        match self.outcome {
+            StreamOutcome::Completed => {
+                self.metrics
+                    .streams_completed
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            StreamOutcome::Cancelled => {
+                self.metrics
+                    .streams_cancelled
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            StreamOutcome::Failed => {
+                self.metrics.streams_failed.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+impl Drop for StreamMetricsGuard {
+    fn drop(&mut self) {
+        self.finish();
     }
 }
 
@@ -157,6 +399,38 @@ mod tests {
         assert!(!valid_request_id("has space"));
         assert!(!valid_request_id("a,b"));
         assert!(!valid_request_id(&"x".repeat(129)));
+    }
+
+    #[test]
+    fn operational_counters_have_stable_terminal_semantics() {
+        let metrics = Arc::new(Metrics::default());
+        {
+            let mut stream = metrics.begin_stream();
+            stream.completed();
+        }
+        {
+            let mut stream = metrics.begin_stream();
+            stream.cancelled();
+        }
+        {
+            let _stream = metrics.begin_stream();
+        }
+        metrics.record_retry(RetryMetricClass::RateLimit);
+        metrics.record_model_fallback();
+        metrics.record_proxy_restart_attempt();
+        metrics.record_proxy_restart_failure();
+        metrics.record_search(SearchMetricProvider::Exa, SearchMetricOutcome::Success);
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.streams_started, 3);
+        assert_eq!(snapshot.streams_completed, 1);
+        assert_eq!(snapshot.streams_cancelled, 1);
+        assert_eq!(snapshot.streams_failed, 1);
+        assert_eq!(snapshot.active_streams, 0);
+        assert_eq!(snapshot.retry_rate_limit, 1);
+        assert_eq!(snapshot.model_fallbacks, 1);
+        assert_eq!(snapshot.proxy_restart_attempts, 1);
+        assert_eq!(snapshot.proxy_restart_failures, 1);
+        assert_eq!(snapshot.search_exa.successes, 1);
     }
 
     #[tokio::test]

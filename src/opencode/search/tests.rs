@@ -310,12 +310,16 @@ mod provider_http_fixtures {
         config.tavily_api_key = Some("key".into());
         config.exa_api_key = Some("key".into());
         config.search.tavily_url = format!("{base}/tavily-fail");
-        let results = SearchClient::new(Client::new(), &config)
+        let metrics = Arc::new(crate::observability::Metrics::default());
+        let results = SearchClient::new_with_metrics(Client::new(), &config, metrics.clone())
             .search_results("rust")
             .await
             .unwrap();
         assert_eq!(results[0].title, "Exa fixture");
         assert_eq!(*calls.lock().await, vec!["tavily-fail", "exa"]);
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.search_tavily.failures, 1);
+        assert_eq!(snapshot.search_exa.successes, 1);
     }
 
     #[tokio::test]

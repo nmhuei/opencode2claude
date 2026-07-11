@@ -6,7 +6,9 @@ use super::types::{
     SearchQuery, SearchResult,
 };
 use crate::config::BridgeConfig;
+use crate::observability::{Metrics, SearchMetricOutcome, SearchMetricProvider};
 use reqwest::Client;
+use std::sync::Arc;
 use tracing::{info, warn};
 
 #[derive(Debug, Clone)]
@@ -21,10 +23,19 @@ pub struct SearchClient {
     serper_url: String,
     duckduckgo_url: String,
     policy: SearchPolicy,
+    metrics: Option<Arc<Metrics>>,
 }
 
 impl SearchClient {
     pub fn new(client: Client, config: &BridgeConfig) -> Self {
+        Self::build(client, config, None)
+    }
+
+    pub fn new_with_metrics(client: Client, config: &BridgeConfig, metrics: Arc<Metrics>) -> Self {
+        Self::build(client, config, Some(metrics))
+    }
+
+    fn build(client: Client, config: &BridgeConfig, metrics: Option<Arc<Metrics>>) -> Self {
         Self {
             client,
             tavily_key: config
@@ -51,6 +62,7 @@ impl SearchClient {
                 request_timeout: config.search.request_timeout,
                 allow_private_searxng: config.search.allow_private_searxng,
             },
+            metrics,
         }
     }
 
@@ -69,47 +81,109 @@ impl SearchClient {
         if let Some(key) = &self.tavily_key {
             match providers::tavily(&self.client, &query, key, &self.tavily_url, &self.policy).await
             {
-                Ok(results) if !results.is_empty() => return Ok(results),
-                Ok(_) => no_results(SearchProviderKind::Tavily, &mut last_error),
-                Err(error) => record_failure(error, &mut last_error),
+                Ok(results) if !results.is_empty() => {
+                    self.record_search(SearchProviderKind::Tavily, SearchMetricOutcome::Success);
+                    return Ok(results);
+                }
+                Ok(_) => {
+                    self.record_search(SearchProviderKind::Tavily, SearchMetricOutcome::NoResults);
+                    no_results(SearchProviderKind::Tavily, &mut last_error);
+                }
+                Err(error) => {
+                    self.record_search(SearchProviderKind::Tavily, SearchMetricOutcome::Failure);
+                    record_failure(error, &mut last_error);
+                }
             }
         }
         if let Some(key) = &self.exa_key {
             match providers::exa(&self.client, &query, key, &self.exa_url, &self.policy).await {
-                Ok(results) if !results.is_empty() => return Ok(results),
-                Ok(_) => no_results(SearchProviderKind::Exa, &mut last_error),
-                Err(error) => record_failure(error, &mut last_error),
+                Ok(results) if !results.is_empty() => {
+                    self.record_search(SearchProviderKind::Exa, SearchMetricOutcome::Success);
+                    return Ok(results);
+                }
+                Ok(_) => {
+                    self.record_search(SearchProviderKind::Exa, SearchMetricOutcome::NoResults);
+                    no_results(SearchProviderKind::Exa, &mut last_error);
+                }
+                Err(error) => {
+                    self.record_search(SearchProviderKind::Exa, SearchMetricOutcome::Failure);
+                    record_failure(error, &mut last_error);
+                }
             }
         }
         if let Some(key) = &self.serper_key {
             match providers::serper(&self.client, &query, key, &self.serper_url, &self.policy).await
             {
-                Ok(results) if !results.is_empty() => return Ok(results),
-                Ok(_) => no_results(SearchProviderKind::Serper, &mut last_error),
-                Err(error) => record_failure(error, &mut last_error),
+                Ok(results) if !results.is_empty() => {
+                    self.record_search(SearchProviderKind::Serper, SearchMetricOutcome::Success);
+                    return Ok(results);
+                }
+                Ok(_) => {
+                    self.record_search(SearchProviderKind::Serper, SearchMetricOutcome::NoResults);
+                    no_results(SearchProviderKind::Serper, &mut last_error);
+                }
+                Err(error) => {
+                    self.record_search(SearchProviderKind::Serper, SearchMetricOutcome::Failure);
+                    record_failure(error, &mut last_error);
+                }
             }
         }
         if let Some(url) = &self.searxng_url {
             match providers::searxng(&self.client, &query, url, &self.policy).await {
-                Ok(results) if !results.is_empty() => return Ok(results),
-                Ok(_) => no_results(SearchProviderKind::SearXng, &mut last_error),
-                Err(error) => record_failure(error, &mut last_error),
+                Ok(results) if !results.is_empty() => {
+                    self.record_search(SearchProviderKind::SearXng, SearchMetricOutcome::Success);
+                    return Ok(results);
+                }
+                Ok(_) => {
+                    self.record_search(SearchProviderKind::SearXng, SearchMetricOutcome::NoResults);
+                    no_results(SearchProviderKind::SearXng, &mut last_error);
+                }
+                Err(error) => {
+                    self.record_search(SearchProviderKind::SearXng, SearchMetricOutcome::Failure);
+                    record_failure(error, &mut last_error);
+                }
             }
         }
 
         info!(provider = "DuckDuckGo", "attempting web search");
         match providers::duckduckgo(&self.client, &query, &self.duckduckgo_url, &self.policy).await
         {
-            Ok(results) if !results.is_empty() => Ok(results),
-            Ok(_) => Err(last_error.unwrap_or_else(|| {
-                SearchError::new(
+            Ok(results) if !results.is_empty() => {
+                self.record_search(SearchProviderKind::DuckDuckGo, SearchMetricOutcome::Success);
+                Ok(results)
+            }
+            Ok(_) => {
+                self.record_search(
                     SearchProviderKind::DuckDuckGo,
-                    SearchErrorKind::NoResults,
-                    "all configured providers returned no results",
-                )
-            })),
-            Err(error) => Err(error),
+                    SearchMetricOutcome::NoResults,
+                );
+                Err(last_error.unwrap_or_else(|| {
+                    SearchError::new(
+                        SearchProviderKind::DuckDuckGo,
+                        SearchErrorKind::NoResults,
+                        "all configured providers returned no results",
+                    )
+                }))
+            }
+            Err(error) => {
+                self.record_search(SearchProviderKind::DuckDuckGo, SearchMetricOutcome::Failure);
+                Err(error)
+            }
         }
+    }
+
+    fn record_search(&self, provider: SearchProviderKind, outcome: SearchMetricOutcome) {
+        let Some(metrics) = &self.metrics else {
+            return;
+        };
+        let provider = match provider {
+            SearchProviderKind::Tavily => SearchMetricProvider::Tavily,
+            SearchProviderKind::Exa => SearchMetricProvider::Exa,
+            SearchProviderKind::Serper => SearchMetricProvider::Serper,
+            SearchProviderKind::SearXng => SearchMetricProvider::SearXng,
+            SearchProviderKind::DuckDuckGo => SearchMetricProvider::DuckDuckGo,
+        };
+        metrics.record_search(provider, outcome);
     }
 }
 

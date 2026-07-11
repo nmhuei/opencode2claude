@@ -107,9 +107,10 @@ impl AppState {
             .observability
             .max_concurrent_requests
             .map(|permits| Arc::new(Semaphore::new(permits)));
-        let search_client = SearchClient::new(http_client.clone(), &config);
         let workers = Arc::new(WorkerRegistry::new());
         let metrics = Arc::new(Metrics::default());
+        let search_client =
+            SearchClient::new_with_metrics(http_client.clone(), &config, metrics.clone());
 
         // Create proxy pool with 2-tier primary + warm-standby model
         // Combine primary (managed) and warm-standby (protected) proxy URLs
@@ -142,12 +143,14 @@ impl AppState {
                 let restart_runtime = container_runtime.clone();
                 let restart_image = config.runtime.warp_image.clone();
                 let restart_interval = config.egress.restart_interval;
+                let restart_metrics = metrics.clone();
                 workers.spawn_critical("proxy-restart", move |context| async move {
                     process_restart_queue(
                         restart_pool,
                         restart_runtime,
                         restart_image,
                         restart_interval,
+                        restart_metrics,
                         context,
                     )
                     .await

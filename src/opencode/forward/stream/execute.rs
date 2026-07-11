@@ -51,6 +51,7 @@ pub async fn forward_to_llm_stream(
         // Clone the token so the spawn and DropCancel share the same cancellation state
         let cancel_token_spawn = cancel_token.clone();
         async move {
+            let mut stream_metrics = state_clone.metrics.begin_stream();
             let mut current_payload = payload;
             let mut loop_count = 0;
             let mut message_emitted = false;
@@ -60,6 +61,7 @@ pub async fn forward_to_llm_stream(
                 // Check if client disconnected
                 if cancel_token_spawn.is_cancelled() {
                     let failure = crate::opencode::retry::cancellation_failure();
+                    stream_metrics.cancelled();
                     info!(?failure, "client disconnected; cancelling streaming task");
                     break;
                 }
@@ -248,6 +250,7 @@ pub async fn forward_to_llm_stream(
                 }
 
                 if client_cancelled {
+                    stream_metrics.cancelled();
                     info!("client disconnected; upstream stream dropped immediately");
                     break;
                 }
@@ -353,6 +356,7 @@ pub async fn forward_to_llm_stream(
                 .await;
 
                 let _ = send_sse(&tx, builder.message_stop()).await;
+                stream_metrics.completed();
                 break;
             }
         }

@@ -2,6 +2,7 @@
 
 use super::types::*;
 use crate::docker::{ContainerRuntime, ProxySpec};
+use crate::observability::Metrics;
 use crate::workers::WorkerContext;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -127,6 +128,7 @@ pub async fn process_restart_queue(
     runtime: Arc<dyn ContainerRuntime>,
     warp_image: String,
     cadence: Duration,
+    metrics: Arc<Metrics>,
     context: WorkerContext,
 ) -> Result<(), String> {
     let mut interval = tokio::time::interval(cadence.max(Duration::from_millis(100)));
@@ -137,7 +139,14 @@ pub async fn process_restart_queue(
                 context.heartbeat();
                 let indices = pool.write().await.drain_restart_queue();
                 for index in indices {
-                    restart_container(index, pool.clone(), runtime.clone(), warp_image.clone()).await;
+                    restart_container(
+                        index,
+                        pool.clone(),
+                        runtime.clone(),
+                        warp_image.clone(),
+                        metrics.clone(),
+                    )
+                    .await;
                 }
             }
         }
@@ -202,6 +211,7 @@ async fn restart_container(
     pool: Arc<TokioRwLock<ProxyPool>>,
     runtime: Arc<dyn ContainerRuntime>,
     warp_image: String,
+    metrics: Arc<Metrics>,
 ) {
     let (port, container_name, restart_attempt) = {
         let guard = pool.read().await;
@@ -230,6 +240,8 @@ async fn restart_container(
         return;
     }
 
+    metrics.record_proxy_restart_attempt();
+
     {
         let mut pool = pool.write().await;
         let node = &mut pool.proxies[index];
@@ -243,6 +255,7 @@ async fn restart_container(
     let spec = match ProxySpec::new(port, warp_image) {
         Ok(spec) => spec,
         Err(error) => {
+            metrics.record_proxy_restart_failure();
             error!(%error, %container_name, "invalid managed proxy specification");
             apply_restart_failure_shared(&pool, index, restart_attempt).await;
             return;
@@ -250,17 +263,20 @@ async fn restart_container(
     };
 
     if let Err(error) = runtime.recreate_managed(&spec).await {
+        metrics.record_proxy_restart_failure();
         error!(%error, %container_name, "container runtime failed to recreate managed proxy");
         apply_restart_failure_shared(&pool, index, restart_attempt).await;
         return;
     }
 
     if verify_proxy_socks(port).await {
+        metrics.record_proxy_restart_success();
         let mut pool = pool.write().await;
         if let Some(node) = pool.proxies.get_mut(index) {
             mark_node_healthy(node);
         }
     } else {
+        metrics.record_proxy_restart_failure();
         apply_restart_failure_shared(&pool, index, restart_attempt).await;
     }
 }
@@ -386,5 +402,73 @@ mod tests {
         assert_eq!(pool.recover_expired_cooldowns(), 1);
         assert_eq!(pool.proxies[0].circuit, CircuitState::HalfOpen);
         assert_eq!(pool.proxies[0].health, HealthState::Recovering);
+    }
+}
+
+#[cfg(test)]
+mod metrics_tests {
+    use super::*;
+    use crate::docker::{ContainerState, ContainerSummary, DockerError, DockerResult};
+    use async_trait::async_trait;
+
+    #[derive(Debug)]
+    struct FailingRuntime;
+
+    #[async_trait]
+    impl ContainerRuntime for FailingRuntime {
+        async fn daemon_version(&self) -> DockerResult<String> {
+            Ok("test".to_string())
+        }
+        async fn inspect(&self, _spec: &ProxySpec) -> DockerResult<ContainerState> {
+            Ok(ContainerState {
+                exists: true,
+                running: true,
+                has_expected_volume: true,
+            })
+        }
+        async fn create_missing(&self, _spec: &ProxySpec) -> DockerResult<()> {
+            Ok(())
+        }
+        async fn recreate_managed(&self, _spec: &ProxySpec) -> DockerResult<()> {
+            Err(DockerError::CommandFailed("intentional".to_string()))
+        }
+        async fn remove_managed(&self, _spec: &ProxySpec) -> DockerResult<()> {
+            Ok(())
+        }
+        async fn restart_managed(&self, _spec: &ProxySpec) -> DockerResult<()> {
+            Ok(())
+        }
+        async fn stop_managed(&self, _spec: &ProxySpec) -> DockerResult<()> {
+            Ok(())
+        }
+        async fn start_managed(&self, _spec: &ProxySpec) -> DockerResult<()> {
+            Ok(())
+        }
+        async fn logs(&self, _spec: &ProxySpec, _tail: usize) -> DockerResult<String> {
+            Ok(String::new())
+        }
+        async fn list(&self, _specs: &[ProxySpec]) -> DockerResult<Vec<ContainerSummary>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn restart_runtime_failure_is_counted_once() {
+        let pool = Arc::new(TokioRwLock::new(ProxyPool::new(&[
+            "socks5://127.0.0.1:40001".to_string(),
+        ])));
+        let metrics = Arc::new(Metrics::default());
+        restart_container(
+            0,
+            pool,
+            Arc::new(FailingRuntime),
+            "example/warp:test".to_string(),
+            metrics.clone(),
+        )
+        .await;
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.proxy_restart_attempts, 1);
+        assert_eq!(snapshot.proxy_restart_failures, 1);
+        assert_eq!(snapshot.proxy_restart_successes, 0);
     }
 }

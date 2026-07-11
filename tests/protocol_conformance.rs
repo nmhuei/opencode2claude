@@ -66,7 +66,9 @@ fn stream_response(status: StatusCode, content_type: &str, chunks: Vec<Vec<u8>>)
 }
 
 async fn harness(fixtures: Vec<Fixture>) -> (Router, FixtureState) {
-    harness_with_limits(fixtures, 256 * 1024, 4 * 1024 * 1024).await
+    let (app, fixtures, _metrics) =
+        harness_core(fixtures, 256 * 1024, 4 * 1024 * 1024, |_| {}).await;
+    (app, fixtures)
 }
 
 async fn harness_with_limits(
@@ -74,6 +76,29 @@ async fn harness_with_limits(
     max_sse_line_bytes: usize,
     max_sync_response_bytes: usize,
 ) -> (Router, FixtureState) {
+    let (app, fixtures, _metrics) = harness_core(
+        fixtures,
+        max_sse_line_bytes,
+        max_sync_response_bytes,
+        |_| {},
+    )
+    .await;
+    (app, fixtures)
+}
+
+async fn harness_core<F>(
+    fixtures: Vec<Fixture>,
+    max_sse_line_bytes: usize,
+    max_sync_response_bytes: usize,
+    configure: F,
+) -> (
+    Router,
+    FixtureState,
+    Arc<opencode2api::observability::Metrics>,
+)
+where
+    F: FnOnce(&mut BridgeConfig),
+{
     let state = FixtureState {
         fixtures: Arc::new(Mutex::new(fixtures.into())),
         requests: Arc::new(Mutex::new(Vec::new())),
@@ -88,7 +113,7 @@ async fn harness_with_limits(
     });
 
     let defaults = BridgeConfig::default();
-    let config = BridgeConfig {
+    let mut config = BridgeConfig {
         model: Some("fixture-model".to_string()),
         primary_proxies: None,
         warm_standby_proxies: None,
@@ -109,7 +134,10 @@ async fn harness_with_limits(
         },
         ..defaults
     };
-    (build_router(AppState::new(config)), state)
+    configure(&mut config);
+    let app_state = AppState::new(config);
+    let metrics = app_state.metrics.clone();
+    (build_router(app_state), state, metrics)
 }
 
 fn anthropic_request(stream: bool) -> Value {
@@ -395,7 +423,13 @@ fn cancellable_response(sender: tokio::sync::oneshot::Sender<()>) -> Response<Bo
 #[tokio::test]
 async fn dropping_client_stream_cancels_upstream_body() {
     let (sender, receiver) = tokio::sync::oneshot::channel();
-    let (app, _state) = harness(vec![Fixture::Cancellable(sender)]).await;
+    let (app, _state, metrics) = harness_core(
+        vec![Fixture::Cancellable(sender)],
+        256 * 1024,
+        4 * 1024 * 1024,
+        |_| {},
+    )
+    .await;
     let response = app
         .oneshot(
             Request::builder()
@@ -422,4 +456,94 @@ async fn dropping_client_stream_cancels_upstream_body() {
         .await
         .expect("upstream stream was not dropped after client disconnect")
         .expect("drop notifier sender disappeared");
+    tokio::task::yield_now().await;
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.streams_started, 1);
+    assert_eq!(snapshot.streams_cancelled, 1);
+    assert_eq!(snapshot.active_streams, 0);
+}
+
+#[tokio::test]
+async fn completed_stream_and_provider_retry_are_counted() {
+    let success = json!({
+        "id":"chatcmpl-after-retry",
+        "model":"upstream-model",
+        "choices":[{
+            "message":{"content":"recovered","reasoning_content":null,"tool_calls":null},
+            "finish_reason":"stop"
+        }],
+        "usage":{"prompt_tokens":1,"completion_tokens":1}
+    });
+    let stream_chunks = vec![
+        b"data: {\"choices\":[{\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\n"
+            .to_vec(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+    let fixtures = vec![
+        Fixture::Raw {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            content_type: "text/plain",
+            chunks: vec![b"temporary".to_vec()],
+        },
+        Fixture::Json(success),
+        Fixture::Sse(stream_chunks),
+    ];
+    let (app, _state, metrics) = harness_core(fixtures, 256 * 1024, 4 * 1024 * 1024, |config| {
+        config.retry.base_backoff = std::time::Duration::ZERO;
+        config.retry.max_backoff = std::time::Duration::ZERO;
+        config.retry.max_network_attempts = 1;
+    })
+    .await;
+
+    let (status, body) = call(app.clone(), anthropic_request(false)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("recovered"));
+    let (status, body) = call(app, anthropic_request(true)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("done"));
+
+    tokio::task::yield_now().await;
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.retry_provider_server, 1);
+    assert_eq!(snapshot.streams_started, 1);
+    assert_eq!(snapshot.streams_completed, 1);
+    assert_eq!(snapshot.active_streams, 0);
+}
+
+#[tokio::test]
+async fn configured_model_fallback_is_counted_separately_from_retry() {
+    let success = json!({
+        "id":"chatcmpl-fallback",
+        "model":"fallback-model",
+        "choices":[{
+            "message":{"content":"fallback ok","reasoning_content":null,"tool_calls":null},
+            "finish_reason":"stop"
+        }],
+        "usage":{"prompt_tokens":1,"completion_tokens":1}
+    });
+    let fixtures = vec![
+        Fixture::Raw {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            content_type: "text/plain",
+            chunks: vec![b"rate limited".to_vec()],
+        },
+        Fixture::Json(success),
+    ];
+    let (app, state, metrics) = harness_core(fixtures, 256 * 1024, 4 * 1024 * 1024, |config| {
+        config.retry.model_fallbacks = vec!["fallback-model".to_string()];
+        config.retry.base_backoff = std::time::Duration::ZERO;
+        config.retry.max_backoff = std::time::Duration::ZERO;
+    })
+    .await;
+    let (status, body) = call(app, anthropic_request(false)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("fallback ok"));
+
+    let requests = state.requests.lock().await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["model"], "fixture-model");
+    assert_eq!(requests[1]["model"], "fallback-model");
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.model_fallbacks, 1);
+    assert_eq!(snapshot.retry_rate_limit, 0);
 }

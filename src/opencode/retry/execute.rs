@@ -7,6 +7,7 @@ use super::policy::{
 use super::response::LeasedResponse;
 use super::warp::reconnect_warp;
 use crate::error::BridgeError;
+use crate::observability::RetryMetricClass;
 use crate::opencode::types::OpenAiRequest;
 use crate::proxy_pool::EgressLease;
 use crate::state::AppState;
@@ -64,13 +65,20 @@ pub(crate) async fn execute_with_warp_retry(
                 let status = response.status();
 
                 if classify_status(status, None) == FailureClass::RateLimit {
-                    if advance_model(&models, &mut model_index, &current_model, status.as_str()) {
+                    if advance_model(
+                        state,
+                        &models,
+                        &mut model_index,
+                        &current_model,
+                        status.as_str(),
+                    ) {
                         retry_count = 0;
                         last_failed_proxy = None;
                         continue;
                     }
 
                     if retry_count < max_retries {
+                        state.metrics.record_retry(RetryMetricClass::RateLimit);
                         retry_count += 1;
                         let retry_after = response
                             .headers()
@@ -91,13 +99,20 @@ pub(crate) async fn execute_with_warp_retry(
                 }
 
                 if classify_status(status, None) == FailureClass::ProviderServer {
-                    if advance_model(&models, &mut model_index, &current_model, status.as_str()) {
+                    if advance_model(
+                        state,
+                        &models,
+                        &mut model_index,
+                        &current_model,
+                        status.as_str(),
+                    ) {
                         retry_count = 0;
                         last_failed_proxy = None;
                         continue;
                     }
 
                     if retry_count < max_retries {
+                        state.metrics.record_retry(RetryMetricClass::ProviderServer);
                         retry_count += 1;
                         warn!(
                             %status,
@@ -124,6 +139,7 @@ pub(crate) async fn execute_with_warp_retry(
                             "upstream encoded a rate limit as HTTP 400"
                         );
                         if advance_model(
+                            state,
                             &models,
                             &mut model_index,
                             &current_model,
@@ -135,6 +151,7 @@ pub(crate) async fn execute_with_warp_retry(
                         }
 
                         if retry_count < max_retries {
+                            state.metrics.record_retry(RetryMetricClass::RateLimit);
                             retry_count += 1;
                             apply_rate_limit_penalty(state, &route, retry_count, None).await;
                             last_failed_proxy = route.proxy_index;
@@ -148,6 +165,7 @@ pub(crate) async fn execute_with_warp_retry(
                     }
 
                     if advance_model(
+                        state,
                         &models,
                         &mut model_index,
                         &current_model,
@@ -159,6 +177,7 @@ pub(crate) async fn execute_with_warp_retry(
                     }
 
                     if retry_count < max_provider_retries {
+                        state.metrics.record_retry(RetryMetricClass::ProviderClient);
                         retry_count += 1;
                         warn!(
                             retry_count,
@@ -180,6 +199,9 @@ pub(crate) async fn execute_with_warp_retry(
             Err(error) => {
                 let failure_class = classify_reqwest_error(&error);
                 if retry_count < max_retries {
+                    state
+                        .metrics
+                        .record_retry(retry_metric_class(failure_class));
                     retry_count += 1;
                     if let Some(index) = route.proxy_index {
                         warn!(
@@ -207,7 +229,13 @@ pub(crate) async fn execute_with_warp_retry(
                     continue;
                 }
 
-                if advance_model(&models, &mut model_index, &current_model, "network error") {
+                if advance_model(
+                    state,
+                    &models,
+                    &mut model_index,
+                    &current_model,
+                    "network error",
+                ) {
                     retry_count = 0;
                     last_failed_proxy = None;
                     continue;
@@ -291,7 +319,21 @@ async fn apply_rate_limit_penalty(
     }
 }
 
+fn retry_metric_class(class: FailureClass) -> RetryMetricClass {
+    match class {
+        FailureClass::Transport => RetryMetricClass::Transport,
+        FailureClass::Timeout => RetryMetricClass::Timeout,
+        FailureClass::RateLimit => RetryMetricClass::RateLimit,
+        FailureClass::ProviderClient => RetryMetricClass::ProviderClient,
+        FailureClass::ProviderServer => RetryMetricClass::ProviderServer,
+        FailureClass::MalformedResponse | FailureClass::Cancelled => {
+            RetryMetricClass::MalformedResponse
+        }
+    }
+}
+
 fn advance_model(
+    state: &AppState,
     models: &[String],
     model_index: &mut usize,
     current_model: &str,
@@ -302,6 +344,7 @@ fn advance_model(
     }
 
     *model_index += 1;
+    state.metrics.record_model_fallback();
     warn!(
         %reason,
         from_model = %current_model,

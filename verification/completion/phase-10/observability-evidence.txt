@@ -1,0 +1,28 @@
+Phase 10 observability evidence
+Date: 2026-07-11
+Branch: completion/full-repository-20260711
+
+Verified counters:
+- HTTP request totals, response classes, active/peak requests, latency totals/max
+- generated request IDs and response correlation header
+- streams started/completed/cancelled/failed, active/peak streams
+- retry classes: transport, timeout, rate limit, provider client/server, malformed
+- configured model fallbacks
+- proxy restart attempts/success/failure
+- Tavily/Exa/Serper/SearXNG/DuckDuckGo attempts and outcomes
+- worker registry state exposed alongside metrics
+
+Integration evidence:
+- provider 5xx retry increments provider-server retry once
+- model fallback increments fallback without consuming retry counter
+- stream completion and client cancellation update terminal counters once
+- search fallback records Tavily failure and Exa success
+- fake container runtime failure records one restart attempt and failure
+
+Final gate:
+- 277 unit tests passed
+- 81 fast HTTP/dashboard tests passed
+- 18 black-box process tests passed
+- 12 protocol conformance tests passed
+- 41 deterministic CLI E2E checks passed
+- rustfmt/check/clippy all clean
