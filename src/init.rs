@@ -25,28 +25,71 @@ const CONFIG_TEMPLATE: &str = r##"# OpenCode2API configuration
 # Allowed shell commands (comma-separated, only used when policy = "allowlist")
 # shell_allowlist = "git,ls,pwd,echo,cat"
 
-# Bearer auth tokens (comma-separated). Required when host is not 127.0.0.1
+# Bearer auth tokens. A string array or comma-separated string is accepted.
+# Required when host is not 127.0.0.1.
 # auth_tokens = ["sk-example-token"]
+
+# Browser dashboard and REST management authentication.
+# dashboard_admin_token = "replace-with-a-long-random-token"
+# rest_api_token = "replace-with-a-different-long-random-token"
+# csrf_enabled = true
+
+# OpenAI-compatible upstream base URL and retry policy.
+# upstream_base_url = "https://opencode.ai/zen/v1"
+# model_fallbacks = ["opencode/deepseek-v4-flash-free"]
+# enable_default_fallbacks = false
+# max_network_attempts = 5
+# max_provider_attempts = 1
+# retry_base_backoff_ms = 2000
+# retry_max_backoff_ms = 16000
 
 # Max concurrent requests (unset = no limit)
 # rate_limit = 10
+# min_reasoning_stream_tokens = 1024
 
 # Max web search tool-call loops
 # max_search_loops = 5
 
 # ── Proxy Pool (WARP SOCKS5) ──────────────────────────────────────────
-# Primary proxies (for normal traffic)
+# Egress mode: "direct" or "proxy". Proxy mode fails closed.
+# egress_mode = "proxy"
+# active_proxy_count = 3
+# allow_direct_fallback = false
+
+# Primary proxies (managed, normal traffic)
 # primary_proxies = [
 #     "socks5://127.0.0.1:40001",
 #     "socks5://127.0.0.1:40002",
 #     "socks5://127.0.0.1:40003",
 # ]
 
-# Warm-standby proxies (failover only)
+# Warm-standby proxies (protected failover only). The application never
+# restarts, stops, purges, or recreates these nodes.
 # warm_standby_proxies = [
 #     "socks5://127.0.0.1:40004",
 #     "socks5://127.0.0.1:40005",
 # ]
+
+# Exit identity verification policy.
+# require_verified_exit_ip = false
+# minimum_unique_exit_ips = 1
+# identity_endpoints = [
+#     "https://cloudflare.com/cdn-cgi/trace",
+#     "https://api.ipify.org?format=json",
+# ]
+# identity_ttl_secs = 300
+
+# Managed-primary health/restart policy.
+# proxy_health_interval_secs = 10
+# proxy_restart_interval_secs = 2
+# max_proxy_restart_attempts = 3
+
+# Docker/WARP runtime.
+# docker_binary = "docker"
+# warp_cli_binary = "warp-cli"
+# warp_image = "ghcr.io/mon-ius/docker-warp-socks:latest"
+# worker_shutdown_timeout_secs = 10
+# server_shutdown_timeout_secs = 15
 
 # ── Web Search API Keys ──────────────────────────────────────────────
 # At least one is needed for web search tool support.

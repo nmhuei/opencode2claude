@@ -41,9 +41,9 @@ impl AppState {
             .build()
             .expect("Failed to create HTTP client");
 
-        let rate_limiter = std::env::var("BRIDGE_RATE_LIMIT")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
+        let rate_limiter = config
+            .observability
+            .max_concurrent_requests
             .map(|permits| Arc::new(Semaphore::new(permits)));
         let search_client = SearchClient::new(http_client.clone(), &config);
 
@@ -58,7 +58,8 @@ impl AppState {
         }
 
         let proxy_pool = if !all_urls.is_empty() {
-            let pool = ProxyPool::new(&all_urls);
+            let pool =
+                ProxyPool::new_with_active_count(&all_urls, config.egress.active_proxy_count);
             // Spawn background tasks for pool management
             if !pool.proxies.is_empty() {
                 let pool_arc = Arc::new(RwLock::new(pool));
@@ -117,21 +118,10 @@ mod tests {
             host: "127.0.0.1".parse().unwrap(),
             bridge_port: 0,
             opencode_port: 4096,
-            model: None,
-            shell_policy: crate::shell::ShellPolicy::Disabled,
-            auth_tokens: None,
             max_body_size: 1024,
             stream_buffer_size: 4096,
             channel_capacity: 256,
-            tavily_api_key: None,
-            exa_api_key: None,
-            serper_api_key: None,
-            searxng_url: None,
-            searxng_api_key: None,
-            max_search_loops: 5,
-            proxies: None,
-            primary_proxies: None,
-            warm_standby_proxies: None,
+            ..Default::default()
         };
         let state = AppState::new(config);
         assert_eq!(state.config.bridge_port, 0);

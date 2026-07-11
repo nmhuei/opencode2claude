@@ -18,6 +18,9 @@ jobs:
       - name: Feature contract matrix
         run: ./scripts/check_feature_matrix.py
 
+      - name: Resolved configuration boundary
+        run: ./scripts/check_config_boundary.py
+
       - name: Verification (CI profile)
         run: ./scripts/verify.sh all --profile ci
 

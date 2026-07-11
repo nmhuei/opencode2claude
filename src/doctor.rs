@@ -132,25 +132,26 @@ impl fmt::Display for CheckResult {
 
 /// Run all diagnostic checks and return a report.
 pub async fn run_diagnostics() -> DoctorReport {
+    let resolved = config::BridgeConfig::from_env_and_cli(config::CliOverrides::default());
     let mut checks = Vec::new();
 
     // 1. Docker daemon
     checks.push(check_docker().await);
 
     // 2. Port availability
-    checks.push(check_port().await);
+    checks.push(check_port(resolved.bridge_port).await);
 
     // 3. Proxy containers
     checks.push(check_proxies().await);
 
     // 4. Config file
-    checks.push(check_config());
+    checks.push(check_config(&resolved));
 
     // 5. Auth status
-    checks.push(check_auth());
+    checks.push(check_auth(&resolved));
 
     // 6. Upstream DNS / egress
-    checks.push(check_upstream().await);
+    checks.push(check_upstream(&resolved).await);
 
     // Compute summary
     let mut warnings = 0u8;
@@ -197,11 +198,9 @@ async fn check_docker() -> CheckResult {
     }
 }
 
-async fn check_port() -> CheckResult {
+async fn check_port(port: u16) -> CheckResult {
     let name = "port-bridge".to_string();
     let label = "Bridge Port".to_string();
-    let port = config::DEFAULT_BRIDGE_PORT;
-
     match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
         Ok(listener) => {
             drop(listener);
@@ -262,13 +261,13 @@ async fn check_proxies() -> CheckResult {
     }
 }
 
-fn check_config() -> CheckResult {
+fn check_config(resolved: &config::BridgeConfig) -> CheckResult {
     let name = "config-file".to_string();
     let label = "Config File".to_string();
-    let config_paths = ["opencode2api.toml"];
-
-    for path_str in &config_paths {
-        let path = std::path::Path::new(path_str);
+    let config_path = &resolved.management.config_path;
+    let path_str = config_path.to_string_lossy();
+    {
+        let path = config_path.as_path();
         if path.exists() {
             match std::fs::read_to_string(path) {
                 Ok(contents) => match toml::from_str::<config::TomlConfig>(&contents) {
@@ -309,14 +308,13 @@ fn check_config() -> CheckResult {
     }
 }
 
-fn check_auth() -> CheckResult {
+fn check_auth(resolved: &config::BridgeConfig) -> CheckResult {
     let name = "auth-status".to_string();
     let label = "Auth Status".to_string();
 
-    let auth_token = std::env::var("BRIDGE_AUTH_TOKEN").ok();
-    match auth_token {
-        Some(token) if !token.is_empty() => {
-            let count = token.split(',').count();
+    match resolved.auth_tokens.as_ref() {
+        Some(tokens) if !tokens.is_empty() => {
+            let count = tokens.len();
             CheckResult {
                 name,
                 label,
@@ -337,7 +335,7 @@ fn check_auth() -> CheckResult {
     }
 }
 
-async fn check_upstream() -> CheckResult {
+async fn check_upstream(resolved: &config::BridgeConfig) -> CheckResult {
     let name = "upstream-egress".to_string();
     let label = "Upstream Reachable".to_string();
 
@@ -346,7 +344,11 @@ async fn check_upstream() -> CheckResult {
         .build()
         .unwrap_or_default();
 
-    match client.get("https://opencode.ai/zen/v1/models").send().await {
+    let url = format!(
+        "{}/models",
+        resolved.retry.upstream_base_url.trim_end_matches('/')
+    );
+    match client.get(url).send().await {
         Ok(resp) if resp.status().is_success() || resp.status().is_client_error() => CheckResult {
             name,
             label,

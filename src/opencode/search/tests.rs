@@ -34,21 +34,11 @@ fn make_test_config() -> BridgeConfig {
         host: "127.0.0.1".parse().unwrap(),
         bridge_port: 4000,
         opencode_port: 4096,
-        model: None,
         shell_policy: ShellPolicy::Disabled,
-        auth_tokens: None,
         max_body_size: 1024,
         stream_buffer_size: 4096,
         channel_capacity: 256,
-        tavily_api_key: None,
-        exa_api_key: None,
-        serper_api_key: None,
-        searxng_url: None,
-        searxng_api_key: None,
-        max_search_loops: 5,
-        proxies: None,
-        primary_proxies: None,
-        warm_standby_proxies: None,
+        ..Default::default()
     }
 }
 
@@ -59,21 +49,12 @@ fn test_search_client_creation() {
         host: "127.0.0.1".parse().unwrap(),
         bridge_port: 4000,
         opencode_port: 4096,
-        model: None,
         shell_policy: ShellPolicy::Disabled,
-        auth_tokens: None,
         max_body_size: 1024,
         stream_buffer_size: 4096,
         channel_capacity: 256,
-        tavily_api_key: Some("test-key".to_string()),
-        exa_api_key: None,
-        serper_api_key: None,
-        searxng_url: None,
-        searxng_api_key: None,
-        max_search_loops: 5,
-        proxies: None,
-        primary_proxies: None,
-        warm_standby_proxies: None,
+        tavily_api_key: Some("test-key".into()),
+        ..Default::default()
     };
     let search_client = SearchClient::new(client, &config);
     assert_eq!(search_client.tavily_key, Some("test-key".to_string()));

@@ -4,7 +4,8 @@ use super::common::{get_correct_tool_name, inject_search_results};
 use crate::error::BridgeError;
 use crate::handlers::MessagesRequest;
 use crate::opencode::mapper::{
-    extract_search_query, is_compact_request, is_web_search_tool, map_anthropic_to_openai,
+    extract_search_query, is_compact_request, is_web_search_tool,
+    map_anthropic_to_openai_with_policy,
 };
 use crate::opencode::retry::execute_with_warp_retry;
 use crate::opencode::sanitize::{extract_and_clean_dsml, strip_system_tags};
@@ -30,7 +31,11 @@ pub async fn forward_to_llm_sync(
             ));
         }
 
-        let openai_req = map_anthropic_to_openai(&payload, model.clone());
+        let openai_req = map_anthropic_to_openai_with_policy(
+            &payload,
+            model.clone(),
+            state.config.protocol.min_reasoning_stream_tokens,
+        );
 
         info!("Forwarding sync request for model {}", model);
 

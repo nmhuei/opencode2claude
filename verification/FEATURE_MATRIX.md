@@ -56,7 +56,7 @@ This matrix is the authoritative inventory of public contracts. `status` is one 
 | DASH-003 | Status/proxy/config views | dashboard uses shared management policy | dashboard/management | service tests | router tests | dashboard docs | yes | implemented |
 | DASH-004 | Event stream/test stream | dashboard SSE is bounded and authenticated | dashboard events | event tests | router tests | dashboard docs | yes | implemented |
 | CFG-001 | Precedence | defaults < TOML < env < CLI | config loader | precedence tests | CLI smoke | config reference | yes | verified |
-| CFG-002 | Semantic validation | invalid auth/bind/egress combinations fail before bind | config security | security tests | process smoke | config reference | yes | implemented |
+| CFG-002 | Semantic validation | invalid auth/bind/egress combinations fail before bind | config security | security tests | process smoke | config reference | yes | verified |
 | CFG-003 | Secret redaction | secrets redact in Debug/display/snapshots/logs | config/management | redaction tests | log/REST tests | security guide | yes | partial |
 | CFG-004 | Legacy aliases/migration | old env/config names receive compatible migration | config loader | migration tests | CLI test | migration guide | yes | partial |
 | EGR-001 | Typed egress nodes | role/health/circuit/lifecycle are independent | egress domain | transition tests | fake runtime | proxy guide | yes | blocked |

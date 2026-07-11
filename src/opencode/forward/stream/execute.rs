@@ -7,7 +7,9 @@ use crate::handlers::MessagesRequest;
 use crate::opencode::forward::common::{
     estimate_input_tokens, estimate_string_tokens, inject_search_results,
 };
-use crate::opencode::mapper::{extract_search_query, is_compact_request, map_anthropic_to_openai};
+use crate::opencode::mapper::{
+    extract_search_query, is_compact_request, map_anthropic_to_openai_with_policy,
+};
 use crate::opencode::retry::execute_with_warp_retry;
 use crate::opencode::search::SearchClient;
 use crate::sse::SseEventBuilder;
@@ -56,7 +58,8 @@ pub async fn forward_to_llm_stream(
             loop {
                 // Check if client disconnected
                 if cancel_token_spawn.is_cancelled() {
-                    info!("Client disconnected \u{2014} cancelling streaming task");
+                    let failure = crate::opencode::retry::cancellation_failure();
+                    info!(?failure, "client disconnected; cancelling streaming task");
                     break;
                 }
 
@@ -78,7 +81,11 @@ pub async fn forward_to_llm_stream(
                     break;
                 }
 
-                let openai_req = map_anthropic_to_openai(&current_payload, model_clone.clone());
+                let openai_req = map_anthropic_to_openai_with_policy(
+                    &current_payload,
+                    model_clone.clone(),
+                    state_clone.config.protocol.min_reasoning_stream_tokens,
+                );
 
                 info!(
                     "Forwarding stream request for model {} (loop {})",

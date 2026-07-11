@@ -2,10 +2,10 @@
 
 use tracing::{info, warn};
 
-pub(super) async fn reconnect_warp() -> bool {
+pub(super) async fn reconnect_warp(binary: &str) -> bool {
     info!("reconnecting host WARP client");
 
-    let disconnect = tokio::process::Command::new("warp-cli")
+    let disconnect = tokio::process::Command::new(binary)
         .arg("disconnect")
         .output()
         .await;
@@ -24,7 +24,7 @@ pub(super) async fn reconnect_warp() -> bool {
     }
 
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-    let connect = tokio::process::Command::new("warp-cli")
+    let connect = tokio::process::Command::new(binary)
         .arg("connect")
         .output()
         .await;

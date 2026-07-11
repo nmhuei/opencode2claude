@@ -1,17 +1,16 @@
 //! Authentication helpers shared by management transports.
 
+use crate::config::BridgeConfig;
 use axum::http::{header, HeaderMap};
 
-pub const DASHBOARD_TOKEN_ENV: &str = "DASHBOARD_ADMIN_TOKEN";
-pub const REST_API_TOKEN_ENV: &str = "REST_API_TOKEN";
 pub const SESSION_COOKIE: &str = "bridge_admin_session";
 
-pub fn dashboard_token() -> Option<String> {
-    non_empty_env(DASHBOARD_TOKEN_ENV)
+pub fn dashboard_token(config: &BridgeConfig) -> Option<&str> {
+    config.management.dashboard_token()
 }
 
-pub fn rest_token() -> Option<String> {
-    non_empty_env(REST_API_TOKEN_ENV).or_else(dashboard_token)
+pub fn rest_token(config: &BridgeConfig) -> Option<&str> {
+    config.management.rest_token()
 }
 
 pub fn bearer_token(headers: &HeaderMap) -> Option<&str> {
@@ -62,13 +61,10 @@ pub fn token_eq(provided: &[u8], expected: &[u8]) -> bool {
     diff == 0
 }
 
-fn non_empty_env(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|value| !value.is_empty())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{BridgeConfig, ManagementConfig};
     use axum::http::HeaderValue;
 
     #[test]
@@ -89,5 +85,19 @@ mod tests {
             cookie_value(&headers, SESSION_COOKIE).as_deref(),
             Some("secret")
         );
+    }
+
+    #[test]
+    fn tokens_are_resolved_from_config_without_environment_reads() {
+        let config = BridgeConfig {
+            management: ManagementConfig {
+                dashboard_token: Some("dashboard-secret".into()),
+                rest_api_token: Some("rest-secret".into()),
+                ..BridgeConfig::default().management
+            },
+            ..Default::default()
+        };
+        assert_eq!(dashboard_token(&config), Some("dashboard-secret"));
+        assert_eq!(rest_token(&config), Some("rest-secret"));
     }
 }

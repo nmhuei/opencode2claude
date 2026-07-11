@@ -1,7 +1,8 @@
 //! Upstream request execution with model fallback and egress-aware retries.
 
 use super::policy::{
-    build_model_retry_list, is_rate_limit_body, is_reasoning_heavy_model, MAX_PROVIDER_RETRIES,
+    bounded_backoff, build_model_retry_list, classify_reqwest_error, classify_status,
+    is_rate_limit_body, is_reasoning_heavy_model, parse_retry_after, FailureClass,
 };
 use super::warp::reconnect_warp;
 use crate::error::BridgeError;
@@ -10,8 +11,6 @@ use crate::state::AppState;
 use reqwest::{Client, Response, StatusCode};
 use std::time::Duration;
 use tracing::{info, warn};
-
-const UPSTREAM_URL: &str = "https://opencode.ai/zen/v1/chat/completions";
 
 struct SelectedRoute {
     client: Client,
@@ -24,9 +23,13 @@ pub(crate) async fn execute_with_warp_retry(
     routing_key: &str,
     request: &OpenAiRequest,
 ) -> Result<Response, BridgeError> {
-    let proxy_count = state.proxy_pool.read().await.proxies.len();
-    let max_retries = (proxy_count.max(3) + 2) as u32;
-    let models = build_model_retry_list(request);
+    let max_retries = state.config.retry.max_network_attempts as u32;
+    let max_provider_retries = state.config.retry.max_provider_attempts;
+    let models = build_model_retry_list(request, &state.config.retry);
+    let upstream_url = format!(
+        "{}/chat/completions",
+        state.config.retry.upstream_base_url.trim_end_matches('/')
+    );
 
     if request.stream && is_reasoning_heavy_model(&request.model) && models.len() == 1 {
         info!(
@@ -47,7 +50,7 @@ pub(crate) async fn execute_with_warp_retry(
         let route = select_route(state, routing_key, last_failed_proxy).await?;
         let result = route
             .client
-            .post(UPSTREAM_URL)
+            .post(&upstream_url)
             .json(&attempt_request)
             .send()
             .await;
@@ -57,7 +60,7 @@ pub(crate) async fn execute_with_warp_retry(
                 record_transport_success(state, route.proxy_index).await;
                 let status = response.status();
 
-                if status == StatusCode::TOO_MANY_REQUESTS {
+                if classify_status(status, None) == FailureClass::RateLimit {
                     if advance_model(&models, &mut model_index, &current_model, status.as_str()) {
                         retry_count = 0;
                         last_failed_proxy = None;
@@ -70,11 +73,12 @@ pub(crate) async fn execute_with_warp_retry(
                             .headers()
                             .get("retry-after")
                             .and_then(|value| value.to_str().ok())
-                            .and_then(|value| value.parse::<u64>().ok())
-                            .map(Duration::from_secs);
+                            .and_then(|value| {
+                                parse_retry_after(value, std::time::SystemTime::now())
+                            });
                         apply_rate_limit_penalty(state, &route, retry_count, retry_after).await;
                         last_failed_proxy = route.proxy_index;
-                        sleep_backoff(retry_count).await;
+                        sleep_backoff(state, retry_count, route.proxy_index).await;
                         continue;
                     }
 
@@ -83,7 +87,7 @@ pub(crate) async fn execute_with_warp_retry(
                     )));
                 }
 
-                if status.is_server_error() {
+                if classify_status(status, None) == FailureClass::ProviderServer {
                     if advance_model(&models, &mut model_index, &current_model, status.as_str()) {
                         retry_count = 0;
                         last_failed_proxy = None;
@@ -98,7 +102,7 @@ pub(crate) async fn execute_with_warp_retry(
                             max_retries,
                             "upstream server error; retrying without penalizing egress"
                         );
-                        sleep_backoff(retry_count).await;
+                        sleep_backoff(state, retry_count, route.proxy_index).await;
                         continue;
                     }
 
@@ -131,7 +135,7 @@ pub(crate) async fn execute_with_warp_retry(
                             retry_count += 1;
                             apply_rate_limit_penalty(state, &route, retry_count, None).await;
                             last_failed_proxy = route.proxy_index;
-                            sleep_backoff(retry_count).await;
+                            sleep_backoff(state, retry_count, route.proxy_index).await;
                             continue;
                         }
 
@@ -151,26 +155,27 @@ pub(crate) async fn execute_with_warp_retry(
                         continue;
                     }
 
-                    if retry_count < MAX_PROVIDER_RETRIES {
+                    if retry_count < max_provider_retries {
                         retry_count += 1;
                         warn!(
                             retry_count,
-                            max_retries = MAX_PROVIDER_RETRIES,
+                            max_retries = max_provider_retries,
                             body = %body_text.chars().take(200).collect::<String>(),
                             "upstream returned a non-rate-limit 400; retrying without penalizing egress"
                         );
-                        sleep_backoff(retry_count).await;
+                        sleep_backoff(state, retry_count, route.proxy_index).await;
                         continue;
                     }
 
                     return Err(BridgeError::UpstreamError(format!(
-                        "Upstream returned HTTP 400 after {MAX_PROVIDER_RETRIES} provider retry attempt(s)"
+                        "Upstream returned HTTP 400 after {max_provider_retries} provider retry attempt(s)"
                     )));
                 }
 
                 return Ok(response);
             }
             Err(error) => {
+                let failure_class = classify_reqwest_error(&error);
                 if retry_count < max_retries {
                     retry_count += 1;
                     if let Some(index) = route.proxy_index {
@@ -178,6 +183,7 @@ pub(crate) async fn execute_with_warp_retry(
                             proxy_index = index,
                             proxy_url = ?route.proxy_url,
                             %error,
+                            ?failure_class,
                             retry_count,
                             max_retries,
                             "network error through proxy"
@@ -187,13 +193,14 @@ pub(crate) async fn execute_with_warp_retry(
                     } else {
                         warn!(
                             %error,
+                            ?failure_class,
                             retry_count,
                             max_retries,
                             "direct upstream network error; reconnecting host WARP"
                         );
-                        reconnect_warp().await;
+                        reconnect_warp(&state.config.runtime.warp_cli_binary).await;
                     }
-                    sleep_backoff(retry_count).await;
+                    sleep_backoff(state, retry_count, route.proxy_index).await;
                     continue;
                 }
 
@@ -218,11 +225,16 @@ async fn select_route(
 ) -> Result<SelectedRoute, BridgeError> {
     let mut pool = state.proxy_pool.write().await;
     if pool.proxies.is_empty() {
-        return Ok(SelectedRoute {
-            client: state.http_client.clone(),
-            proxy_url: None,
-            proxy_index: None,
-        });
+        if state.config.egress.mode == crate::config::EgressMode::Direct {
+            return Ok(SelectedRoute {
+                client: state.http_client.clone(),
+                proxy_url: None,
+                proxy_index: None,
+            });
+        }
+        return Err(BridgeError::UpstreamError(
+            "Proxy egress mode is configured but the proxy pool is empty".to_string(),
+        ));
     }
 
     let selection = match excluded_proxy {
@@ -268,7 +280,7 @@ async fn apply_rate_limit_penalty(
             pool.mark_rate_limited_adaptive(index, retry_count);
         }
     } else {
-        reconnect_warp().await;
+        reconnect_warp(&state.config.runtime.warp_cli_binary).await;
     }
 }
 
@@ -292,8 +304,9 @@ fn advance_model(
     true
 }
 
-async fn sleep_backoff(retry_count: u32) {
-    let delay = Duration::from_secs(2u64.pow(retry_count.min(4)));
+async fn sleep_backoff(state: &AppState, retry_count: u32, proxy_index: Option<usize>) {
+    let seed = proxy_index.unwrap_or_default() as u64 ^ u64::from(retry_count);
+    let delay = bounded_backoff(&state.config.retry, retry_count, seed);
     info!(?delay, retry_count, "waiting before upstream retry");
     tokio::time::sleep(delay).await;
 }

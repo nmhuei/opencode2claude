@@ -9,7 +9,7 @@ pub use helpers::{
     tool_result_content_to_string,
 };
 pub use policy::is_compact_request;
-pub use request::map_anthropic_to_openai;
+pub use request::{map_anthropic_to_openai, map_anthropic_to_openai_with_policy};
 
 #[cfg(test)]
 mod tests;

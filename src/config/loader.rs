@@ -1,48 +1,51 @@
 //! Deterministic configuration resolution.
 
 use super::{
-    BridgeConfig, CliOverrides, TomlConfig, DEFAULT_BRIDGE_PORT, DEFAULT_CHANNEL_CAPACITY,
-    DEFAULT_HOST, DEFAULT_MAX_BODY_SIZE, DEFAULT_OPENCODE_PORT, DEFAULT_PRIMARY_PROXIES,
-    DEFAULT_SHELL_ALLOWLIST, DEFAULT_STREAM_BUFFER_SIZE, DEFAULT_WARM_STANDBY_PROXIES,
+    BridgeConfig, CliOverrides, EgressMode, SecretString, TomlConfig, DEFAULT_BRIDGE_PORT,
+    DEFAULT_CHANNEL_CAPACITY, DEFAULT_HOST, DEFAULT_MAX_BODY_SIZE, DEFAULT_OPENCODE_PORT,
+    DEFAULT_PRIMARY_PROXIES, DEFAULT_SHELL_ALLOWLIST, DEFAULT_STREAM_BUFFER_SIZE,
+    DEFAULT_WARM_STANDBY_PROXIES,
 };
 use crate::shell::ShellPolicy;
 use std::collections::HashSet;
 use std::env;
 use std::net::IpAddr;
+use std::path::PathBuf;
 use std::str::FromStr;
+use std::time::Duration;
 use tracing::warn;
 
 pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
+    let mut resolved = BridgeConfig::default();
     let config_path = overrides
         .config_path
-        .as_deref()
-        .unwrap_or("opencode2api.toml");
-    let file = TomlConfig::from_file(config_path);
+        .clone()
+        .or_else(|| env_string("BRIDGE_CONFIG_PATH"))
+        .unwrap_or_else(|| "opencode2api.toml".to_string());
+    let file = TomlConfig::from_file(&config_path);
 
-    let host = resolve_host(
+    resolved.host = resolve_host(
         overrides.host,
         file.as_ref().and_then(|cfg| cfg.host.clone()),
     );
-    if host.is_unspecified() {
-        warn!("⚠️  Bridge is binding to all network interfaces. Consider 127.0.0.1 for local-only access.");
+    if resolved.host.is_unspecified() {
+        warn!("bridge is binding to all network interfaces; strong authentication is required");
     }
 
-    let bridge_port = overrides
+    resolved.bridge_port = overrides
         .bridge_port
         .or_else(|| env_parse("BRIDGE_PORT"))
         .or_else(|| file.as_ref().and_then(|cfg| cfg.port))
         .unwrap_or(DEFAULT_BRIDGE_PORT);
-
-    let opencode_port = env_parse("OPENCODE_PORT")
+    resolved.opencode_port = env_parse("OPENCODE_PORT")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.opencode_port))
         .unwrap_or(DEFAULT_OPENCODE_PORT);
-
-    let model = overrides
+    resolved.model = overrides
         .model
         .or_else(|| env_string("OPENCODE_MODEL"))
         .or_else(|| file.as_ref().and_then(|cfg| cfg.model.clone()));
 
-    let shell_policy = resolve_shell_policy(
+    resolved.shell_policy = resolve_shell_policy(
         overrides
             .shell_policy
             .or_else(|| env_string("BRIDGE_SHELL_POLICY"))
@@ -53,50 +56,64 @@ pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
             .unwrap_or_else(|| DEFAULT_SHELL_ALLOWLIST.to_string()),
     );
 
-    let auth_tokens = parse_csv_optional(
-        env_string("BRIDGE_AUTH_TOKEN")
-            .or_else(|| file.as_ref().and_then(|cfg| cfg.auth_tokens.clone())),
-    );
-
-    let max_body_size = overrides
+    resolved.auth_tokens = env_string("BRIDGE_AUTH_TOKEN")
+        .and_then(|value| parse_secret_csv_optional(Some(value)))
+        .or_else(|| {
+            file.as_ref()
+                .and_then(|cfg| cfg.auth_tokens.clone())
+                .map(|value| {
+                    value
+                        .into_vec()
+                        .into_iter()
+                        .filter_map(SecretString::new)
+                        .collect::<Vec<_>>()
+                })
+                .filter(|tokens| !tokens.is_empty())
+        });
+    resolved.max_body_size = overrides
         .max_body_size
         .or_else(|| env_parse("BRIDGE_MAX_BODY_SIZE"))
         .or_else(|| file.as_ref().and_then(|cfg| cfg.max_body_size))
         .unwrap_or(DEFAULT_MAX_BODY_SIZE);
-    if max_body_size == 0 {
-        warn!("⚠️  Request body limit is disabled (max_body_size=0).");
-    }
-
-    let stream_buffer_size = env_parse("BRIDGE_STREAM_BUFFER_SIZE")
+    resolved.stream_buffer_size = env_parse("BRIDGE_STREAM_BUFFER_SIZE")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.stream_buffer_size))
         .unwrap_or(DEFAULT_STREAM_BUFFER_SIZE);
-
-    let channel_capacity = env_parse("BRIDGE_CHANNEL_CAPACITY")
+    resolved.channel_capacity = env_parse("BRIDGE_CHANNEL_CAPACITY")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.channel_capacity))
         .unwrap_or(DEFAULT_CHANNEL_CAPACITY);
+    if resolved.max_body_size == 0 {
+        warn!("request body limit is disabled (BRIDGE_MAX_BODY_SIZE=0)");
+    }
 
-    let tavily_api_key = overrides
-        .tavily_api_key
-        .or_else(|| env_string("TAVILY_API_KEY"))
-        .or_else(|| file.as_ref().and_then(|cfg| cfg.tavily_api_key.clone()));
-    let exa_api_key = overrides
-        .exa_api_key
-        .or_else(|| env_string("EXA_API_KEY"))
-        .or_else(|| file.as_ref().and_then(|cfg| cfg.exa_api_key.clone()));
-    let serper_api_key = overrides
-        .serper_api_key
-        .or_else(|| env_string("SERPER_API_KEY"))
-        .or_else(|| file.as_ref().and_then(|cfg| cfg.serper_api_key.clone()));
-    let searxng_url = overrides
+    resolved.tavily_api_key = secret_option(
+        overrides
+            .tavily_api_key
+            .or_else(|| env_string("TAVILY_API_KEY"))
+            .or_else(|| file.as_ref().and_then(|cfg| cfg.tavily_api_key.clone())),
+    );
+    resolved.exa_api_key = secret_option(
+        overrides
+            .exa_api_key
+            .or_else(|| env_string("EXA_API_KEY"))
+            .or_else(|| file.as_ref().and_then(|cfg| cfg.exa_api_key.clone())),
+    );
+    resolved.serper_api_key = secret_option(
+        overrides
+            .serper_api_key
+            .or_else(|| env_string("SERPER_API_KEY"))
+            .or_else(|| file.as_ref().and_then(|cfg| cfg.serper_api_key.clone())),
+    );
+    resolved.searxng_url = overrides
         .searxng_url
         .or_else(|| env_string("SEARXNG_URL"))
         .or_else(|| file.as_ref().and_then(|cfg| cfg.searxng_url.clone()));
-    let searxng_api_key = overrides
-        .searxng_api_key
-        .or_else(|| env_string("SEARXNG_API_KEY"))
-        .or_else(|| file.as_ref().and_then(|cfg| cfg.searxng_api_key.clone()));
-
-    let max_search_loops = env_parse("BRIDGE_MAX_SEARCH_LOOPS")
+    resolved.searxng_api_key = secret_option(
+        overrides
+            .searxng_api_key
+            .or_else(|| env_string("SEARXNG_API_KEY"))
+            .or_else(|| file.as_ref().and_then(|cfg| cfg.searxng_api_key.clone())),
+    );
+    resolved.max_search_loops = env_parse("BRIDGE_MAX_SEARCH_LOOPS")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.max_search_loops))
         .unwrap_or(5);
 
@@ -104,38 +121,162 @@ pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
         file.as_ref()
             .and_then(|cfg| cfg.proxies.as_ref().map(|items| items.join(",")))
     });
-    let proxies = parse_csv_optional(legacy_proxy_value.clone());
-
-    let primary_proxies = parse_csv_optional(Some(
+    resolved.proxies = parse_csv_optional(legacy_proxy_value.clone());
+    resolved.primary_proxies = parse_csv_optional(Some(
         env_string("BRIDGE_PRIMARY_PROXIES")
             .or(legacy_proxy_value)
+            .or_else(|| {
+                file.as_ref()
+                    .and_then(|cfg| cfg.primary_proxies.as_ref().map(|items| items.join(",")))
+            })
             .unwrap_or_else(|| DEFAULT_PRIMARY_PROXIES.to_string()),
     ));
-    let warm_standby_proxies = parse_csv_optional(Some(
+    resolved.warm_standby_proxies = parse_csv_optional(Some(
         env_string("BRIDGE_WARM_STANDBY_PROXIES")
+            .or_else(|| {
+                file.as_ref().and_then(|cfg| {
+                    cfg.warm_standby_proxies
+                        .as_ref()
+                        .map(|items| items.join(","))
+                })
+            })
             .unwrap_or_else(|| DEFAULT_WARM_STANDBY_PROXIES.to_string()),
     ));
 
-    BridgeConfig {
-        host,
-        bridge_port,
-        opencode_port,
-        model,
-        shell_policy,
-        auth_tokens,
-        max_body_size,
-        stream_buffer_size,
-        channel_capacity,
-        tavily_api_key,
-        exa_api_key,
-        serper_api_key,
-        searxng_url,
-        searxng_api_key,
-        max_search_loops,
-        proxies,
-        primary_proxies,
-        warm_standby_proxies,
-    }
+    resolved.management.config_path = PathBuf::from(config_path);
+    resolved.management.dashboard_token =
+        secret_option(env_string("DASHBOARD_ADMIN_TOKEN").or_else(|| {
+            file.as_ref()
+                .and_then(|cfg| cfg.dashboard_admin_token.clone())
+        }));
+    resolved.management.rest_api_token = secret_option(
+        env_string("REST_API_TOKEN")
+            .or_else(|| file.as_ref().and_then(|cfg| cfg.rest_api_token.clone())),
+    );
+    resolved.management.csrf_enabled = env_bool("DASHBOARD_CSRF_ENABLED")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.csrf_enabled))
+        .unwrap_or(true);
+
+    resolved.observability.max_concurrent_requests =
+        env_parse("BRIDGE_RATE_LIMIT").or_else(|| file.as_ref().and_then(|cfg| cfg.rate_limit));
+    resolved.observability.metrics_enabled = env_bool("BRIDGE_METRICS_ENABLED")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.metrics_enabled))
+        .unwrap_or(true);
+    resolved.observability.request_id_header = env_string("BRIDGE_REQUEST_ID_HEADER")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.request_id_header.clone()))
+        .unwrap_or_else(|| "x-request-id".to_string());
+
+    resolved.protocol.min_reasoning_stream_tokens =
+        env_parse::<u32>("BRIDGE_MIN_REASONING_STREAM_TOKENS")
+            .or_else(|| {
+                file.as_ref()
+                    .and_then(|cfg| cfg.min_reasoning_stream_tokens)
+            })
+            .filter(|value| *value > 0)
+            .unwrap_or(1024);
+
+    resolved.retry.upstream_base_url = env_string("OPENCODE_UPSTREAM_BASE_URL")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.upstream_base_url.clone()))
+        .unwrap_or_else(|| "https://opencode.ai/zen/v1".to_string())
+        .trim_end_matches('/')
+        .to_string();
+    resolved.retry.model_fallbacks = env_string("OPENCODE_MODEL_FALLBACKS")
+        .map(|value| parse_csv(&value))
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.model_fallbacks.clone()))
+        .unwrap_or_default();
+    resolved.retry.default_fallbacks_enabled = env_bool("OPENCODE_ENABLE_DEFAULT_FALLBACKS")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.enable_default_fallbacks))
+        .unwrap_or(false);
+    resolved.retry.max_network_attempts = env_parse("BRIDGE_MAX_NETWORK_ATTEMPTS")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.max_network_attempts))
+        .unwrap_or(5);
+    resolved.retry.max_provider_attempts = env_parse("BRIDGE_MAX_PROVIDER_ATTEMPTS")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.max_provider_attempts))
+        .unwrap_or(1);
+    resolved.retry.base_backoff = Duration::from_millis(
+        env_parse("BRIDGE_RETRY_BASE_BACKOFF_MS")
+            .or_else(|| file.as_ref().and_then(|cfg| cfg.retry_base_backoff_ms))
+            .unwrap_or(2_000),
+    );
+    resolved.retry.max_backoff = Duration::from_millis(
+        env_parse("BRIDGE_RETRY_MAX_BACKOFF_MS")
+            .or_else(|| file.as_ref().and_then(|cfg| cfg.retry_max_backoff_ms))
+            .unwrap_or(16_000),
+    );
+
+    resolved.egress.mode = env_string("BRIDGE_EGRESS_MODE")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.egress_mode.clone()))
+        .as_deref()
+        .and_then(EgressMode::parse)
+        .unwrap_or(EgressMode::Proxy);
+    resolved.egress.active_proxy_count = env_parse("BRIDGE_ACTIVE_PROXY_COUNT")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.active_proxy_count))
+        .unwrap_or(3);
+    resolved.egress.require_verified_exit_ip = env_bool("BRIDGE_REQUIRE_VERIFIED_EXIT_IP")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.require_verified_exit_ip))
+        .unwrap_or(false);
+    resolved.egress.minimum_unique_exit_ips = env_parse("BRIDGE_MINIMUM_UNIQUE_EXIT_IPS")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.minimum_unique_exit_ips))
+        .unwrap_or(1);
+    resolved.egress.identity_endpoints = env_string("BRIDGE_IDENTITY_ENDPOINTS")
+        .map(|value| parse_csv(&value))
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.identity_endpoints.clone()))
+        .unwrap_or_else(|| BridgeConfig::default().egress.identity_endpoints);
+    resolved.egress.identity_ttl = Duration::from_secs(
+        env_parse("BRIDGE_IDENTITY_TTL_SECS")
+            .or_else(|| file.as_ref().and_then(|cfg| cfg.identity_ttl_secs))
+            .unwrap_or(300),
+    );
+    resolved.egress.health_interval = Duration::from_secs(
+        env_parse("BRIDGE_PROXY_HEALTH_INTERVAL_SECS")
+            .or_else(|| file.as_ref().and_then(|cfg| cfg.proxy_health_interval_secs))
+            .unwrap_or(10),
+    );
+    resolved.egress.restart_interval = Duration::from_secs(
+        env_parse("BRIDGE_PROXY_RESTART_INTERVAL_SECS")
+            .or_else(|| {
+                file.as_ref()
+                    .and_then(|cfg| cfg.proxy_restart_interval_secs)
+            })
+            .unwrap_or(2),
+    );
+    resolved.egress.max_restart_attempts = env_parse("BRIDGE_MAX_PROXY_RESTART_ATTEMPTS")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.max_proxy_restart_attempts))
+        .unwrap_or(3);
+    resolved.egress.allow_direct_fallback = env_bool("BRIDGE_ALLOW_DIRECT_FALLBACK")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.allow_direct_fallback))
+        .unwrap_or(false);
+
+    resolved.runtime.runtime_dir = env_string("RUNTIME_DIR")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.runtime_dir.clone()))
+        .map(PathBuf::from);
+    resolved.runtime.docker_binary = env_string("BRIDGE_DOCKER_BINARY")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.docker_binary.clone()))
+        .unwrap_or_else(|| "docker".to_string());
+    resolved.runtime.warp_cli_binary = env_string("BRIDGE_WARP_CLI_BINARY")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.warp_cli_binary.clone()))
+        .unwrap_or_else(|| "warp-cli".to_string());
+    resolved.runtime.warp_image = env_string("BRIDGE_WARP_IMAGE")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.warp_image.clone()))
+        .unwrap_or_else(|| "ghcr.io/mon-ius/docker-warp-socks:latest".to_string());
+    resolved.runtime.worker_shutdown_timeout = Duration::from_secs(
+        env_parse("BRIDGE_WORKER_SHUTDOWN_TIMEOUT_SECS")
+            .or_else(|| {
+                file.as_ref()
+                    .and_then(|cfg| cfg.worker_shutdown_timeout_secs)
+            })
+            .unwrap_or(10),
+    );
+    resolved.runtime.server_shutdown_timeout = Duration::from_secs(
+        env_parse("BRIDGE_SERVER_SHUTDOWN_TIMEOUT_SECS")
+            .or_else(|| {
+                file.as_ref()
+                    .and_then(|cfg| cfg.server_shutdown_timeout_secs)
+            })
+            .unwrap_or(15),
+    );
+
+    resolved
 }
 
 fn resolve_host(cli_value: Option<String>, file_value: Option<String>) -> IpAddr {
@@ -162,12 +303,27 @@ fn resolve_shell_policy(raw_policy: String, allowlist: String) -> ShellPolicy {
         "unrestricted" => ShellPolicy::Unrestricted,
         _ => {
             warn!(
-                "Unknown shell policy '{}' — defaulting to Disabled. Valid values: disabled, allowlist, unrestricted",
+                "unknown shell policy '{}'; defaulting to disabled",
                 raw_policy
             );
             ShellPolicy::Disabled
         }
     }
+}
+
+fn secret_option(value: Option<String>) -> Option<SecretString> {
+    value.and_then(SecretString::new)
+}
+
+fn parse_secret_csv_optional(value: Option<String>) -> Option<Vec<SecretString>> {
+    value
+        .map(|raw| {
+            parse_csv(&raw)
+                .into_iter()
+                .filter_map(SecretString::new)
+                .collect::<Vec<_>>()
+        })
+        .filter(|items| !items.is_empty())
 }
 
 fn env_string(name: &str) -> Option<String> {
@@ -179,6 +335,14 @@ where
     T: FromStr,
 {
     env_string(name).and_then(|value| value.parse().ok())
+}
+
+fn env_bool(name: &str) -> Option<bool> {
+    env_string(name).and_then(|value| match value.to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    })
 }
 
 fn parse_csv_optional(value: Option<String>) -> Option<Vec<String>> {

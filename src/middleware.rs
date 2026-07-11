@@ -64,21 +64,9 @@ mod tests {
             host: "127.0.0.1".parse().unwrap(),
             bridge_port: 0,
             opencode_port: 4096,
-            model: None,
-            shell_policy: crate::shell::ShellPolicy::Disabled,
-            auth_tokens,
+            auth_tokens: auth_tokens.map(|tokens| tokens.into_iter().map(Into::into).collect()),
             max_body_size: 1024,
-            stream_buffer_size: 4096,
-            channel_capacity: 256,
-            tavily_api_key: None,
-            exa_api_key: None,
-            serper_api_key: None,
-            searxng_url: None,
-            searxng_api_key: None,
-            max_search_loops: 5,
-            proxies: None,
-            primary_proxies: None,
-            warm_standby_proxies: None,
+            ..Default::default()
         };
         let state = AppState::new(config);
 

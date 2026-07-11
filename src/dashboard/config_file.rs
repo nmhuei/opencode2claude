@@ -11,16 +11,18 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
 use tracing::{error, info};
 
-const DEFAULT_CONFIG_PATH: &str = "opencode2api.toml";
-
 /// GET /api/dashboard/config/raw — return the raw config file content (including secrets).
 pub async fn handler_config_raw(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    check_admin_token(&headers, None)?;
-    let config_path =
-        std::env::var("BRIDGE_CONFIG_PATH").unwrap_or_else(|_| DEFAULT_CONFIG_PATH.to_string());
+    check_admin_token(&state, &headers, None)?;
+    let config_path = state
+        .config
+        .management
+        .config_path
+        .to_string_lossy()
+        .to_string();
     let raw = std::fs::read_to_string(&config_path).unwrap_or_default();
     Ok(Json(json!({ "raw": raw })))
 }
@@ -36,7 +38,7 @@ pub async fn handler_config_save(
     headers: HeaderMap,
     body: Option<axum::Json<Value>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    check_admin_token(&headers, None)?;
+    check_admin_token(&state, &headers, None)?;
 
     // Extract TOML content from JSON body
     let incoming_toml = match body {
@@ -78,8 +80,12 @@ pub async fn handler_config_save(
     }
 
     // Read existing config file content
-    let config_path =
-        std::env::var("BRIDGE_CONFIG_PATH").unwrap_or_else(|_| DEFAULT_CONFIG_PATH.to_string());
+    let config_path = state
+        .config
+        .management
+        .config_path
+        .to_string_lossy()
+        .to_string();
     let existing_content = std::fs::read_to_string(&config_path).unwrap_or_default();
 
     // Merge: incoming overrides existing, existing fills gaps

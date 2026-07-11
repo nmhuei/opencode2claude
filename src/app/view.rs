@@ -89,22 +89,23 @@ pub(super) fn masked_configured_label(value: &str) -> String {
     }
 }
 
-pub(super) fn shell_export_lines() -> Vec<String> {
-    let port = std::env::var("BRIDGE_PORT")
-        .ok()
-        .and_then(|v| v.parse::<u16>().ok())
-        .unwrap_or(config::DEFAULT_BRIDGE_PORT);
+pub(super) fn shell_export_lines(config: &BridgeConfig) -> Vec<String> {
     let mut lines = vec![
         "export ANTHROPIC_API_KEY=\"opencode-bridge\"".to_string(),
-        format!("export ANTHROPIC_BASE_URL=\"http://127.0.0.1:{}/v1\"", port),
+        format!(
+            "export ANTHROPIC_BASE_URL=\"http://127.0.0.1:{}/v1\"",
+            config.bridge_port
+        ),
     ];
-    if let Ok(model) = std::env::var("OPENCODE_MODEL") {
-        if !model.trim().is_empty() {
-            lines.push(format!(
-                "export OPENCODE_MODEL=\"{}\"",
-                model.replace('"', "\\\"")
-            ));
-        }
+    if let Some(model) = config
+        .model
+        .as_deref()
+        .filter(|model| !model.trim().is_empty())
+    {
+        lines.push(format!(
+            "export OPENCODE_MODEL=\"{}\"",
+            model.replace('"', "\\\"")
+        ));
     }
     lines
 }
@@ -166,7 +167,11 @@ pub(super) async fn maybe_print_proxy_table(fmt: OutputFormat) {
 }
 
 /// Bridge status dashboard with uptime and proxy pool table.
-pub(super) async fn cmd_print_status(status: SupervisorStatus, fmt: OutputFormat) {
+pub(super) async fn cmd_print_status(
+    status: SupervisorStatus,
+    fmt: OutputFormat,
+    config: &BridgeConfig,
+) {
     if fmt == OutputFormat::Quiet {
         match status {
             SupervisorStatus::Running { .. } => println!("running"),
@@ -183,19 +188,17 @@ pub(super) async fn cmd_print_status(status: SupervisorStatus, fmt: OutputFormat
             managed,
         } => {
             let uptime = uptime_str(started_at);
-            let model = std::env::var("OPENCODE_MODEL").unwrap_or_else(|_| "auto".into());
-            let bridge_auth = if std::env::var("BRIDGE_AUTH_TOKEN")
-                .ok()
-                .filter(|t| !t.is_empty())
-                .is_some()
-            {
+            let model = config.model.clone().unwrap_or_else(|| "auto".into());
+            let bridge_auth = if config.auth_enabled() {
                 "enabled".green().bold().to_string()
             } else {
                 "disabled".yellow().bold().to_string()
             };
-            let dashboard_auth = masked_configured_label(
-                &std::env::var("DASHBOARD_ADMIN_TOKEN").unwrap_or_default(),
-            );
+            let dashboard_auth = if config.management.dashboard_token().is_some() {
+                "configured".green().bold().to_string()
+            } else {
+                "not configured".yellow().bold().to_string()
+            };
             let managed_label = if managed {
                 "supervisor-managed".green().bold().to_string()
             } else {
@@ -286,12 +289,9 @@ impl From<Result<SupervisorStatus, String>> for ServerStatusInfo {
     }
 }
 
-pub(super) fn cmd_print_env() {
-    let port = std::env::var("BRIDGE_PORT")
-        .ok()
-        .and_then(|v| v.parse::<u16>().ok())
-        .unwrap_or(config::DEFAULT_BRIDGE_PORT);
-    let model = std::env::var("OPENCODE_MODEL").unwrap_or_else(|_| "auto".to_string());
+pub(super) fn cmd_print_env(config: &BridgeConfig) {
+    let port = config.bridge_port;
+    let model = config.model.clone().unwrap_or_else(|| "auto".to_string());
 
     print_brand_header(
         "Claude Code Environment",

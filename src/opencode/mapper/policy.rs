@@ -12,14 +12,6 @@ pub(super) fn is_reasoning_heavy_model(model: &str) -> bool {
         || name.contains("-r1")
 }
 
-pub(super) fn min_reasoning_stream_tokens() -> u32 {
-    std::env::var("BRIDGE_MIN_REASONING_STREAM_TOKENS")
-        .ok()
-        .and_then(|v| v.parse::<u32>().ok())
-        .filter(|v| *v > 0)
-        .unwrap_or(DEFAULT_MIN_REASONING_STREAM_TOKENS)
-}
-
 pub fn is_compact_request(payload: &MessagesRequest) -> bool {
     if let Some(system_val) = &payload.system {
         let system_str = extract_system_prompt(system_val).to_lowercase();
@@ -72,6 +64,7 @@ pub(super) fn normalize_upstream_max_tokens(
     stream: bool,
     mapped_model: &str,
     is_compact: bool,
+    minimum_reasoning_stream_tokens: u32,
 ) -> Option<u32> {
     if is_compact {
         return requested;
@@ -80,6 +73,6 @@ pub(super) fn normalize_upstream_max_tokens(
         return requested;
     }
 
-    let floor = min_reasoning_stream_tokens();
+    let floor = minimum_reasoning_stream_tokens.max(1);
     Some(requested.map(|v| v.max(floor)).unwrap_or(floor))
 }

@@ -12,9 +12,9 @@ fn make_test_urls(count: usize) -> Vec<String> {
 fn test_proxy_pool_mapping() {
     let urls = make_test_urls(3);
     let mut pool = ProxyPool::new(&urls);
-    // 3 proxies → 2 active + 1 spare
+    // Three configured primary proxies are active by default.
     assert_eq!(pool.proxies.len(), 3);
-    assert_eq!(pool.active_count, 2);
+    assert_eq!(pool.active_count, 3);
 
     // Same API key should always map to same proxy index
     let res1 = pool.get_client("agent-1").unwrap();

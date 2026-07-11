@@ -8,8 +8,11 @@ mod loader;
 mod security;
 mod types;
 
-pub use file::TomlConfig;
-pub use types::{BridgeConfig, CliOverrides};
+pub use file::{StringList, TomlConfig};
+pub use types::{
+    BridgeConfig, CliOverrides, EgressConfig, EgressMode, ManagementConfig, ObservabilityConfig,
+    ProtocolConfig, RetryConfig, RuntimeConfig, SecretString,
+};
 
 pub const DEFAULT_BRIDGE_PORT: u16 = 4000;
 pub const DEFAULT_OPENCODE_PORT: u16 = 4096;
@@ -38,9 +41,11 @@ impl BridgeConfig {
 
     #[allow(dead_code)]
     pub fn is_valid_token(&self, token: &str) -> bool {
-        self.auth_tokens
-            .as_ref()
-            .is_none_or(|tokens| tokens.iter().any(|candidate| candidate == token))
+        self.auth_tokens.as_ref().is_none_or(|tokens| {
+            tokens.iter().any(|candidate| {
+                crate::management::auth::token_eq(candidate.expose().as_bytes(), token.as_bytes())
+            })
+        })
     }
 
     pub fn validate_security(&self) -> Result<(), String> {

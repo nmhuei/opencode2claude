@@ -70,7 +70,11 @@ pub(super) async fn cmd_server(cmd: ServerCommand, fmt: OutputFormat) {
                 }
             } else {
                 match sup.status() {
-                    Ok(status) => cmd_print_status(status, fmt).await,
+                    Ok(status) => {
+                        let resolved =
+                            BridgeConfig::from_env_and_cli(config::CliOverrides::default());
+                        cmd_print_status(status, fmt, &resolved).await
+                    }
                     Err(e) => {
                         if fmt == OutputFormat::Quiet {
                             println!("error");
@@ -253,7 +257,10 @@ pub(super) async fn cmd_status_legacy(args: cli::StatusArgs, fmt: OutputFormat) 
         }
     } else {
         match sup.status() {
-            Ok(status) => cmd_print_status(status, fmt).await,
+            Ok(status) => {
+                let resolved = BridgeConfig::from_env_and_cli(config::CliOverrides::default());
+                cmd_print_status(status, fmt, &resolved).await
+            }
             Err(e) => eprintln!("{} bridge: status failed — {}.", "✗".red().bold(), e),
         }
     }
@@ -316,34 +323,31 @@ pub(super) async fn cmd_run_server(args: ServeArgsBridge) {
 // ── Runtime helpers ──
 
 pub(super) fn resolve_runtime(port: Option<u16>, host: Option<String>) -> Supervisor {
-    let p = port
-        .or_else(|| {
-            std::env::var("BRIDGE_PORT")
-                .ok()
-                .and_then(|v| v.parse().ok())
-        })
-        .unwrap_or(config::DEFAULT_BRIDGE_PORT);
-    let h = host
-        .or_else(|| std::env::var("BRIDGE_HOST").ok())
-        .unwrap_or_else(|| config::DEFAULT_HOST.to_string());
-    let paths = RuntimePaths::new();
-    Supervisor::new(paths, p, h)
+    let resolved = BridgeConfig::from_env_and_cli(config::CliOverrides {
+        bridge_port: port,
+        host,
+        ..Default::default()
+    });
+    let paths = RuntimePaths::from_config(&resolved);
+    Supervisor::new(paths, resolved.bridge_port, resolved.host.to_string())
 }
 
 pub(super) fn resolve_runtime_for_start(args: &cli::ServerStartArgs) -> Supervisor {
-    let p = args
-        .port
-        .or_else(|| {
-            std::env::var("BRIDGE_PORT")
-                .ok()
-                .and_then(|v| v.parse().ok())
-        })
-        .unwrap_or(config::DEFAULT_BRIDGE_PORT);
-    let h = args
-        .host
-        .clone()
-        .or_else(|| std::env::var("BRIDGE_HOST").ok())
-        .unwrap_or_else(|| config::DEFAULT_HOST.to_string());
+    let resolved = BridgeConfig::from_env_and_cli(config::CliOverrides {
+        bridge_port: args.port,
+        host: args.host.clone(),
+        config_path: args.config.clone(),
+        model: args.model.clone(),
+        shell_policy: args.shell_policy.map(|value| value.to_string()),
+        max_body_size: args.max_body_size,
+        tavily_api_key: args.tavily_api_key.clone(),
+        exa_api_key: args.exa_api_key.clone(),
+        serper_api_key: args.serper_api_key.clone(),
+        searxng_url: args.searxng_url.clone(),
+        searxng_api_key: args.searxng_api_key.clone(),
+    });
+    let p = resolved.bridge_port;
+    let h = resolved.host.to_string();
 
     let mut child_args = vec![
         "--port".to_string(),
@@ -386,7 +390,7 @@ pub(super) fn resolve_runtime_for_start(args: &cli::ServerStartArgs) -> Supervis
     );
     push_opt_arg_usize(&mut child_args, "--max-body-size", args.max_body_size);
 
-    let paths = RuntimePaths::new();
+    let paths = RuntimePaths::from_config(&resolved);
     Supervisor::new(paths, p, h).with_child_args(child_args)
 }
 

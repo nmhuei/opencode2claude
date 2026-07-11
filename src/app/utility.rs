@@ -142,8 +142,9 @@ pub(super) async fn cmd_init(args: InitArgs) {
 }
 
 pub(super) fn cmd_env(fmt: OutputFormat) {
+    let resolved = config::BridgeConfig::from_env_and_cli(config::CliOverrides::default());
     if fmt == OutputFormat::Quiet {
-        for line in shell_export_lines() {
+        for line in shell_export_lines(&resolved) {
             println!("{}", line);
         }
         return;
@@ -156,11 +157,8 @@ pub(super) fn cmd_env(fmt: OutputFormat) {
             anthropic_base_url: String,
             opencode_model: Option<String>,
         }
-        let port = std::env::var("BRIDGE_PORT")
-            .ok()
-            .and_then(|v| v.parse::<u16>().ok())
-            .unwrap_or(config::DEFAULT_BRIDGE_PORT);
-        let model = std::env::var("OPENCODE_MODEL").ok();
+        let port = resolved.bridge_port;
+        let model = resolved.model.clone();
         let info = EnvInfo {
             anthropic_api_key: "opencode-bridge".to_string(),
             anthropic_base_url: format!("http://127.0.0.1:{}/v1", port),
@@ -172,5 +170,5 @@ pub(super) fn cmd_env(fmt: OutputFormat) {
         return;
     }
 
-    cmd_print_env();
+    cmd_print_env(&resolved);
 }

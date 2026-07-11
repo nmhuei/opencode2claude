@@ -37,6 +37,7 @@ rust-embed = { version = "8", features = ["mime-guess", "interpolate-folder-path
 mime_guess = "2"
 async-stream = "0.3"
 dotenvy = "0.15"
+httpdate = "1.0"
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "socks", "rustls-tls"] }

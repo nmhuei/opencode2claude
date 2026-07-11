@@ -18,9 +18,18 @@ impl SearchClient {
     pub fn new(client: Client, config: &BridgeConfig) -> Self {
         Self {
             client,
-            tavily_key: config.tavily_api_key.clone(),
-            exa_key: config.exa_api_key.clone(),
-            serper_key: config.serper_api_key.clone(),
+            tavily_key: config
+                .tavily_api_key
+                .as_ref()
+                .map(|value| value.expose().to_string()),
+            exa_key: config
+                .exa_api_key
+                .as_ref()
+                .map(|value| value.expose().to_string()),
+            serper_key: config
+                .serper_api_key
+                .as_ref()
+                .map(|value| value.expose().to_string()),
             searxng_url: config.searxng_url.clone(),
         }
     }

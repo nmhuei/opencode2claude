@@ -15,7 +15,7 @@ pub async fn handler_rest_status(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, (StatusCode, Json<Value>)> {
-    check_admin_token(&headers, None)?;
+    check_admin_token(&state, &headers, None)?;
     let snapshot = service::proxy_snapshot(&state).await;
     let uptime_secs = service::uptime_secs(&state);
 
@@ -27,7 +27,7 @@ pub async fn handler_rest_status(
         "model": state.config.model,
         "bridge_port": state.config.bridge_port,
         "auth_enabled": state.config.auth_enabled(),
-        "admin_token_configured": auth::dashboard_token().is_some(),
+        "admin_token_configured": auth::dashboard_token(&state.config).is_some(),
         "shell_policy": state.config.shell_policy.kind(),
         "primary_proxies": {
             "total": snapshot.primary.total,
@@ -53,7 +53,7 @@ pub async fn handler_proxies(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, (StatusCode, Json<Value>)> {
-    check_admin_token(&headers, None)?;
+    check_admin_token(&state, &headers, None)?;
     let snapshot = service::proxy_snapshot(&state).await;
     Ok(Json(snapshot.nodes))
 }
@@ -63,7 +63,7 @@ pub async fn handler_config(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, (StatusCode, Json<Value>)> {
-    check_admin_token(&headers, None)?;
+    check_admin_token(&state, &headers, None)?;
     let cfg = service::safe_config_snapshot(&state);
     Ok(Json(json!({
         "host": cfg.host,
@@ -93,7 +93,7 @@ pub async fn handler_proxy_restart(
     headers: HeaderMap,
     Path(port): Path<u16>,
 ) -> Result<impl axum::response::IntoResponse, (StatusCode, Json<Value>)> {
-    check_admin_token(&headers, None)?;
+    check_admin_token(&state, &headers, None)?;
 
     match service::restart_managed_proxy(&state, port).await {
         Ok(result) => Ok(Json(json!({
@@ -112,7 +112,7 @@ pub async fn handler_dashboard_diagnostics(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, (StatusCode, Json<Value>)> {
-    check_admin_token(&headers, None)?;
+    check_admin_token(&state, &headers, None)?;
 
     let daemon_ok =
         crate::opencode::check_daemon(&state.http_client, state.config.opencode_port).await;

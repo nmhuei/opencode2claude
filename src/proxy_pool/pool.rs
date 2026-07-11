@@ -7,8 +7,20 @@ use tracing::{info, warn};
 
 impl ProxyPool {
     pub fn new(proxy_urls: &[String]) -> Self {
+        let primary_count = proxy_urls
+            .iter()
+            .filter(|url| !is_protected_proxy_port(extract_port(url)))
+            .count();
+        Self::new_with_active_count(proxy_urls, primary_count)
+    }
+
+    pub fn new_with_active_count(proxy_urls: &[String], requested_active_count: usize) -> Self {
         let mut proxies: Vec<ProxyEntry> = proxy_urls.iter().filter_map(build_entry).collect();
-        let active_count = configured_active_count(proxies.len());
+        let primary_count = proxies
+            .iter()
+            .filter(|proxy| proxy.role == ProxyRole::Primary)
+            .count();
+        let active_count = requested_active_count.min(primary_count);
 
         for proxy in proxies.iter_mut().skip(active_count) {
             if proxy.role != ProxyRole::WarmStandby {
@@ -97,17 +109,6 @@ fn build_entry(url: &String) -> Option<ProxyEntry> {
         consecutive_failures: 0,
         consecutive_successes: 0,
     })
-}
-
-fn configured_active_count(total: usize) -> usize {
-    if total == 0 {
-        return 0;
-    }
-    std::env::var("BRIDGE_ACTIVE_PROXY_COUNT")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or_else(|| total.saturating_sub(1))
-        .clamp(1, total)
 }
 
 fn node_stats(proxy: &ProxyEntry) -> ProxyNodeStats {

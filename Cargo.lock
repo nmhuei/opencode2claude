@@ -971,6 +971,7 @@ dependencies = [
  "comfy-table",
  "dotenvy",
  "futures-util",
+ "httpdate",
  "indicatif",
  "mime_guess",
  "reqwest",

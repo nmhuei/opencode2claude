@@ -4,7 +4,7 @@
 use super::server::{resolve_runtime, start_daemon};
 use super::view::{key_value_table, masked_configured_label, print_brand_header, print_tip};
 use crate::cli::{DashboardCommand, ServerStartArgs};
-use crate::config;
+use crate::config::{BridgeConfig, CliOverrides};
 use crate::output::OutputFormat;
 use crate::supervisor::SupervisorStatus;
 use yansi::Paint;
@@ -13,15 +13,14 @@ pub(super) async fn cmd_dashboard(cmd: DashboardCommand, fmt: OutputFormat) {
     // Load .env if present
     let _ = dotenvy::dotenv();
 
+    let resolved = BridgeConfig::from_env_and_cli(CliOverrides::default());
     let supervisor = resolve_runtime(None, None);
     let status = supervisor.status().unwrap_or(SupervisorStatus::Stopped);
     let default_port = match &status {
         SupervisorStatus::Running { port, .. } => *port,
-        SupervisorStatus::Stopped => std::env::var("BRIDGE_PORT")
-            .ok()
-            .and_then(|v| v.parse::<u16>().ok())
-            .unwrap_or(config::DEFAULT_BRIDGE_PORT),
+        SupervisorStatus::Stopped => resolved.bridge_port,
     };
+    let dashboard_token = resolved.management.dashboard_token();
 
     let is_running = status.is_running();
 
@@ -44,14 +43,14 @@ pub(super) async fn cmd_dashboard(cmd: DashboardCommand, fmt: OutputFormat) {
             let url = format!("http://127.0.0.1:{}/dashboard/", default_port);
 
             if fmt == OutputFormat::Human {
-                let token = std::env::var("DASHBOARD_ADMIN_TOKEN").unwrap_or_default();
+                let token = dashboard_token.unwrap_or_default();
                 print_brand_header("Dashboard", "admin control plane");
                 let table = key_value_table(
                     ("Item", "Value"),
                     vec![
                         ("Status", "ready".green().bold().to_string()),
                         ("URL", url.cyan().bold().to_string()),
-                        ("Admin auth", masked_configured_label(&token)),
+                        ("Admin auth", masked_configured_label(token)),
                     ],
                 );
                 println!("{}", table);
@@ -66,14 +65,14 @@ pub(super) async fn cmd_dashboard(cmd: DashboardCommand, fmt: OutputFormat) {
                     serde_json::json!({
                         "status": "ready",
                         "url": url,
-                        "token": std::env::var("DASHBOARD_ADMIN_TOKEN").unwrap_or_default()
+                        "admin_token_configured": dashboard_token.is_some()
                     })
                 );
             }
         }
         DashboardCommand::Status => {
             let url = format!("http://127.0.0.1:{}/dashboard/", default_port);
-            let token = std::env::var("DASHBOARD_ADMIN_TOKEN").unwrap_or_default();
+            let token = dashboard_token.unwrap_or_default();
 
             if fmt == OutputFormat::Human {
                 print_brand_header("Dashboard", "admin control plane");
@@ -83,7 +82,7 @@ pub(super) async fn cmd_dashboard(cmd: DashboardCommand, fmt: OutputFormat) {
                         vec![
                             ("Bridge", "running".green().bold().to_string()),
                             ("URL", url.cyan().bold().to_string()),
-                            ("Admin auth", masked_configured_label(&token)),
+                            ("Admin auth", masked_configured_label(token)),
                         ],
                     );
                     println!("{}", table);
@@ -108,7 +107,7 @@ pub(super) async fn cmd_dashboard(cmd: DashboardCommand, fmt: OutputFormat) {
                     serde_json::json!({
                         "running": is_running,
                         "url": url,
-                        "token": token
+                        "admin_token_configured": dashboard_token.is_some()
                     })
                 );
             }

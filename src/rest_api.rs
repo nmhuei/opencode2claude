@@ -85,8 +85,8 @@ impl IntoResponse for ApiError {
     }
 }
 
-fn authorize(headers: &HeaderMap) -> Result<(), ApiError> {
-    let expected = auth::rest_token().ok_or_else(|| {
+fn authorize(headers: &HeaderMap, state: &AppState) -> Result<(), ApiError> {
+    let expected = state.config.management.rest_token().ok_or_else(|| {
         ApiError::unauthorized("REST API is disabled because REST_API_TOKEN is not configured")
     })?;
     let provided = auth::bearer_token(headers)
@@ -104,7 +104,7 @@ async fn status(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    authorize(&headers)?;
+    authorize(&headers, &state)?;
     let snapshot = service::proxy_snapshot(&state).await;
     let egress_mode = if snapshot.nodes.is_empty() {
         "direct"
@@ -135,7 +135,7 @@ async fn proxies(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    authorize(&headers)?;
+    authorize(&headers, &state)?;
     let snapshot = service::proxy_snapshot(&state).await;
 
     Ok(Json(json!({
@@ -151,7 +151,7 @@ async fn config(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    authorize(&headers)?;
+    authorize(&headers, &state)?;
     let cfg = service::safe_config_snapshot(&state);
 
     Ok(Json(json!({
@@ -183,7 +183,7 @@ async fn restart_proxy(
     headers: HeaderMap,
     Path(port): Path<u16>,
 ) -> Result<Json<Value>, ApiError> {
-    authorize(&headers)?;
+    authorize(&headers, &state)?;
     let result = service::restart_managed_proxy(&state, port).await?;
 
     Ok(Json(json!({
@@ -193,8 +193,11 @@ async fn restart_proxy(
 }
 
 /// GET /api/v1/openapi.json
-async fn openapi(headers: HeaderMap) -> Result<Json<Value>, ApiError> {
-    authorize(&headers)?;
+async fn openapi(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    authorize(&headers, &state)?;
     Ok(Json(openapi_document()))
 }
 
@@ -255,14 +258,7 @@ mod tests {
     use crate::shell::ShellPolicy;
     use axum::body::Body;
     use axum::http::Request;
-    use std::sync::OnceLock;
-    use tokio::sync::Mutex;
     use tower::ServiceExt;
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     fn state() -> AppState {
         AppState::new(BridgeConfig {
@@ -271,28 +267,21 @@ mod tests {
             opencode_port: 4096,
             model: Some("test-model".to_string()),
             shell_policy: ShellPolicy::Disabled,
-            auth_tokens: None,
             max_body_size: 1024,
             stream_buffer_size: 4096,
             channel_capacity: 64,
-            tavily_api_key: Some("secret-that-must-not-leak".to_string()),
-            exa_api_key: None,
-            serper_api_key: None,
-            searxng_url: None,
-            searxng_api_key: None,
+            tavily_api_key: Some("secret-that-must-not-leak".into()),
             max_search_loops: 3,
-            proxies: None,
-            primary_proxies: None,
-            warm_standby_proxies: None,
+            management: crate::config::ManagementConfig {
+                rest_api_token: Some("test-rest-token".into()),
+                ..BridgeConfig::default().management
+            },
+            ..Default::default()
         })
     }
 
     #[tokio::test]
     async fn openapi_requires_bearer_authentication() {
-        let _guard = env_lock().lock().await;
-        std::env::set_var(auth::REST_API_TOKEN_ENV, "test-rest-token");
-        std::env::remove_var(auth::DASHBOARD_TOKEN_ENV);
-
         let app = router().with_state(state());
         let unauthorized = app
             .clone()
@@ -317,14 +306,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(authorized.status(), StatusCode::OK);
-        std::env::remove_var(auth::REST_API_TOKEN_ENV);
     }
 
     #[tokio::test]
     async fn protected_proxy_restart_returns_forbidden_without_touching_docker() {
-        let _guard = env_lock().lock().await;
-        std::env::set_var(auth::REST_API_TOKEN_ENV, "test-rest-token");
-
         let response = router()
             .with_state(state())
             .oneshot(
@@ -338,6 +323,5 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        std::env::remove_var(auth::REST_API_TOKEN_ENV);
     }
 }

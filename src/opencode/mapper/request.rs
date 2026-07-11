@@ -8,8 +8,22 @@ use crate::handlers::{ContentVal, MessagesRequest};
 use crate::opencode::types::*;
 use std::collections::HashMap;
 
-/// Map Anthropic request values into standard OpenAI payload.
+/// Map Anthropic request values into a standard OpenAI payload using the
+/// default reasoning-stream token floor. Tests and compatibility callers use
+/// this wrapper; runtime code passes the resolved policy explicitly.
 pub fn map_anthropic_to_openai(payload: &MessagesRequest, model: String) -> OpenAiRequest {
+    map_anthropic_to_openai_with_policy(
+        payload,
+        model,
+        super::policy::DEFAULT_MIN_REASONING_STREAM_TOKENS,
+    )
+}
+
+pub fn map_anthropic_to_openai_with_policy(
+    payload: &MessagesRequest,
+    model: String,
+    minimum_reasoning_stream_tokens: u32,
+) -> OpenAiRequest {
     let mapped_model = map_model_name(&model);
     let mut openai_messages = Vec::new();
 
@@ -242,6 +256,7 @@ pub fn map_anthropic_to_openai(payload: &MessagesRequest, model: String) -> Open
         payload.stream,
         &mapped_model,
         is_compact,
+        minimum_reasoning_stream_tokens,
     );
     let include_reasoning = include_reasoning_for_stream(payload.stream, &mapped_model, is_compact);
 

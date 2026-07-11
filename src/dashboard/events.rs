@@ -57,7 +57,7 @@ pub async fn handler_events(
     (StatusCode, Json<Value>),
 > {
     let token = params.get("token").map(|s| s.as_str());
-    check_admin_token(&headers, token)?;
+    check_admin_token(&state, &headers, token)?;
 
     let mut rx = state.event_tx.subscribe();
     let stream = async_stream::stream! {
@@ -97,6 +97,7 @@ pub async fn handler_events(
 
 /// GET /api/dashboard/test/stream — synthetic Anthropic SSE stream for UI testing.
 pub async fn handler_test_stream_get(
+    State(state): State<AppState>,
     headers: HeaderMap,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<
@@ -104,7 +105,7 @@ pub async fn handler_test_stream_get(
     (StatusCode, Json<Value>),
 > {
     let token = params.get("token").map(|s| s.as_str());
-    check_admin_token(&headers, token)?;
+    check_admin_token(&state, &headers, token)?;
 
     let thinking = params
         .get("thinking")
@@ -121,6 +122,7 @@ pub async fn handler_test_stream_get(
 
 /// POST /api/dashboard/test/stream — synthetic Anthropic SSE stream for UI testing.
 pub async fn handler_test_stream_post(
+    State(state): State<AppState>,
     headers: HeaderMap,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
     body: Option<Json<Value>>,
@@ -129,7 +131,7 @@ pub async fn handler_test_stream_post(
     (StatusCode, Json<Value>),
 > {
     let token = params.get("token").map(|s| s.as_str());
-    check_admin_token(&headers, token)?;
+    check_admin_token(&state, &headers, token)?;
 
     let body_value = body.as_ref().map(|b| b.0.clone());
     let thinking = body_value

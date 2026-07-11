@@ -27,6 +27,16 @@ impl Default for RuntimePaths {
 }
 
 impl RuntimePaths {
+    /// Build runtime paths from the resolved application configuration.
+    pub fn from_config(config: &crate::config::BridgeConfig) -> Self {
+        config
+            .runtime
+            .runtime_dir
+            .clone()
+            .map(Self::from_root)
+            .unwrap_or_default()
+    }
+
     /// Create a new RuntimePaths stored under `~/.opencode2api/`.
     ///
     /// Falls back to the cwd if `HOME` is not set (rare).

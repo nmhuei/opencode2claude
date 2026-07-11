@@ -8,7 +8,7 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn test_default_config() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     // Clear env vars that might affect test
     env::remove_var("BRIDGE_HOST");
     env::remove_var("BRIDGE_PORT");
@@ -51,7 +51,10 @@ fn test_toml_parsing() {
     assert_eq!(config.model.as_deref(), Some("gpt-4"));
     assert_eq!(config.shell_policy.as_deref(), Some("allowlist"));
     assert_eq!(config.shell_allowlist.as_deref(), Some("git,ls,pwd"));
-    assert_eq!(config.auth_tokens.as_deref(), Some("token1,token2"));
+    assert_eq!(
+        config.auth_tokens.clone().map(StringList::into_vec),
+        Some(vec!["token1".to_string(), "token2".to_string()])
+    );
     assert_eq!(config.max_body_size, Some(2097152));
     assert_eq!(config.stream_buffer_size, Some(8192));
     assert_eq!(config.channel_capacity, Some(512));
@@ -78,7 +81,7 @@ fn test_toml_file_not_found() {
 
 #[test]
 fn test_env_overrides_toml() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     env::remove_var("BRIDGE_PORT");
     env::remove_var("BRIDGE_HOST");
 
@@ -108,7 +111,7 @@ fn test_env_overrides_toml() {
 
 #[test]
 fn test_cli_overrides_env() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     env::remove_var("BRIDGE_PORT");
     env::remove_var("BRIDGE_HOST");
 
@@ -127,7 +130,7 @@ fn test_cli_overrides_env() {
 
 #[test]
 fn test_toml_defaults_applied() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     env::remove_var("BRIDGE_PORT");
     env::remove_var("BRIDGE_HOST");
     env::remove_var("BRIDGE_SHELL_POLICY");
@@ -151,7 +154,7 @@ fn test_toml_defaults_applied() {
 
 #[test]
 fn test_auth_validation() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     env::remove_var("BRIDGE_AUTH_TOKEN");
 
     let mut config = BridgeConfig::from_env_and_cli(CliOverrides::default());
@@ -161,7 +164,7 @@ fn test_auth_validation() {
     assert!(config.is_valid_token("anything"));
 
     // Auth configured — only matching tokens are valid
-    config.auth_tokens = Some(vec!["secret-123".to_string(), "secret-456".to_string()]);
+    config.auth_tokens = Some(vec!["secret-123".into(), "secret-456".into()]);
     assert!(config.is_valid_token("secret-123"));
     assert!(config.is_valid_token("secret-456"));
     assert!(!config.is_valid_token("wrong-token"));
@@ -186,17 +189,19 @@ fn test_security_localhost_without_auth_allowed() {
 
 #[test]
 fn test_security_public_bind_without_auth_rejected() {
-    let _lock = ENV_LOCK.lock().unwrap();
-    env::set_var("DASHBOARD_ADMIN_TOKEN", "super-secret-admin-token-12345");
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     // 0.0.0.0 without auth — rejected
     let config = BridgeConfig {
         host: "0.0.0.0".parse().unwrap(),
         shell_policy: ShellPolicy::Disabled,
         auth_tokens: None,
+        management: ManagementConfig {
+            dashboard_token: Some("super-secret-admin-token-12345".into()),
+            ..BridgeConfig::default().management
+        },
         ..Default::default()
     };
     let result = config.validate_security();
-    env::remove_var("DASHBOARD_ADMIN_TOKEN");
     assert!(result.is_err(), "public bind without auth must be rejected");
     let msg = result.unwrap_err();
     assert!(
@@ -213,17 +218,19 @@ fn test_security_public_bind_without_auth_rejected() {
 
 #[test]
 fn test_security_public_bind_with_auth_allowed() {
-    let _lock = ENV_LOCK.lock().unwrap();
-    env::set_var("DASHBOARD_ADMIN_TOKEN", "super-secret-admin-token-12345");
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     // 0.0.0.0 with auth — OK
     let config = BridgeConfig {
         host: "0.0.0.0".parse().unwrap(),
         shell_policy: ShellPolicy::Disabled,
-        auth_tokens: Some(vec!["sk-valid".to_string()]),
+        auth_tokens: Some(vec!["sk-valid".into()]),
+        management: ManagementConfig {
+            dashboard_token: Some("super-secret-admin-token-12345".into()),
+            ..BridgeConfig::default().management
+        },
         ..Default::default()
     };
     let result = config.validate_security();
-    env::remove_var("DASHBOARD_ADMIN_TOKEN");
     assert!(
         result.is_ok(),
         "public bind with auth must be allowed: {:?}",
@@ -233,17 +240,19 @@ fn test_security_public_bind_with_auth_allowed() {
 
 #[test]
 fn test_security_public_bind_with_unrestricted_shell_rejected() {
-    let _lock = ENV_LOCK.lock().unwrap();
-    env::set_var("DASHBOARD_ADMIN_TOKEN", "super-secret-admin-token-12345");
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     // 0.0.0.0 + unrestricted shell — rejected regardless of auth
     let config = BridgeConfig {
         host: "0.0.0.0".parse().unwrap(),
         shell_policy: ShellPolicy::Unrestricted,
-        auth_tokens: Some(vec!["sk-valid".to_string()]),
+        auth_tokens: Some(vec!["sk-valid".into()]),
+        management: ManagementConfig {
+            dashboard_token: Some("super-secret-admin-token-12345".into()),
+            ..BridgeConfig::default().management
+        },
         ..Default::default()
     };
     let result = config.validate_security();
-    env::remove_var("DASHBOARD_ADMIN_TOKEN");
     assert!(
         result.is_err(),
         "public bind + unrestricted shell must be rejected even with auth"
@@ -263,12 +272,11 @@ fn test_security_public_bind_with_unrestricted_shell_rejected() {
 
 #[test]
 fn test_security_public_bind_without_dashboard_token_rejected() {
-    let _lock = ENV_LOCK.lock().unwrap();
-    env::remove_var("DASHBOARD_ADMIN_TOKEN");
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let config = BridgeConfig {
         host: "0.0.0.0".parse().unwrap(),
         shell_policy: ShellPolicy::Disabled,
-        auth_tokens: Some(vec!["sk-valid".to_string()]),
+        auth_tokens: Some(vec!["sk-valid".into()]),
         ..Default::default()
     };
     let result = config.validate_security();
@@ -281,16 +289,18 @@ fn test_security_public_bind_without_dashboard_token_rejected() {
 
 #[test]
 fn test_security_public_bind_with_weak_dashboard_token_rejected() {
-    let _lock = ENV_LOCK.lock().unwrap();
-    env::set_var("DASHBOARD_ADMIN_TOKEN", "12345"); // too short (5 < 8)
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let config = BridgeConfig {
         host: "0.0.0.0".parse().unwrap(),
         shell_policy: ShellPolicy::Disabled,
-        auth_tokens: Some(vec!["sk-valid".to_string()]),
+        auth_tokens: Some(vec!["sk-valid".into()]),
+        management: ManagementConfig {
+            dashboard_token: Some("12345".into()),
+            ..BridgeConfig::default().management
+        },
         ..Default::default()
     };
     let result = config.validate_security();
-    env::remove_var("DASHBOARD_ADMIN_TOKEN");
     assert!(
         result.is_err(),
         "public bind with weak dashboard token must be rejected"
@@ -300,7 +310,7 @@ fn test_security_public_bind_with_weak_dashboard_token_rejected() {
 
 #[test]
 fn test_security_default_shell_policy_is_disabled() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     env::remove_var("BRIDGE_SHELL_POLICY");
     env::remove_var("BRIDGE_HOST");
     env::remove_var("BRIDGE_AUTH_TOKEN");
@@ -314,7 +324,7 @@ fn test_security_default_shell_policy_is_disabled() {
 
 #[test]
 fn test_unknown_shell_policy_defaults_to_disabled() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     env::remove_var("BRIDGE_HOST");
     env::remove_var("BRIDGE_AUTH_TOKEN");
     env::set_var("BRIDGE_SHELL_POLICY", "typo_all");
@@ -340,7 +350,7 @@ fn test_unknown_shell_policy_defaults_to_disabled() {
 
 #[test]
 fn test_known_shell_policies_still_work() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     env::remove_var("BRIDGE_HOST");
     env::remove_var("BRIDGE_AUTH_TOKEN");
 
@@ -358,4 +368,70 @@ fn test_known_shell_policies_still_work() {
     let config = BridgeConfig::from_env_and_cli(CliOverrides::default());
     assert!(matches!(config.shell_policy, ShellPolicy::Unrestricted));
     env::remove_var("BRIDGE_SHELL_POLICY");
+}
+
+#[test]
+fn test_auth_tokens_accept_toml_array() {
+    let parsed: TomlConfig = toml::from_str(r#"auth_tokens = ["token-a", "token-b"]"#)
+        .expect("array auth tokens should parse");
+    assert_eq!(
+        parsed.auth_tokens.map(StringList::into_vec),
+        Some(vec!["token-a".to_string(), "token-b".to_string()])
+    );
+}
+
+#[test]
+fn test_operational_policy_precedence_env_over_toml() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let tmp = std::env::temp_dir().join("opencode2api_policy_precedence.toml");
+    std::fs::write(
+        &tmp,
+        r#"
+upstream_base_url = "https://toml.example/v1"
+active_proxy_count = 1
+rate_limit = 3
+min_reasoning_stream_tokens = 2048
+model_fallbacks = ["toml-fallback"]
+egress_mode = "proxy"
+primary_proxies = ["socks5://127.0.0.1:40001"]
+"#,
+    )
+    .expect("write test config");
+
+    env::set_var("OPENCODE_UPSTREAM_BASE_URL", "https://env.example/v1/");
+    env::set_var("BRIDGE_ACTIVE_PROXY_COUNT", "2");
+    env::set_var("BRIDGE_RATE_LIMIT", "7");
+    env::set_var("BRIDGE_MIN_REASONING_STREAM_TOKENS", "4096");
+    env::set_var("OPENCODE_MODEL_FALLBACKS", "env-a,env-b");
+
+    let config = BridgeConfig::from_env_and_cli(CliOverrides {
+        config_path: Some(tmp.to_string_lossy().to_string()),
+        ..Default::default()
+    });
+
+    assert_eq!(config.retry.upstream_base_url, "https://env.example/v1");
+    assert_eq!(config.egress.active_proxy_count, 2);
+    assert_eq!(config.observability.max_concurrent_requests, Some(7));
+    assert_eq!(config.protocol.min_reasoning_stream_tokens, 4096);
+    assert_eq!(config.retry.model_fallbacks, vec!["env-a", "env-b"]);
+
+    for name in [
+        "OPENCODE_UPSTREAM_BASE_URL",
+        "BRIDGE_ACTIVE_PROXY_COUNT",
+        "BRIDGE_RATE_LIMIT",
+        "BRIDGE_MIN_REASONING_STREAM_TOKENS",
+        "OPENCODE_MODEL_FALLBACKS",
+    ] {
+        env::remove_var(name);
+    }
+    let _ = std::fs::remove_file(tmp);
+}
+
+#[test]
+fn test_secret_string_formatting_is_redacted() {
+    let secret = SecretString::from("do-not-print-me");
+    assert_eq!(secret.to_string(), "[REDACTED]");
+    let debug = format!("{secret:?}");
+    assert!(debug.contains("REDACTED"));
+    assert!(!debug.contains("do-not-print-me"));
 }
