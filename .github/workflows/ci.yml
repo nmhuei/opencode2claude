@@ -15,6 +15,9 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      - name: Feature contract matrix
+        run: ./scripts/check_feature_matrix.py
+
       - name: Verification (CI profile)
         run: ./scripts/verify.sh all --profile ci
 
