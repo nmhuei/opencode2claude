@@ -5,6 +5,7 @@ use crate::dashboard::DashboardEvent;
 use crate::docker::{ContainerRuntime, DockerCliRuntime};
 use crate::infrastructure::file_store::{AtomicFileStore, FileStore};
 use crate::infrastructure::warp::{CliWarpController, WarpController};
+use crate::observability::Metrics;
 use crate::opencode::search::SearchClient;
 use crate::proxy_pool::{health_monitor, identity_monitor, process_restart_queue, ProxyPool};
 use crate::workers::WorkerRegistry;
@@ -38,6 +39,8 @@ pub struct AppState {
     pub file_store: Arc<dyn FileStore>,
     /// Owner of critical workers and ephemeral request tasks.
     pub workers: Arc<WorkerRegistry>,
+    /// In-process request counters and latency aggregates.
+    pub metrics: Arc<Metrics>,
     /// Broadcast channel for dashboard SSE events.
     pub event_tx: broadcast::Sender<DashboardEvent>,
     /// Unix timestamp (seconds) when the server started.
@@ -106,6 +109,7 @@ impl AppState {
             .map(|permits| Arc::new(Semaphore::new(permits)));
         let search_client = SearchClient::new(http_client.clone(), &config);
         let workers = Arc::new(WorkerRegistry::new());
+        let metrics = Arc::new(Metrics::default());
 
         // Create proxy pool with 2-tier primary + warm-standby model
         // Combine primary (managed) and warm-standby (protected) proxy URLs
@@ -195,6 +199,7 @@ impl AppState {
             warp_controller,
             file_store,
             workers,
+            metrics,
             event_tx,
             started_at,
         }

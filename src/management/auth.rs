@@ -4,6 +4,8 @@ use crate::config::BridgeConfig;
 use axum::http::{header, HeaderMap};
 
 pub const SESSION_COOKIE: &str = "bridge_admin_session";
+pub const CSRF_COOKIE: &str = "bridge_csrf_token";
+pub const CSRF_HEADER: &str = "X-CSRF-Token";
 
 pub fn dashboard_token(config: &BridgeConfig) -> Option<&str> {
     config.management.dashboard_token()
@@ -23,16 +25,44 @@ pub fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DashboardAuthSource {
+    Header,
+    Query,
+    Cookie,
+}
+
 pub fn dashboard_request_token<'a>(
     headers: &'a HeaderMap,
     query_token: Option<&'a str>,
 ) -> Option<String> {
+    dashboard_request_credential(headers, query_token).map(|(token, _)| token)
+}
+
+pub fn dashboard_request_credential<'a>(
+    headers: &'a HeaderMap,
+    query_token: Option<&'a str>,
+) -> Option<(String, DashboardAuthSource)> {
     headers
         .get("X-Dashboard-Token")
         .and_then(|value| value.to_str().ok())
-        .map(ToOwned::to_owned)
-        .or_else(|| query_token.map(ToOwned::to_owned))
-        .or_else(|| cookie_value(headers, SESSION_COOKIE))
+        .map(|value| (value.to_owned(), DashboardAuthSource::Header))
+        .or_else(|| query_token.map(|value| (value.to_owned(), DashboardAuthSource::Query)))
+        .or_else(|| {
+            cookie_value(headers, SESSION_COOKIE).map(|value| (value, DashboardAuthSource::Cookie))
+        })
+}
+
+pub fn csrf_valid(headers: &HeaderMap) -> bool {
+    let cookie = cookie_value(headers, CSRF_COOKIE);
+    let header = headers
+        .get(CSRF_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned);
+    match (cookie, header) {
+        (Some(cookie), Some(header)) => token_eq(cookie.as_bytes(), header.as_bytes()),
+        _ => false,
+    }
 }
 
 pub fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {

@@ -1,6 +1,6 @@
 //! Dashboard status, safe configuration, diagnostics, and proxy actions.
 
-use super::auth::check_admin_token;
+use super::auth::{check_admin_mutation, check_admin_token};
 use super::time::uptime_string;
 use crate::management::{auth, service};
 use crate::state::AppState;
@@ -93,7 +93,7 @@ pub async fn handler_proxy_restart(
     headers: HeaderMap,
     Path(port): Path<u16>,
 ) -> Result<impl axum::response::IntoResponse, (StatusCode, Json<Value>)> {
-    check_admin_token(&state, &headers, None)?;
+    check_admin_mutation(&state, &headers)?;
 
     match service::restart_managed_proxy(&state, port).await {
         Ok(result) => Ok(Json(json!({

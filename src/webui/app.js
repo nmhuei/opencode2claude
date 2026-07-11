@@ -163,12 +163,30 @@ function dismissToast(toast) {
 /* ==========================================================
    4. API Client — uses HttpOnly session cookie (no JS token)
    ========================================================== */
+function readCookie(name) {
+  var prefix = name + '=';
+  var parts = document.cookie ? document.cookie.split(';') : [];
+  for (var i = 0; i < parts.length; i++) {
+    var item = parts[i].trim();
+    if (item.indexOf(prefix) === 0) return decodeURIComponent(item.slice(prefix.length));
+  }
+  return '';
+}
+
+function addCsrfHeader(headers, method) {
+  method = (method || 'GET').toUpperCase();
+  if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return;
+  var token = readCookie('bridge_csrf_token');
+  if (token) headers['X-CSRF-Token'] = token;
+}
+
 async function apiFetch(url, options) {
   options = options || {};
   var maxRetries = options.retries != null ? options.retries : 3;
   var delay = options.delay != null ? options.delay : 2000;
   var headers = options.headers || {};
   headers['Accept'] = 'application/json';
+  addCsrfHeader(headers, options.method || 'GET');
 
   if (options.body && typeof options.body === 'string') {
     headers['Content-Type'] = 'application/x-toml';
@@ -291,7 +309,13 @@ async function handleLoginSubmit(e) {
 
 async function handleLogout() {
   try {
-    await fetch('/api/dashboard/logout', { method: 'POST', credentials: 'same-origin' });
+    var headers = {};
+    addCsrfHeader(headers, 'POST');
+    await fetch('/api/dashboard/logout', {
+      method: 'POST',
+      headers: headers,
+      credentials: 'same-origin'
+    });
   } catch (e) { /* ignore */ }
   state.authenticated = false;
   showToast('Logged out', 'info');
@@ -356,9 +380,11 @@ async function loadConfig() {
 
 async function saveConfig(content) {
   try {
+    var headers = { 'Content-Type': 'application/json' };
+    addCsrfHeader(headers, 'POST');
     var resp = await fetch('/api/dashboard/config/save', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: headers,
       body: JSON.stringify({ content: content }),
       credentials: 'same-origin',
     });

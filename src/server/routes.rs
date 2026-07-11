@@ -13,6 +13,10 @@ pub fn build_router(state: AppState) -> Router {
         .merge(anthropic_routes(&state))
         .merge(dashboard_routes())
         .merge(rest_api::router())
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::observability::request_observability_middleware,
+        ))
         .with_state(state)
 }
 

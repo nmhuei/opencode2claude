@@ -16,6 +16,7 @@ pub mod infrastructure;
 pub mod init;
 pub mod management;
 pub mod middleware;
+pub mod observability;
 pub mod opencode;
 pub mod output;
 pub mod pidfile;

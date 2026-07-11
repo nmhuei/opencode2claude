@@ -1,37 +1,24 @@
-//! Versioned REST management API.
-//!
-//! HTTP concerns stay in this module. Authentication, snapshots, redaction, and
-//! proxy lifecycle rules are implemented by `crate::management`.
+//! Versioned REST management API backed by shared typed DTOs.
 
-use crate::management::{auth, service};
+use crate::management::{auth, config_apply, dto, service};
 use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::Serialize;
 use serde_json::{json, Value};
 
-/// Build the versioned REST management router.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/v1/status", get(status))
         .route("/api/v1/proxies", get(proxies))
         .route("/api/v1/config", get(config))
+        .route("/api/v1/config/preview", post(preview_config))
+        .route("/api/v1/config/apply", post(apply_config))
         .route("/api/v1/proxies/:port/restart", post(restart_proxy))
+        .route("/api/v1/metrics", get(metrics))
         .route("/api/v1/openapi.json", get(openapi))
-}
-
-#[derive(Debug, Serialize)]
-struct ApiErrorBody {
-    error: ApiErrorDetail,
-}
-
-#[derive(Debug, Serialize)]
-struct ApiErrorDetail {
-    code: &'static str,
-    message: String,
 }
 
 #[derive(Debug)]
@@ -65,22 +52,20 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let mut response = (
             self.status,
-            Json(ApiErrorBody {
-                error: ApiErrorDetail {
+            Json(dto::ApiErrorBody {
+                error: dto::ApiErrorDetail {
                     code: self.code,
                     message: self.message,
                 },
             }),
         )
             .into_response();
-
         if self.status == StatusCode::UNAUTHORIZED {
             response.headers_mut().insert(
                 header::WWW_AUTHENTICATE,
                 header::HeaderValue::from_static("Bearer realm=\"opencode2api-rest\""),
             );
         }
-
         response
     }
 }
@@ -91,7 +76,6 @@ fn authorize(headers: &HeaderMap, state: &AppState) -> Result<(), ApiError> {
     })?;
     let provided = auth::bearer_token(headers)
         .ok_or_else(|| ApiError::unauthorized("Missing or invalid Authorization: Bearer header"))?;
-
     if auth::token_eq(provided.as_bytes(), expected.as_bytes()) {
         Ok(())
     } else {
@@ -99,100 +83,123 @@ fn authorize(headers: &HeaderMap, state: &AppState) -> Result<(), ApiError> {
     }
 }
 
-/// GET /api/v1/status
 async fn status(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<dto::StatusResponse>, ApiError> {
     authorize(&headers, &state)?;
     let snapshot = service::proxy_snapshot(&state).await;
-    let egress_mode = if snapshot.nodes.is_empty() {
-        "direct"
-    } else {
-        "proxy"
+    let workers = state.workers.snapshot();
+    let (egress_mode, egress_ready, unique_verified_exits) = {
+        let pool = state.proxy_pool.read().await;
+        match state.config.egress.mode {
+            crate::config::EgressMode::Direct => ("direct".to_string(), true, 0),
+            crate::config::EgressMode::Proxy => (
+                "proxy".to_string(),
+                pool.egress_ready(
+                    state.config.egress.minimum_unique_exit_ips,
+                    state.config.egress.identity_ttl,
+                ),
+                pool.verified_unique_exit_count_fresh(state.config.egress.identity_ttl),
+            ),
+        }
     };
-
-    Ok(Json(json!({
-        "status": "ok",
-        "service": "opencode2api",
-        "version": env!("CARGO_PKG_VERSION"),
-        "uptime_secs": service::uptime_secs(&state),
-        "model": state.config.model,
-        "bridge": {
-            "host": state.config.host.to_string(),
-            "port": state.config.bridge_port,
-            "client_auth_enabled": state.config.auth_enabled(),
+    Ok(Json(dto::StatusResponse {
+        status: "ok".to_string(),
+        service: "opencode2api".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        uptime_secs: service::uptime_secs(&state),
+        model: state.config.model.clone(),
+        bridge: dto::BridgeSummary {
+            host: state.config.host.to_string(),
+            port: state.config.bridge_port,
+            client_auth_enabled: state.config.auth_enabled(),
         },
-        "egress": {
-            "mode": egress_mode,
-            "proxy_pool": snapshot,
+        egress: dto::EgressSummary {
+            mode: egress_mode,
+            ready: egress_ready,
+            unique_verified_exits,
+            proxy_pool: snapshot,
         },
-    })))
+        workers,
+    }))
 }
 
-/// GET /api/v1/proxies
 async fn proxies(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<dto::ProxiesResponse>, ApiError> {
     authorize(&headers, &state)?;
-    let snapshot = service::proxy_snapshot(&state).await;
-
-    Ok(Json(json!({
-        "policy": snapshot.policy,
-        "primary": snapshot.primary,
-        "warm_standby": snapshot.warm_standby,
-        "nodes": snapshot.nodes,
-    })))
+    Ok(Json(service::proxy_snapshot(&state).await.into()))
 }
 
-/// GET /api/v1/config — operational configuration with secret values removed.
 async fn config(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<dto::ConfigResponse>, ApiError> {
     authorize(&headers, &state)?;
-    let cfg = service::safe_config_snapshot(&state);
-
-    Ok(Json(json!({
-        "host": cfg.host,
-        "bridge_port": cfg.bridge_port,
-        "opencode_port": cfg.opencode_port,
-        "model": cfg.model,
-        "shell_policy": cfg.shell_policy,
-        "max_body_size": cfg.max_body_size,
-        "stream_buffer_size": cfg.stream_buffer_size,
-        "channel_capacity": cfg.channel_capacity,
-        "max_search_loops": cfg.max_search_loops,
-        "primary_proxies": cfg.primary_proxies,
-        "warm_standby_proxies": cfg.warm_standby_proxies,
-        "features": {
-            "client_auth_configured": cfg.client_auth_configured,
-            "tavily_configured": cfg.tavily_configured,
-            "exa_configured": cfg.exa_configured,
-            "serper_configured": cfg.serper_configured,
-            "searxng_configured": cfg.searxng_configured,
-            "searxng_api_key_configured": cfg.searxng_api_key_configured,
-        }
-    })))
+    Ok(Json(service::safe_config_snapshot(&state).into()))
 }
 
-/// POST /api/v1/proxies/:port/restart
+async fn preview_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<dto::ConfigDocumentRequest>,
+) -> Result<Json<dto::ConfigPreviewResponse>, ApiError> {
+    authorize(&headers, &state)?;
+    let plan = config_apply::preview_config(&state, &request.content)?;
+    Ok(Json(config_apply::preview_response(&plan)))
+}
+
+async fn apply_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<dto::ConfigDocumentRequest>,
+) -> Result<Json<dto::ConfigApplyResponse>, ApiError> {
+    authorize(&headers, &state)?;
+    let result = config_apply::apply_config(&state, &request.content)?;
+    let _ = state
+        .event_tx
+        .send(crate::dashboard::DashboardEvent::ConfigSaved {
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+                .to_string(),
+        });
+    Ok(Json(result))
+}
+
 async fn restart_proxy(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(port): Path<u16>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<dto::ProxyActionResponse>, ApiError> {
     authorize(&headers, &state)?;
-    let result = service::restart_managed_proxy(&state, port).await?;
-
-    Ok(Json(json!({
-        "status": "ok",
-        "proxy": result,
-    })))
+    Ok(Json(dto::ProxyActionResponse {
+        status: "ok".to_string(),
+        proxy: service::restart_managed_proxy(&state, port).await?,
+    }))
 }
 
-/// GET /api/v1/openapi.json
+async fn metrics(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<dto::MetricsResponse>, ApiError> {
+    authorize(&headers, &state)?;
+    if !state.config.observability.metrics_enabled {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "metrics_disabled",
+            "Metrics are disabled by configuration",
+        ));
+    }
+    Ok(Json(dto::MetricsResponse {
+        metrics: state.metrics.snapshot(),
+        workers: state.workers.snapshot(),
+    }))
+}
+
 async fn openapi(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -201,52 +208,45 @@ async fn openapi(
     Ok(Json(openapi_document()))
 }
 
+fn response_schema<T: dto::ApiSchema>() -> Value {
+    json!({
+        "description": "Success",
+        "content": {"application/json": {"schema": dto::schema_ref::<T>()}}
+    })
+}
+
+fn request_schema<T: dto::ApiSchema>() -> Value {
+    json!({
+        "required": true,
+        "content": {"application/json": {"schema": dto::schema_ref::<T>()}}
+    })
+}
+
 fn openapi_document() -> Value {
     json!({
         "openapi": "3.1.0",
         "info": {
             "title": "OpenCode2API Management API",
             "version": env!("CARGO_PKG_VERSION"),
-            "description": "Versioned REST API for bridge status, safe configuration inspection, and managed proxy operations."
+            "description": "Versioned, authenticated management contract generated from shared DTO schemas."
         },
-        "servers": [{ "url": "/" }],
+        "servers": [{"url":"/"}],
         "components": {
             "securitySchemes": {
-                "bearerAuth": {
-                    "type": "http",
-                    "scheme": "bearer",
-                    "bearerFormat": "opaque"
-                }
-            }
+                "bearerAuth": {"type":"http","scheme":"bearer","bearerFormat":"opaque"}
+            },
+            "schemas": dto::schema_components()
         },
-        "security": [{ "bearerAuth": [] }],
+        "security": [{"bearerAuth":[]}],
         "paths": {
-            "/api/v1/status": {
-                "get": { "summary": "Get bridge and egress status", "responses": { "200": { "description": "Current status" }, "401": { "description": "Unauthorized" } } }
-            },
-            "/api/v1/proxies": {
-                "get": { "summary": "List proxy pool state", "responses": { "200": { "description": "Proxy pool snapshot" }, "401": { "description": "Unauthorized" } } }
-            },
-            "/api/v1/config": {
-                "get": { "summary": "Get redacted operational configuration", "responses": { "200": { "description": "Safe configuration" }, "401": { "description": "Unauthorized" } } }
-            },
-            "/api/v1/proxies/{port}/restart": {
-                "post": {
-                    "summary": "Restart a managed primary proxy",
-                    "parameters": [{ "name": "port", "in": "path", "required": true, "schema": { "type": "integer", "minimum": 1, "maximum": 65535 } }],
-                    "responses": {
-                        "200": { "description": "Proxy restarted" },
-                        "400": { "description": "Invalid proxy port" },
-                        "401": { "description": "Unauthorized" },
-                        "403": { "description": "Protected proxy" },
-                        "404": { "description": "Proxy is not configured" },
-                        "502": { "description": "Container restart failed" }
-                    }
-                }
-            },
-            "/api/v1/openapi.json": {
-                "get": { "summary": "Get this OpenAPI document", "responses": { "200": { "description": "OpenAPI document" }, "401": { "description": "Unauthorized" } } }
-            }
+            "/api/v1/status": {"get":{"summary":"Get bridge status","responses":{"200":response_schema::<dto::StatusResponse>(),"401":{"description":"Unauthorized"}}}},
+            "/api/v1/proxies": {"get":{"summary":"List proxy state","responses":{"200":response_schema::<dto::ProxiesResponse>(),"401":{"description":"Unauthorized"}}}},
+            "/api/v1/config": {"get":{"summary":"Get redacted resolved configuration","responses":{"200":response_schema::<dto::ConfigResponse>(),"401":{"description":"Unauthorized"}}}},
+            "/api/v1/config/preview": {"post":{"summary":"Validate and preview an atomic config merge","requestBody":request_schema::<dto::ConfigDocumentRequest>(),"responses":{"200":response_schema::<dto::ConfigPreviewResponse>(),"400":{"description":"Invalid configuration"},"401":{"description":"Unauthorized"}}}},
+            "/api/v1/config/apply": {"post":{"summary":"Atomically apply validated configuration","requestBody":request_schema::<dto::ConfigDocumentRequest>(),"responses":{"200":response_schema::<dto::ConfigApplyResponse>(),"400":{"description":"Invalid configuration"},"401":{"description":"Unauthorized"},"500":{"description":"Write or verification failure"}}}},
+            "/api/v1/proxies/{port}/restart": {"post":{"summary":"Restart a managed primary proxy","parameters":[{"name":"port","in":"path","required":true,"schema":{"type":"integer","minimum":1,"maximum":65535}}],"responses":{"200":response_schema::<dto::ProxyActionResponse>(),"400":{"description":"Invalid port"},"401":{"description":"Unauthorized"},"403":{"description":"Protected proxy"},"404":{"description":"Not configured"},"409":{"description":"Proxy busy"},"502":{"description":"Container failure"}}}},
+            "/api/v1/metrics": {"get":{"summary":"Get bounded in-process counters and worker state","responses":{"200":response_schema::<dto::MetricsResponse>(),"401":{"description":"Unauthorized"},"404":{"description":"Metrics disabled"}}}},
+            "/api/v1/openapi.json": {"get":{"summary":"Get this OpenAPI document","responses":{"200":{"description":"OpenAPI 3.1 document"},"401":{"description":"Unauthorized"}}}}
         }
     })
 }
@@ -255,8 +255,9 @@ fn openapi_document() -> Value {
 mod tests {
     use super::*;
     use crate::config::BridgeConfig;
+    use crate::management::dto::ApiSchema;
     use crate::shell::ShellPolicy;
-    use axum::body::Body;
+    use axum::body::{to_bytes, Body};
     use axum::http::Request;
     use tower::ServiceExt;
 
@@ -271,6 +272,8 @@ mod tests {
             stream_buffer_size: 4096,
             channel_capacity: 64,
             tavily_api_key: Some("secret-that-must-not-leak".into()),
+            primary_proxies: None,
+            warm_standby_proxies: None,
             max_search_loops: 3,
             management: crate::config::ManagementConfig {
                 rest_api_token: Some("test-rest-token".into()),
@@ -280,8 +283,16 @@ mod tests {
         })
     }
 
+    fn authorized(path: &str) -> Request<Body> {
+        Request::builder()
+            .uri(path)
+            .header(header::AUTHORIZATION, "Bearer test-rest-token")
+            .body(Body::empty())
+            .unwrap()
+    }
+
     #[tokio::test]
-    async fn openapi_requires_bearer_authentication() {
+    async fn openapi_requires_auth_and_references_registered_dtos() {
         let app = router().with_state(state());
         let unauthorized = app
             .clone()
@@ -294,18 +305,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
-
-        let authorized = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/openapi.json")
-                    .header(header::AUTHORIZATION, "Bearer test-rest-token")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+        let response = app
+            .oneshot(authorized("/api/v1/openapi.json"))
             .await
             .unwrap();
-        assert_eq!(authorized.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert!(body["components"]["schemas"][dto::StatusResponse::NAME].is_object());
+        assert_eq!(
+            body["paths"]["/api/v1/metrics"]["get"]["responses"]["200"]["content"]
+                ["application/json"]["schema"]["$ref"],
+            "#/components/schemas/MetricsResponse"
+        );
     }
 
     #[tokio::test]
@@ -323,5 +336,17 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_is_typed_and_authenticated() {
+        let app = router().with_state(state());
+        let response = app.oneshot(authorized("/api/v1/metrics")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert!(body["metrics"]["requests_total"].is_number());
+        assert!(body["workers"]["workers"].is_array());
     }
 }
