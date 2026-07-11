@@ -14,7 +14,6 @@ use std::collections::HashMap;
 
 /// Test that the bridge binary can be spawned and responds on /health.
 #[tokio::test]
-#[ignore]
 async fn test_bridge_binary_health() {
     let bridge = TestBridge::start(HashMap::new()).await;
     let resp = bridge.get_health().await.unwrap();
@@ -26,7 +25,6 @@ async fn test_bridge_binary_health() {
 
 /// Test non-streaming shell command via `!echo`.
 #[tokio::test]
-#[ignore]
 async fn test_shell_command_non_streaming() {
     let bridge = TestBridge::start(HashMap::from([("BRIDGE_SHELL_POLICY", "unrestricted")])).await;
     let resp = bridge
@@ -52,7 +50,6 @@ async fn test_shell_command_non_streaming() {
 
 /// Test streaming shell command returns proper SSE events.
 #[tokio::test]
-#[ignore]
 async fn test_shell_command_streaming_sse() {
     let bridge = TestBridge::start(HashMap::from([("BRIDGE_SHELL_POLICY", "unrestricted")])).await;
     let resp = bridge
@@ -135,7 +132,6 @@ async fn test_shell_command_streaming_sse() {
 
 /// Test that invalid routes return 404.
 #[tokio::test]
-#[ignore]
 async fn test_invalid_route_404() {
     let bridge = TestBridge::start(HashMap::new()).await;
     let client = reqwest::Client::new();
@@ -146,7 +142,6 @@ async fn test_invalid_route_404() {
 
 /// Test that empty messages return 400 or 422 error.
 #[tokio::test]
-#[ignore]
 async fn test_empty_messages_error() {
     let bridge = TestBridge::start(HashMap::new()).await;
 
@@ -166,7 +161,6 @@ async fn test_empty_messages_error() {
 
 /// Test shell command with disabled policy returns 403.
 #[tokio::test]
-#[ignore]
 async fn test_shell_disabled_policy() {
     let bridge = TestBridge::start(HashMap::from([("BRIDGE_SHELL_POLICY", "disabled")])).await;
 
@@ -184,7 +178,6 @@ async fn test_shell_disabled_policy() {
 
 /// Test shell allowlist policy — allowed command passes, blocked command fails.
 #[tokio::test]
-#[ignore]
 async fn test_shell_allowlist_policy() {
     let bridge = TestBridge::start(HashMap::from([
         ("BRIDGE_SHELL_POLICY", "allowlist"),
@@ -213,7 +206,6 @@ async fn test_shell_allowlist_policy() {
 
 /// Test multi-content message format (array of content blocks).
 #[tokio::test]
-#[ignore]
 async fn test_multi_content_format() {
     let bridge = TestBridge::start(HashMap::new()).await;
 
@@ -237,7 +229,6 @@ async fn test_multi_content_format() {
 
 /// Test authentication middleware checks.
 #[tokio::test]
-#[ignore]
 async fn test_auth_flow() {
     let bridge = TestBridge::start(HashMap::from([
         ("BRIDGE_AUTH_TOKEN", "valid-secret-token"),
@@ -283,7 +274,6 @@ async fn test_auth_flow() {
 
 /// Health check trả về 200 NGAY CẢ KHI auth được bật.
 #[tokio::test]
-#[ignore]
 async fn test_health_with_auth_enabled() {
     let bridge = TestBridge::start(HashMap::from([("BRIDGE_AUTH_TOKEN", "secret")])).await;
     let resp = bridge.get_health().await.unwrap();
@@ -292,7 +282,6 @@ async fn test_health_with_auth_enabled() {
 
 /// /v1/models trả về đúng format.
 #[tokio::test]
-#[ignore]
 async fn test_models_endpoint() {
     let bridge = TestBridge::start(HashMap::new()).await;
     let resp = bridge.get_models().await.unwrap();
@@ -307,7 +296,6 @@ async fn test_models_endpoint() {
 
 /// Nhiều auth tokens đều hoạt động.
 #[tokio::test]
-#[ignore]
 async fn test_multi_token_auth() {
     let bridge = TestBridge::start(HashMap::from([
         ("BRIDGE_AUTH_TOKEN", "token-a,token-b"),
@@ -339,7 +327,6 @@ async fn test_multi_token_auth() {
 
 /// Request body quá lớn bị từ chối.
 #[tokio::test]
-#[ignore]
 async fn test_large_body_rejection() {
     let bridge = TestBridge::start(HashMap::from([("BRIDGE_MAX_BODY_SIZE", "100")])).await;
 
@@ -357,7 +344,6 @@ async fn test_large_body_rejection() {
 
 /// Concurrent requests đều thành công.
 #[tokio::test]
-#[ignore]
 async fn test_concurrent_requests() {
     let bridge = TestBridge::start(HashMap::from([("BRIDGE_SHELL_POLICY", "unrestricted")])).await;
     let bridge = std::sync::Arc::new(bridge);
@@ -380,7 +366,6 @@ async fn test_concurrent_requests() {
 
 /// Streaming shell command với policy disabled => 403.
 #[tokio::test]
-#[ignore]
 async fn test_shell_disabled_streaming() {
     let bridge = TestBridge::start(HashMap::from([("BRIDGE_SHELL_POLICY", "disabled")])).await;
 
@@ -397,7 +382,6 @@ async fn test_shell_disabled_streaming() {
 
 /// Auth với streaming request.
 #[tokio::test]
-#[ignore]
 async fn test_auth_with_streaming() {
     let bridge = TestBridge::start(HashMap::from([
         ("BRIDGE_AUTH_TOKEN", "stream-secret"),
@@ -429,7 +413,6 @@ async fn test_auth_with_streaming() {
 
 /// Verify daemon status trong diagnostics response.
 #[tokio::test]
-#[ignore]
 async fn test_health_daemon_status() {
     let bridge = TestBridge::start(HashMap::from([("DASHBOARD_ADMIN_TOKEN", "test-token")])).await;
     let resp = bridge
@@ -449,7 +432,6 @@ async fn test_health_daemon_status() {
 
 /// Verify that proxy failover works correctly when a proxy in the pool returns 429.
 #[tokio::test]
-#[ignore]
 async fn test_proxy_pool_failover_integration() {
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

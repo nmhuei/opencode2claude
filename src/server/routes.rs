@@ -43,6 +43,8 @@ fn dashboard_routes() -> Router<AppState> {
     Router::new()
         .route("/", get(dashboard::serve_landing))
         .route("/health", get(handlers::handle_health))
+        .route("/health/live", get(handlers::handle_liveness))
+        .route("/health/ready", get(handlers::handle_readiness))
         .route("/dashboard", get(dashboard::serve_webui))
         .route("/dashboard/", get(dashboard::serve_webui))
         .route("/dashboard/*path", get(dashboard::serve_webui))
