@@ -1,65 +1,40 @@
-//! Rendezvous hashing and proxy selection for multi-agent routing.
-//!
-//! Implements the Phase 5 routing contract:
-//! 1. Primary-first: use 40001-40003 for normal traffic
-//! 2. WarmStandby failover: 40004-40005 only when primary is unhealthy
-//! 3. Affected-agent-only remap: healthy primaries keep their agents
-//! 4. Rendezvous hashing for stable sticky determinism
+//! Stable sticky routing across primary and protected warm-standby egress nodes.
 
 use super::types::*;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use std::time::Instant;
 use tracing::{info, warn};
 
-// ── Stable hash helpers ──
-
-/// Deterministic 64-bit score for Rendezvous hashing.
-///
-/// Uses DefaultHasher (std). Deterministic within the same process execution
-/// but may vary across Rust versions. Replace with sha2/blake3 for truly
-/// stable cross-build determinism.
+/// Explicit FNV-1a rendezvous score. Unlike `DefaultHasher`, this mapping is a
+/// compatibility contract across processes and Rust toolchain versions.
 pub fn stable_rendezvous_score(key: &str, node_id: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    key.hash(&mut hasher);
-    node_id.hash(&mut hasher);
-    hasher.finish()
+    const OFFSET: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+    let mut hash = OFFSET;
+    for byte in key
+        .as_bytes()
+        .iter()
+        .copied()
+        .chain(std::iter::once(0xff))
+        .chain(node_id.as_bytes().iter().copied())
+    {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
 }
 
-// ── Proxy selection impl ──
-
 impl ProxyPool {
-    /// Returns the rendezvous-assigned primary for a routing key,
-    /// considering ALL primaries regardless of health status.
-    /// Ensures sticky assignment: even if a primary is on cooldown,
-    /// the key still maps to the same slot, enabling correct failover.
+    /// Sticky assignment considers every enabled primary, even when currently
+    /// unavailable, so a recovered primary receives its original sessions.
     pub(crate) fn rendezvous_assigned_primary(&self, routing_key: &str) -> Option<usize> {
-        let all_primaries: Vec<usize> = self
-            .proxies
+        self.proxies
             .iter()
             .enumerate()
-            .filter(|(_, p)| p.role == ProxyRole::Primary)
-            .map(|(i, _)| i)
-            .collect();
-        if all_primaries.is_empty() {
-            return None;
-        }
-        all_primaries
-            .iter()
-            .copied()
-            .max_by_key(|idx| stable_rendezvous_score(routing_key, &self.proxies[*idx].url))
+            .filter(|(_, node)| node.role == EgressRole::Primary && node.routing_enabled)
+            .max_by_key(|(_, node)| stable_rendezvous_score(routing_key, &node.id))
+            .map(|(index, _)| index)
     }
 
-    /// Select a proxy for the given routing key following the Phase 5 routing contract:
-    ///
-    /// 1. Use Primary proxies 40001–40003 for normal traffic.
-    /// 2. Use WarmStandby proxies 40004–40005 only when the selected primary
-    ///    is unhealthy (cooldown/dead).
-    /// 3. Affected-agent-only remap: failure of one primary does NOT remap
-    ///    agents assigned to healthy primaries.
-    /// 4. Rendezvous hashing for stable sticky determinism.
-    /// 5. Complies with cooldown/recovery policy.
-    ///
-    /// Returns `(Client, proxy_url, index)` or `None` if no proxy is available.
     pub fn select_proxy_for_key(
         &self,
         routing_key: &str,
@@ -77,112 +52,126 @@ impl ProxyPool {
         }
 
         let assigned = self.rendezvous_assigned_primary(routing_key);
-        if let Some(primary_idx) = assigned.filter(|index| Some(*index) != excluded) {
-            let entry = &self.proxies[primary_idx];
-            if proxy_is_healthy(entry) {
-                return Some(proxy_selection(entry, primary_idx));
+        if let Some(index) = assigned.filter(|index| Some(*index) != excluded) {
+            let node = &self.proxies[index];
+            if is_normal_route(node, Instant::now()) {
+                return Some(proxy_selection(node, index));
             }
             info!(
-                primary_index = primary_idx,
-                proxy_url = %entry.url,
+                node_id = %node.id,
                 %routing_key,
-                status = ?entry.status,
-                "assigned primary unavailable"
+                health = ?node.health,
+                circuit = node.circuit.label(),
+                "sticky primary is unavailable"
             );
         }
 
-        // A retry must remain primary-first. If the sticky primary is excluded,
-        // choose the best other healthy primary before consuming standby capacity.
-        if assigned == excluded {
-            if let Some(index) =
-                self.best_healthy_candidate(routing_key, ProxyRole::Primary, excluded)
-            {
-                return Some(proxy_selection(&self.proxies[index], index));
-            }
-        }
-
-        if let Some(index) =
-            self.best_healthy_candidate(routing_key, ProxyRole::WarmStandby, excluded)
-        {
+        // Always exhaust another healthy primary before protected standby.
+        if let Some(index) = self.best_candidate(
+            routing_key,
+            EgressRole::Primary,
+            excluded,
+            CandidateKind::Normal,
+        ) {
             return Some(proxy_selection(&self.proxies[index], index));
         }
 
-        if let Some(index) = self.select_degraded_excluding(excluded) {
-            warn!(
-                %routing_key,
-                proxy_index = index,
-                proxy_url = %self.proxies[index].url,
-                "all preferred proxies unavailable; using degraded route"
-            );
+        if let Some(index) = self.best_candidate(
+            routing_key,
+            EgressRole::WarmStandby,
+            excluded,
+            CandidateKind::Normal,
+        ) {
+            return Some(proxy_selection(&self.proxies[index], index));
+        }
+
+        // A single request may exercise a half-open node. Open circuits and
+        // duplicate exits are never used as degraded application routes.
+        if let Some(index) = self.best_candidate(
+            routing_key,
+            EgressRole::Primary,
+            excluded,
+            CandidateKind::Probe,
+        ) {
+            warn!(node_id = %self.proxies[index].id, "using half-open primary route");
+            return Some(proxy_selection(&self.proxies[index], index));
+        }
+        if let Some(index) = self.best_candidate(
+            routing_key,
+            EgressRole::WarmStandby,
+            excluded,
+            CandidateKind::Probe,
+        ) {
+            warn!(node_id = %self.proxies[index].id, "using half-open standby route");
             return Some(proxy_selection(&self.proxies[index], index));
         }
 
         None
     }
 
-    fn best_healthy_candidate(
+    fn best_candidate(
         &self,
         routing_key: &str,
-        role: ProxyRole,
+        role: EgressRole,
         excluded: Option<usize>,
+        kind: CandidateKind,
     ) -> Option<usize> {
+        let now = Instant::now();
         self.proxies
             .iter()
             .enumerate()
-            .filter(|(index, proxy)| {
-                Some(*index) != excluded && proxy.role == role && proxy_is_healthy(proxy)
-            })
-            .max_by_key(|(_, proxy)| stable_rendezvous_score(routing_key, &proxy.url))
-            .map(|(index, _)| index)
-    }
-
-    fn select_degraded_excluding(&self, excluded: Option<usize>) -> Option<usize> {
-        self.proxies
-            .iter()
-            .enumerate()
-            .filter(|(index, proxy)| {
+            .filter(|(index, node)| {
                 Some(*index) != excluded
-                    && matches!(
-                        proxy.status,
-                        ProxyStatus::Active | ProxyStatus::Spare | ProxyStatus::Cooldown(_)
-                    )
+                    && node.role == role
+                    && (role != EgressRole::Primary || node.routing_enabled)
+                    && match kind {
+                        CandidateKind::Normal => is_normal_route(node, now),
+                        CandidateKind::Probe => is_probe_route(node, now),
+                    }
             })
-            .min_by_key(|(_, proxy)| match proxy.status {
-                ProxyStatus::Cooldown(until) => until
-                    .checked_duration_since(std::time::Instant::now())
-                    .unwrap_or_default(),
-                ProxyStatus::Active => std::time::Duration::ZERO,
-                _ => std::time::Duration::MAX,
+            .max_by_key(|(_, node)| {
+                // Rendezvous remains the dominant ordering. The low bits favor
+                // the less-loaded node only when scores are extremely close.
+                stable_rendezvous_score(routing_key, &node.id)
+                    .saturating_sub(node.active_request_count() as u64)
             })
             .map(|(index, _)| index)
     }
 
-    /// Legacy compatibility: selects proxy for a routing key.
-    /// Delegates to `select_proxy_for_key`.
-    pub fn get_client(&mut self, api_key: &str) -> Option<(reqwest::Client, String, usize)> {
-        self.select_proxy_for_key(api_key)
+    pub fn get_client(&mut self, routing_key: &str) -> Option<(reqwest::Client, String, usize)> {
+        self.select_proxy_for_key(routing_key)
     }
 
-    /// Select a proxy excluding a specific index (for retry failover).
-    /// Uses the same primary-first, WarmStandby-failover policy but skips
-    /// the excluded index.
     pub fn get_client_excluding(
         &mut self,
-        api_key: &str,
-        exclude_idx: usize,
+        routing_key: &str,
+        excluded_index: usize,
     ) -> Option<(reqwest::Client, String, usize)> {
-        self.select_proxy_for_key_excluding(api_key, Some(exclude_idx))
+        self.select_proxy_for_key_excluding(routing_key, Some(excluded_index))
     }
 }
 
-fn proxy_is_healthy(proxy: &ProxyEntry) -> bool {
-    match proxy.status {
-        ProxyStatus::Active => true,
-        ProxyStatus::Cooldown(until) => std::time::Instant::now() >= until,
-        ProxyStatus::Spare | ProxyStatus::Dead { .. } | ProxyStatus::Starting => false,
-    }
+#[derive(Debug, Clone, Copy)]
+enum CandidateKind {
+    Normal,
+    Probe,
 }
 
-fn proxy_selection(proxy: &ProxyEntry, index: usize) -> (reqwest::Client, String, usize) {
-    (proxy.client.clone(), proxy.url.clone(), index)
+fn is_normal_route(node: &ProxyEntry, now: Instant) -> bool {
+    node.health == HealthState::Healthy
+        && node.circuit == CircuitState::Closed
+        && !node.is_duplicate()
+        && !matches!(node.circuit, CircuitState::Open { until } if now < until)
+}
+
+fn is_probe_route(node: &ProxyEntry, now: Instant) -> bool {
+    if node.is_duplicate() || node.active_request_count() > 0 {
+        return false;
+    }
+    node.may_receive_probe_traffic()
+        || matches!(node.circuit, CircuitState::Open { until } if now >= until)
+}
+
+fn proxy_selection(node: &ProxyEntry, index: usize) -> (reqwest::Client, String, usize) {
+    (node.client.clone(), node.url.clone(), index)
 }

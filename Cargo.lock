@@ -966,6 +966,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "axum",
+ "bytes",
  "clap",
  "clap_complete",
  "comfy-table",

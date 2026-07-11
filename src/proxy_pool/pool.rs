@@ -1,7 +1,10 @@
-//! Proxy-pool construction, snapshots, and degraded selection.
+//! Egress-pool construction and health snapshots.
 
 use super::types::*;
 use reqwest::Client;
+use std::collections::HashSet;
+use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
@@ -18,21 +21,24 @@ impl ProxyPool {
         let mut proxies: Vec<ProxyEntry> = proxy_urls.iter().filter_map(build_entry).collect();
         let primary_count = proxies
             .iter()
-            .filter(|proxy| proxy.role == ProxyRole::Primary)
+            .filter(|proxy| proxy.role == EgressRole::Primary)
             .count();
         let active_count = requested_active_count.min(primary_count);
 
-        for proxy in proxies.iter_mut().skip(active_count) {
-            if proxy.role != ProxyRole::WarmStandby {
-                proxy.status = ProxyStatus::Spare;
+        let mut primary_ordinal = 0usize;
+        for proxy in &mut proxies {
+            if proxy.role == EgressRole::Primary {
+                proxy.routing_enabled = primary_ordinal < active_count;
+                primary_ordinal += 1;
             }
         }
 
         info!(
             total = proxies.len(),
-            active = active_count,
-            spare = proxies.len().saturating_sub(active_count),
-            "proxy pool initialized"
+            primary = primary_count,
+            active_primary = active_count,
+            standby = proxies.len().saturating_sub(primary_count),
+            "egress pool initialized"
         );
 
         Self {
@@ -46,6 +52,30 @@ impl ProxyPool {
         std::mem::take(&mut self.restart_queue)
     }
 
+    pub fn begin_lease(&self, index: usize) -> Option<EgressLease> {
+        self.proxies
+            .get(index)
+            .map(|node| node.acquire_lease(index))
+    }
+
+    pub fn can_modify_node(&self, index: usize) -> Result<(), String> {
+        let node = self
+            .proxies
+            .get(index)
+            .ok_or_else(|| format!("unknown proxy index {index}"))?;
+        if node.lifecycle == LifecyclePolicy::Protected {
+            return Err(format!("node {} is protected", node.id));
+        }
+        let active_requests = node.active_request_count();
+        if active_requests > 0 {
+            return Err(format!(
+                "node {} has {} active request lease(s)",
+                node.id, active_requests
+            ));
+        }
+        Ok(())
+    }
+
     pub fn snapshot(&self) -> ProxyPoolStats {
         let mut primary = TierAccumulator::new(false);
         let mut standby = TierAccumulator::new(true);
@@ -54,13 +84,13 @@ impl ProxyPool {
         for proxy in &self.proxies {
             nodes.push(node_stats(proxy));
             match proxy.role {
-                ProxyRole::Primary => primary.record(proxy),
-                ProxyRole::WarmStandby => standby.record(proxy),
+                EgressRole::Primary => primary.record(proxy),
+                EgressRole::WarmStandby => standby.record(proxy),
             }
         }
 
         ProxyPoolStats {
-            policy: "primary-with-warm-standby".to_string(),
+            policy: "primary-with-protected-warm-standby".to_string(),
             primary: primary.finish(),
             warm_standby: standby.finish(),
             nodes,
@@ -90,44 +120,75 @@ fn build_entry(url: &String) -> Option<ProxyEntry> {
     };
 
     let port = extract_port(url);
+    let name = container_name(url);
+    let role = if is_protected_proxy_port(port) {
+        EgressRole::WarmStandby
+    } else {
+        EgressRole::Primary
+    };
     Some(ProxyEntry {
+        id: name.clone(),
         url: url.clone(),
         client,
-        status: ProxyStatus::Active,
         port,
-        container_name: container_name(url),
-        role: if is_protected_proxy_port(port) {
-            ProxyRole::WarmStandby
-        } else {
-            ProxyRole::Primary
-        },
+        container_name: name,
+        role,
         lifecycle: if is_managed_proxy_port(port) {
-            ProxyLifecycle::Managed
+            LifecyclePolicy::Managed
         } else {
-            ProxyLifecycle::Protected
+            LifecyclePolicy::Protected
         },
+        routing_enabled: role == EgressRole::Primary,
+        health: HealthState::Healthy,
+        circuit: CircuitState::Closed,
         consecutive_failures: 0,
         consecutive_successes: 0,
+        restart_attempts: 0,
+        cooldown_until: None,
+        exit_identity: None,
+        duplicate_of: None,
+        active_requests: Arc::new(AtomicUsize::new(0)),
     })
 }
 
 fn node_stats(proxy: &ProxyEntry) -> ProxyNodeStats {
+    let now = Instant::now();
     ProxyNodeStats {
+        id: proxy.id.clone(),
         port: proxy.port,
         role: proxy.role,
         lifecycle: proxy.lifecycle,
-        status: proxy.status.description().to_string(),
+        routing_enabled: proxy.routing_enabled,
+        health: proxy.health,
+        circuit: proxy.circuit.label().to_string(),
+        status: compatibility_status(proxy).to_string(),
         failure_count: proxy.consecutive_failures,
         success_count: proxy.consecutive_successes,
-        cooldown_remaining_secs: match proxy.status {
-            ProxyStatus::Cooldown(until) => Some(
-                until
-                    .checked_duration_since(Instant::now())
-                    .unwrap_or_default()
-                    .as_secs(),
-            ),
-            _ => None,
-        },
+        restart_attempts: proxy.restart_attempts,
+        cooldown_remaining_secs: proxy.cooldown_until.and_then(|until| {
+            until
+                .checked_duration_since(now)
+                .map(|duration| duration.as_secs())
+        }),
+        active_requests: proxy.active_request_count(),
+        exit_identity: proxy.exit_identity.clone(),
+        duplicate_of: proxy.duplicate_of.clone(),
+    }
+}
+
+fn compatibility_status(proxy: &ProxyEntry) -> &'static str {
+    if proxy.duplicate_of.is_some() {
+        "duplicate_exit"
+    } else if proxy.circuit.is_open(Instant::now()) {
+        "cooldown"
+    } else if proxy.health == HealthState::Recovering {
+        "starting"
+    } else if proxy.health == HealthState::Unhealthy {
+        "dead"
+    } else if proxy.role == EgressRole::Primary && !proxy.routing_enabled {
+        "spare"
+    } else {
+        proxy.health_label()
     }
 }
 
@@ -140,6 +201,8 @@ struct TierAccumulator {
     recovering: usize,
     dead: usize,
     protected: bool,
+    verified_exits: HashSet<String>,
+    active_requests: usize,
 }
 
 impl TierAccumulator {
@@ -152,17 +215,31 @@ impl TierAccumulator {
             recovering: 0,
             dead: 0,
             protected,
+            verified_exits: HashSet::new(),
+            active_requests: 0,
         }
     }
 
     fn record(&mut self, proxy: &ProxyEntry) {
         self.ports.push(proxy.port);
-        match proxy.status {
-            ProxyStatus::Active => self.healthy += 1,
-            ProxyStatus::Spare => self.degraded += 1,
-            ProxyStatus::Cooldown(_) => self.cooldown += 1,
-            ProxyStatus::Starting => self.recovering += 1,
-            ProxyStatus::Dead { .. } => self.dead += 1,
+        self.active_requests = self
+            .active_requests
+            .saturating_add(proxy.active_request_count());
+        if proxy.duplicate_of.is_none() {
+            if let Some(identity) = &proxy.exit_identity {
+                self.verified_exits.insert(identity.public_ip.clone());
+            }
+        }
+
+        if proxy.circuit.is_open(Instant::now()) {
+            self.cooldown += 1;
+            return;
+        }
+        match proxy.health {
+            HealthState::Healthy => self.healthy += 1,
+            HealthState::Unknown | HealthState::Degraded => self.degraded += 1,
+            HealthState::Recovering => self.recovering += 1,
+            HealthState::Unhealthy => self.dead += 1,
         }
     }
 
@@ -176,6 +253,8 @@ impl TierAccumulator {
             recovering: self.recovering,
             dead: self.dead,
             protected: self.protected,
+            unique_verified_exits: self.verified_exits.len(),
+            active_requests: self.active_requests,
         }
     }
 }

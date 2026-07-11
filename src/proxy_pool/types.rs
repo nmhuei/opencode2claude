@@ -1,115 +1,188 @@
-//! Core types for the proxy pool routing and lifecycle management.
+//! Egress-node domain types.
 //!
-//! Defines the proxy status machine, role/lifecycle enums, pool structure,
-//! health snapshot types, and constants used across routing and maintenance.
+//! Serving role, health, circuit state, lifecycle policy, identity, and load are
+//! deliberately independent. A node can be a healthy protected standby, a
+//! recovering managed primary, or a healthy duplicate exit without overloading
+//! one enum with unrelated dimensions.
 
 use reqwest::Client;
 use serde::Serialize;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
-// ── Routing policy constants ──
-
-/// Consecutive failures before proxy enters cooldown.
 pub const FAILURE_THRESHOLD: u32 = 2;
-/// Consecutive successes after cooldown to be considered fully healthy.
 pub const RECOVERY_SUCCESS_COUNT: u32 = 2;
-/// Default cooldown duration when failure threshold is reached (seconds).
 pub const COOLDOWN_SECS: u64 = 120;
 
-// ── Types ──
-
-/// Proxy state machine.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ProxyStatus {
-    /// Active — routing requests, index < active_count
-    Active,
-    /// Spare — ready to replace an active slot, index >= active_count
-    Spare,
-    /// Cooldown — resting due to rate-limit; Instant = when cooldown expires
-    Cooldown(Instant),
-    /// Dead — proxy is unusable, needs restart (tracks attempts)
-    Dead { restart_attempts: u32 },
-    /// Starting — container being initialized, awaiting health verification
-    Starting,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EgressRole {
+    Primary,
+    WarmStandby,
 }
 
-impl ProxyStatus {
-    /// Human-readable description of the current status.
-    pub fn description(&self) -> &'static str {
+pub type ProxyRole = EgressRole;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecyclePolicy {
+    Managed,
+    Protected,
+}
+
+pub type ProxyLifecycle = LifecyclePolicy;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthState {
+    Unknown,
+    Healthy,
+    Degraded,
+    Unhealthy,
+    Recovering,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CircuitState {
+    Closed,
+    Open { until: Instant },
+    HalfOpen,
+}
+
+impl CircuitState {
+    pub fn label(self) -> &'static str {
         match self {
-            ProxyStatus::Active => "healthy",
-            ProxyStatus::Spare => "spare",
-            ProxyStatus::Cooldown(_) => "cooldown",
-            ProxyStatus::Dead { .. } => "dead",
-            ProxyStatus::Starting => "starting",
+            Self::Closed => "closed",
+            Self::Open { .. } => "open",
+            Self::HalfOpen => "half_open",
+        }
+    }
+
+    pub fn is_open(self, now: Instant) -> bool {
+        matches!(self, Self::Open { until } if now < until)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExitIdentity {
+    pub public_ip: String,
+    pub provider: Option<String>,
+    pub colo: Option<String>,
+    pub verified_at_unix_secs: u64,
+}
+
+#[derive(Debug)]
+pub struct ProxyEntry {
+    pub id: String,
+    pub url: String,
+    pub client: Client,
+    pub port: u16,
+    pub container_name: String,
+    pub role: EgressRole,
+    pub lifecycle: LifecyclePolicy,
+    /// Whether this primary belongs to the normal serving set. Standby role is
+    /// governed separately and is never converted into a managed primary.
+    pub routing_enabled: bool,
+    pub health: HealthState,
+    pub circuit: CircuitState,
+    pub consecutive_failures: u32,
+    pub consecutive_successes: u32,
+    pub restart_attempts: u32,
+    pub cooldown_until: Option<Instant>,
+    pub exit_identity: Option<ExitIdentity>,
+    /// Node ID that already owns the same verified exit identity.
+    pub duplicate_of: Option<String>,
+    pub(super) active_requests: Arc<AtomicUsize>,
+}
+
+impl ProxyEntry {
+    pub fn health_label(&self) -> &'static str {
+        match self.health {
+            HealthState::Unknown => "unknown",
+            HealthState::Healthy => "healthy",
+            HealthState::Degraded => "degraded",
+            HealthState::Unhealthy => "unhealthy",
+            HealthState::Recovering => "recovering",
+        }
+    }
+
+    pub fn is_duplicate(&self) -> bool {
+        self.duplicate_of.is_some()
+    }
+
+    pub fn is_closed_and_healthy(&self) -> bool {
+        self.health == HealthState::Healthy
+            && self.circuit == CircuitState::Closed
+            && !self.is_duplicate()
+    }
+
+    pub fn may_receive_probe_traffic(&self) -> bool {
+        self.circuit == CircuitState::HalfOpen && !self.is_duplicate()
+    }
+
+    pub fn active_request_count(&self) -> usize {
+        self.active_requests.load(Ordering::Acquire)
+    }
+
+    pub fn acquire_lease(&self, index: usize) -> EgressLease {
+        self.active_requests.fetch_add(1, Ordering::AcqRel);
+        EgressLease {
+            index,
+            counter: self.active_requests.clone(),
         }
     }
 }
 
-/// Proxy role in the two-tier architecture.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
-pub enum ProxyRole {
-    /// Primary managed proxy (40001-40003) — CLI may restart/stop/recover
-    Primary,
-    /// Warm-standby protected proxy (40004-40005) — CLI may only health-check
-    WarmStandby,
-}
-
-/// Proxy lifecycle management policy.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
-pub enum ProxyLifecycle {
-    /// Fully managed by CLI — can be restarted, purged, recreated
-    Managed,
-    /// Protected — never stopped, restarted, purged, or recreated by CLI
-    Protected,
-}
-
-/// One entry in the proxy pool.
 #[derive(Debug)]
-pub struct ProxyEntry {
-    pub url: String,
-    pub client: Client,
-    pub status: ProxyStatus,
-    pub port: u16,
-    pub container_name: String,
-    /// Proxy role in the two-tier architecture (Primary/WarmStandby).
-    pub role: ProxyRole,
-    /// Proxy lifecycle management policy (Managed/Protected).
-    pub lifecycle: ProxyLifecycle,
-    /// Consecutive failures since last healthy state.
-    pub consecutive_failures: u32,
-    /// Consecutive successes since last healthy/cooldown state.
-    pub consecutive_successes: u32,
+pub struct EgressLease {
+    index: usize,
+    counter: Arc<AtomicUsize>,
 }
 
-/// Proxy pool with hot-spare model.
-///
-/// - indices `[0..active_count)` are active slots (Active, Cooldown, Dead, Starting)
-/// - indices `[active_count..]` are spare slots (usually Spare)
-/// - When an active dies → swap status with a spare, push dead index into restart_queue
+impl EgressLease {
+    pub fn index(&self) -> usize {
+        self.index
+    }
+}
+
+impl Drop for EgressLease {
+    fn drop(&mut self) {
+        let _ = self
+            .counter
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                Some(current.saturating_sub(1))
+            });
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct ProxyPool {
     pub proxies: Vec<ProxyEntry>,
-    /// Number of active proxy slots (set in constructor).
     pub active_count: usize,
     pub restart_queue: Vec<usize>,
 }
 
-// ── Stats types (exposed via /health and status) ──
-
-/// Snapshot of a single proxy node for health/status display.
 #[derive(Debug, Clone, Serialize)]
 pub struct ProxyNodeStats {
+    pub id: String,
     pub port: u16,
-    pub role: ProxyRole,
-    pub lifecycle: ProxyLifecycle,
+    pub role: EgressRole,
+    pub lifecycle: LifecyclePolicy,
+    pub routing_enabled: bool,
+    pub health: HealthState,
+    pub circuit: String,
+    /// Compatibility label retained for existing dashboard clients.
     pub status: String,
     pub failure_count: u32,
     pub success_count: u32,
+    pub restart_attempts: u32,
     pub cooldown_remaining_secs: Option<u64>,
+    pub active_requests: usize,
+    pub exit_identity: Option<ExitIdentity>,
+    pub duplicate_of: Option<String>,
 }
 
-/// Aggregate stats for a tier (primary or warm-standby).
 #[derive(Debug, Clone, Serialize)]
 pub struct ProxyTierStats {
     pub ports: Vec<u16>,
@@ -120,9 +193,10 @@ pub struct ProxyTierStats {
     pub recovering: usize,
     pub dead: usize,
     pub protected: bool,
+    pub unique_verified_exits: usize,
+    pub active_requests: usize,
 }
 
-/// Full proxy pool snapshot for health/status endpoints.
 #[derive(Debug, Clone, Serialize)]
 pub struct ProxyPoolStats {
     pub policy: String,
@@ -131,12 +205,10 @@ pub struct ProxyPoolStats {
     pub nodes: Vec<ProxyNodeStats>,
 }
 
-// ── Helpers ──
-
 pub fn extract_port(url: &str) -> u16 {
     url.rsplit(':')
         .next()
-        .and_then(|s| s.trim_end_matches('/').parse().ok())
+        .and_then(|value| value.trim_end_matches('/').parse().ok())
         .unwrap_or(0)
 }
 
@@ -149,18 +221,14 @@ pub fn container_name(url: &str) -> String {
     }
 }
 
-/// Returns true if the port is a protected warm-standby proxy (40004-40005).
 pub fn is_protected_proxy_port(port: u16) -> bool {
     matches!(port, 40004 | 40005)
 }
 
-/// Returns true if the port is a managed primary proxy (40001-40003).
 pub fn is_managed_proxy_port(port: u16) -> bool {
     matches!(port, 40001..=40003)
 }
 
-/// Ensures a given port is NOT a protected warm-standby proxy.
-/// Returns an error if it is, preventing destructive operations.
 pub fn ensure_not_protected(port: u16) -> Result<(), String> {
     if is_protected_proxy_port(port) {
         Err(format!(
@@ -172,12 +240,10 @@ pub fn ensure_not_protected(port: u16) -> Result<(), String> {
     }
 }
 
-/// Returns the primary managed proxy ports (40001-40003).
 pub fn get_primary_ports() -> [u16; 3] {
     [40001, 40002, 40003]
 }
 
-/// Returns the warm-standby protected proxy ports (40004-40005).
 pub fn get_warm_standby_ports() -> [u16; 2] {
     [40004, 40005]
 }

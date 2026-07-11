@@ -59,15 +59,15 @@ This matrix is the authoritative inventory of public contracts. `status` is one 
 | CFG-002 | Semantic validation | invalid auth/bind/egress combinations fail before bind | config security | security tests | process smoke | config reference | yes | verified |
 | CFG-003 | Secret redaction | secrets redact in Debug/display/snapshots/logs | config/management | redaction tests | log/REST tests | security guide | yes | partial |
 | CFG-004 | Legacy aliases/migration | old env/config names receive compatible migration | config loader | migration tests | CLI test | migration guide | yes | partial |
-| EGR-001 | Typed egress nodes | role/health/circuit/lifecycle are independent | egress domain | transition tests | fake runtime | proxy guide | yes | blocked |
-| EGR-002 | Sticky routing | stable explicit rendezvous hash assigns healthy primaries | egress routing | routing tests | fixture | proxy guide | yes | partial |
-| EGR-003 | Standby policy | standby is used only after eligible primary exhaustion | egress routing | routing tests | failover fixture | proxy guide | yes | implemented |
+| EGR-001 | Typed egress nodes | role/health/circuit/lifecycle are independent | egress domain | transition tests | fake runtime | proxy guide | yes | verified |
+| EGR-002 | Sticky routing | stable explicit rendezvous hash assigns healthy primaries | egress routing | routing tests | fixture | proxy guide | yes | verified |
+| EGR-003 | Standby policy | standby is used only after eligible primary exhaustion | egress routing | routing tests | failover fixture | proxy guide | yes | verified |
 | EGR-004 | Retry exclusion | failed/circuit-open nodes are excluded | egress/retry | regression tests | failover fixture | retry guide | yes | verified |
-| EGR-005 | Leases | active requests prevent destructive node operations | egress domain | lease tests | fake runtime | proxy guide | yes | blocked |
+| EGR-005 | Leases | active requests prevent destructive node operations | egress domain | lease tests | fake runtime | proxy guide | yes | verified |
 | EGR-006 | Exit identity | nodes are verified through configurable identity probes | egress identity | probe tests | real WARP system | proxy guide | yes | blocked |
 | EGR-007 | Duplicate suppression | duplicate exits do not count as independent capacity | egress identity/routing | identity tests | real WARP system | proxy guide | yes | blocked |
 | EGR-008 | No direct leak | configured proxy mode fails closed | retry/egress | regression test | SOCKS fixture | security/proxy docs | yes | verified |
-| EGR-009 | Circuit breaker | open/half-open/closed transitions are bounded | egress circuit | table tests | fault fixture | retry guide | yes | blocked |
+| EGR-009 | Circuit breaker | open/half-open/closed transitions are bounded | egress circuit | table tests | fault fixture | retry guide | yes | implemented |
 | EGR-010 | Worker lifecycle | health/restart workers cancel, join and report health | worker registry | lifecycle tests | shutdown fixture | operations guide | yes | blocked |
 | INF-001 | Container runtime adapter | one canonical Docker/WARP spec and injectable runtime | infrastructure/docker | adapter tests | fake/real runtime | deployment guide | yes | partial |
 | INF-002 | Process manager | spawn/probe/terminate validates process identity | infrastructure/supervisor | process tests | OS matrix | operations guide | yes | partial |

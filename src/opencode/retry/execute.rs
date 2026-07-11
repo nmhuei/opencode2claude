@@ -4,11 +4,13 @@ use super::policy::{
     bounded_backoff, build_model_retry_list, classify_reqwest_error, classify_status,
     is_rate_limit_body, is_reasoning_heavy_model, parse_retry_after, FailureClass,
 };
+use super::response::LeasedResponse;
 use super::warp::reconnect_warp;
 use crate::error::BridgeError;
 use crate::opencode::types::OpenAiRequest;
+use crate::proxy_pool::EgressLease;
 use crate::state::AppState;
-use reqwest::{Client, Response, StatusCode};
+use reqwest::{Client, StatusCode};
 use std::time::Duration;
 use tracing::{info, warn};
 
@@ -16,13 +18,14 @@ struct SelectedRoute {
     client: Client,
     proxy_url: Option<String>,
     proxy_index: Option<usize>,
+    lease: Option<EgressLease>,
 }
 
 pub(crate) async fn execute_with_warp_retry(
     state: &AppState,
     routing_key: &str,
     request: &OpenAiRequest,
-) -> Result<Response, BridgeError> {
+) -> Result<LeasedResponse, BridgeError> {
     let max_retries = state.config.retry.max_network_attempts as u32;
     let max_provider_retries = state.config.retry.max_provider_attempts;
     let models = build_model_retry_list(request, &state.config.retry);
@@ -47,7 +50,7 @@ pub(crate) async fn execute_with_warp_retry(
         let mut attempt_request = request.clone();
         attempt_request.model = current_model.clone();
 
-        let route = select_route(state, routing_key, last_failed_proxy).await?;
+        let mut route = select_route(state, routing_key, last_failed_proxy).await?;
         let result = route
             .client
             .post(&upstream_url)
@@ -172,7 +175,7 @@ pub(crate) async fn execute_with_warp_retry(
                     )));
                 }
 
-                return Ok(response);
+                return Ok(LeasedResponse::new(response, route.lease.take()));
             }
             Err(error) => {
                 let failure_class = classify_reqwest_error(&error);
@@ -230,6 +233,7 @@ async fn select_route(
                 client: state.http_client.clone(),
                 proxy_url: None,
                 proxy_index: None,
+                lease: None,
             });
         }
         return Err(BridgeError::UpstreamError(
@@ -242,17 +246,20 @@ async fn select_route(
         None => pool.get_client(routing_key),
     };
 
-    selection
-        .map(|(client, proxy_url, proxy_index)| SelectedRoute {
-            client,
-            proxy_url: Some(proxy_url),
-            proxy_index: Some(proxy_index),
-        })
-        .ok_or_else(|| {
-            BridgeError::UpstreamError(
-                "Proxy pool is configured but no eligible egress route is available".to_string(),
-            )
-        })
+    let (client, proxy_url, proxy_index) = selection.ok_or_else(|| {
+        BridgeError::UpstreamError(
+            "Proxy pool is configured but no eligible egress route is available".to_string(),
+        )
+    })?;
+    let lease = pool.begin_lease(proxy_index).ok_or_else(|| {
+        BridgeError::UpstreamError("failed to acquire egress request lease".to_string())
+    })?;
+    Ok(SelectedRoute {
+        client,
+        proxy_url: Some(proxy_url),
+        proxy_index: Some(proxy_index),
+        lease: Some(lease),
+    })
 }
 
 async fn record_transport_success(state: &AppState, proxy_index: Option<usize>) {
@@ -315,7 +322,7 @@ async fn sleep_backoff(state: &AppState, retry_count: u32, proxy_index: Option<u
 mod tests {
     use super::*;
     use crate::config::BridgeConfig;
-    use crate::proxy_pool::ProxyStatus;
+    use crate::proxy_pool::{CircuitState, HealthState};
 
     #[tokio::test]
     async fn configured_proxy_pool_never_silently_falls_back_to_direct() {
@@ -324,9 +331,13 @@ mod tests {
             ..BridgeConfig::default()
         };
         let state = AppState::new(config);
-        state.proxy_pool.write().await.proxies[0].status = ProxyStatus::Dead {
-            restart_attempts: 0,
-        };
+        {
+            let mut pool = state.proxy_pool.write().await;
+            pool.proxies[0].health = HealthState::Unhealthy;
+            pool.proxies[0].circuit = CircuitState::Open {
+                until: std::time::Instant::now() + std::time::Duration::from_secs(60),
+            };
+        }
 
         let error = select_route(&state, "test", None)
             .await
