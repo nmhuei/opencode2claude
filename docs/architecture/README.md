@@ -3,6 +3,7 @@
 - [Source audit and overhaul evidence](SOURCE_AUDIT_20260711.md)
 - [Target architecture and migration rules](TARGET_ARCHITECTURE.md)
 - [Verification evidence](VERIFICATION_EVIDENCE.md)
+- [Full repository completion plan](FULL_REPOSITORY_COMPLETION_PLAN.md)
 
 ## Overhaul branch
 
