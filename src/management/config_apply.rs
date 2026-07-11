@@ -2,13 +2,14 @@
 
 use super::dto::{ConfigApplyResponse, ConfigPreviewResponse};
 use super::service::ManagementError;
-use crate::config::TomlConfig;
+use crate::config::{migration, TomlConfig};
 use crate::state::AppState;
 use axum::http::StatusCode;
 use std::collections::BTreeSet;
 
 const MAX_CONFIG_BYTES: usize = 1024 * 1024;
 const KNOWN_ROOT_KEYS: &[&str] = &[
+    "schema_version",
     "port",
     "host",
     "opencode_port",
@@ -76,7 +77,7 @@ pub fn preview_config(state: &AppState, incoming: &str) -> Result<ConfigPlan, Ma
             format!("Configuration exceeds {MAX_CONFIG_BYTES} bytes"),
         ));
     }
-    let incoming_value = parse_document(incoming)?;
+    let incoming_value = migrate_value(parse_document(incoming)?)?;
     validate_known_keys(&incoming_value)?;
 
     let existing = state
@@ -86,9 +87,9 @@ pub fn preview_config(state: &AppState, incoming: &str) -> Result<ConfigPlan, Ma
         .and_then(|bytes| String::from_utf8(bytes).ok())
         .unwrap_or_default();
     let existing_value = if existing.trim().is_empty() {
-        toml::Value::Table(Default::default())
+        migrate_value(toml::Value::Table(Default::default()))?
     } else {
-        parse_document(&existing)?
+        migrate_value(parse_document(&existing)?)?
     };
 
     let mut merged_value = existing_value.clone();
@@ -196,6 +197,12 @@ fn parse_document(content: &str) -> Result<toml::Value, ManagementError> {
             format!("Invalid TOML: {err}"),
         )
     })
+}
+
+fn migrate_value(value: toml::Value) -> Result<toml::Value, ManagementError> {
+    migration::migrate_value(value)
+        .map(|(value, _report)| value)
+        .map_err(|message| error(StatusCode::BAD_REQUEST, "config_migration_failed", message))
 }
 
 fn validate_document(value: &toml::Value) -> Result<(), ManagementError> {

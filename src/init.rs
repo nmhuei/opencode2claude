@@ -10,6 +10,9 @@ use std::path::Path;
 const CONFIG_TEMPLATE: &str = r##"# OpenCode2API configuration
 # Uncomment and adjust values as needed.
 
+# Config schema. The loader migrates supported legacy keys to this version.
+schema_version = 1
+
 # Bridge listen port
 # port = 4000
 
@@ -138,6 +141,7 @@ mod tests {
     #[test]
     fn test_config_template_is_non_empty() {
         assert!(!CONFIG_TEMPLATE.is_empty());
+        assert!(CONFIG_TEMPLATE.contains("schema_version = 1"));
         assert!(CONFIG_TEMPLATE.contains("port = 4000"));
         assert!(CONFIG_TEMPLATE.contains("shell_policy"));
         assert!(CONFIG_TEMPLATE.contains("primary_proxies"));

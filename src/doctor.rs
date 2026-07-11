@@ -135,14 +135,14 @@ pub async fn run_diagnostics() -> DoctorReport {
     let resolved = config::BridgeConfig::from_env_and_cli(config::CliOverrides::default());
     let mut checks = Vec::new();
 
-    // 1. Docker daemon
-    checks.push(check_docker().await);
+    // 1. Docker daemon (required only for proxy egress)
+    checks.push(check_docker(&resolved).await);
 
     // 2. Port availability
     checks.push(check_port(resolved.bridge_port).await);
 
-    // 3. Proxy containers
-    checks.push(check_proxies().await);
+    // 3. Proxy containers (not applicable in direct mode)
+    checks.push(check_proxies(&resolved).await);
 
     // 4. Config file
     checks.push(check_config(&resolved));
@@ -175,9 +175,18 @@ pub async fn run_diagnostics() -> DoctorReport {
     DoctorReport { checks, summary }
 }
 
-async fn check_docker() -> CheckResult {
+async fn check_docker(resolved: &config::BridgeConfig) -> CheckResult {
     let name = "docker-daemon".to_string();
     let label = "Docker Daemon".to_string();
+
+    if resolved.egress.mode == config::EgressMode::Direct {
+        return CheckResult {
+            name,
+            label,
+            status: CheckStatus::Pass,
+            message: "Not required in direct egress mode".to_string(),
+        };
+    }
 
     match docker::check_daemon().await {
         Ok(version) => CheckResult {
@@ -223,11 +232,20 @@ async fn check_port(port: u16) -> CheckResult {
     }
 }
 
-async fn check_proxies() -> CheckResult {
+async fn check_proxies(resolved: &config::BridgeConfig) -> CheckResult {
     let name = "proxy-containers".to_string();
     let label = "Proxy Containers".to_string();
-    let primary_ports = proxy_pool::get_primary_ports();
 
+    if resolved.egress.mode == config::EgressMode::Direct {
+        return CheckResult {
+            name,
+            label,
+            status: CheckStatus::Pass,
+            message: "Disabled by direct egress mode".to_string(),
+        };
+    }
+
+    let primary_ports = proxy_pool::get_primary_ports();
     let containers = docker::list_containers(&primary_ports).await;
     let running = containers.iter().filter(|(_, _, r)| *r).count();
     let total = containers.len();

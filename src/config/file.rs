@@ -31,6 +31,7 @@ impl StringList {
 
 #[derive(Debug, Deserialize, Default)]
 pub struct TomlConfig {
+    pub schema_version: Option<u32>,
     pub port: Option<u16>,
     pub host: Option<String>,
     pub opencode_port: Option<u16>,
@@ -95,6 +96,7 @@ pub struct TomlConfig {
 impl TomlConfig {
     pub fn from_file(path: &str) -> Option<Self> {
         let content = std::fs::read_to_string(path).ok()?;
-        toml::from_str(&content).ok()
+        let (migrated, _report) = super::migration::migrate_document(&content).ok()?;
+        toml::from_str(&migrated).ok()
     }
 }

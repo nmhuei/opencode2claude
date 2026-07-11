@@ -216,13 +216,20 @@ pub enum ProxyCommand {
     Status,
 
     /// Restart primary managed proxies
-    Restart,
+    Restart {
+        /// Print the planned operations without changing containers
+        #[arg(long)]
+        dry_run: bool,
+    },
 
     /// Purge and recreate all primary proxy containers
     Purge {
         /// Skip confirmation prompt
         #[arg(short, long)]
         yes: bool,
+        /// Print the planned operations without changing containers
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// View proxy container logs

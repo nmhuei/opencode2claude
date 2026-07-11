@@ -5,6 +5,7 @@
 
 mod file;
 mod loader;
+pub mod migration;
 mod security;
 mod types;
 

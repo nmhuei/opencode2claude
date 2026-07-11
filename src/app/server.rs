@@ -39,18 +39,21 @@ pub(super) async fn cmd_server(cmd: ServerCommand, fmt: OutputFormat) {
             }
         }
         ServerCommand::Stop(args) => {
-            let sup = resolve_runtime(args.port, args.host);
+            let resolved = resolve_config(args.port, args.host);
+            let sup = supervisor_from_config(&resolved);
             match sup.stop() {
                 Ok(()) => {
                     println!("Bridge stopped.");
-                    let quiet = fmt == OutputFormat::Quiet || fmt == OutputFormat::Json;
-                    if let Err(e) = docker::stop_proxy_containers(args.purge).await {
-                        if !quiet {
-                            eprintln!(
-                                "{} Failed to stop proxy containers: {}",
-                                "✗".red().bold(),
-                                e
-                            );
+                    if should_manage_proxy_containers(&resolved) {
+                        let quiet = fmt == OutputFormat::Quiet || fmt == OutputFormat::Json;
+                        if let Err(e) = docker::stop_proxy_containers(args.purge).await {
+                            if !quiet {
+                                eprintln!(
+                                    "{} Failed to stop proxy containers: {}",
+                                    "✗".red().bold(),
+                                    e
+                                );
+                            }
                         }
                     }
                 }
@@ -326,13 +329,29 @@ pub(super) async fn cmd_run_server(args: ServeArgsBridge) {
 // ── Runtime helpers ──
 
 pub(super) fn resolve_runtime(port: Option<u16>, host: Option<String>) -> Supervisor {
-    let resolved = BridgeConfig::from_env_and_cli(config::CliOverrides {
+    let resolved = resolve_config(port, host);
+    supervisor_from_config(&resolved)
+}
+
+fn resolve_config(port: Option<u16>, host: Option<String>) -> BridgeConfig {
+    BridgeConfig::from_env_and_cli(config::CliOverrides {
         bridge_port: port,
         host,
         ..Default::default()
-    });
-    let paths = RuntimePaths::from_config(&resolved);
+    })
+}
+
+fn supervisor_from_config(resolved: &BridgeConfig) -> Supervisor {
+    let paths = RuntimePaths::from_config(resolved);
     Supervisor::new(paths, resolved.bridge_port, resolved.host.to_string())
+}
+
+fn should_manage_proxy_containers(resolved: &BridgeConfig) -> bool {
+    resolved.egress.mode == config::EgressMode::Proxy
+        && resolved
+            .primary_proxies
+            .as_ref()
+            .is_some_and(|nodes| !nodes.is_empty())
 }
 
 pub(super) fn resolve_runtime_for_start(args: &cli::ServerStartArgs) -> Supervisor {
@@ -429,5 +448,33 @@ pub(super) async fn maybe_bootstrap_proxies(no_proxy: bool, quiet: bool) {
                 eprintln!("{} Failed to bootstrap proxy pool: {}", "✗".red().bold(), e);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn direct_mode_never_manages_proxy_containers() {
+        let config = BridgeConfig {
+            egress: config::EgressConfig {
+                mode: config::EgressMode::Direct,
+                ..BridgeConfig::default().egress
+            },
+            primary_proxies: Some(vec!["socks5h://127.0.0.1:40001".to_string()]),
+            ..Default::default()
+        };
+        assert!(!should_manage_proxy_containers(&config));
+    }
+
+    #[test]
+    fn proxy_mode_manages_only_nonempty_primary_pool() {
+        let mut config = BridgeConfig::default();
+        config.egress.mode = config::EgressMode::Proxy;
+        config.primary_proxies = None;
+        assert!(!should_manage_proxy_containers(&config));
+        config.primary_proxies = Some(vec!["socks5h://127.0.0.1:40001".to_string()]);
+        assert!(should_manage_proxy_containers(&config));
     }
 }

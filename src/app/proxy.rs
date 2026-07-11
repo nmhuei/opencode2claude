@@ -96,7 +96,33 @@ pub(super) async fn cmd_proxy(cmd: ProxyCommand, fmt: OutputFormat) {
                 "ℹ".cyan().dim()
             );
         }
-        ProxyCommand::Restart => {
+        ProxyCommand::Restart { dry_run } => {
+            if dry_run {
+                let ports = proxy_pool::get_primary_ports();
+                if fmt == OutputFormat::Json {
+                    let planned = ports
+                        .iter()
+                        .map(|port| {
+                            serde_json::json!({
+                                "port": port,
+                                "action": "restart",
+                                "dry_run": true,
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&planned).unwrap_or_default()
+                    );
+                } else if fmt == OutputFormat::Quiet {
+                    println!("dry-run restart ports=40001,40002,40003");
+                } else {
+                    println!("Dry run: would restart managed primary proxies {:?}", ports);
+                    println!("Warm-standby proxies 40004 and 40005 remain protected.");
+                }
+                return;
+            }
+
             if fmt == OutputFormat::Json {
                 #[derive(serde::Serialize)]
                 struct RestartResult {
@@ -210,7 +236,35 @@ pub(super) async fn cmd_proxy(cmd: ProxyCommand, fmt: OutputFormat) {
                 }
             }
         }
-        ProxyCommand::Purge { yes } => {
+        ProxyCommand::Purge { yes, dry_run } => {
+            if dry_run {
+                let ports = proxy_pool::get_primary_ports();
+                if fmt == OutputFormat::Json {
+                    let planned = ports
+                        .iter()
+                        .flat_map(|port| {
+                            [
+                                serde_json::json!({"port":port,"action":"remove","dry_run":true}),
+                                serde_json::json!({"port":port,"action":"create","dry_run":true}),
+                            ]
+                        })
+                        .collect::<Vec<_>>();
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&planned).unwrap_or_default()
+                    );
+                } else if fmt == OutputFormat::Quiet {
+                    println!("dry-run purge ports=40001,40002,40003");
+                } else {
+                    println!(
+                        "Dry run: would remove and recreate managed primary proxies {:?}",
+                        ports
+                    );
+                    println!("Warm-standby proxies 40004 and 40005 remain protected.");
+                }
+                return;
+            }
+
             if fmt == OutputFormat::Json {
                 // JSON path: no spinner, no confirm
                 #[derive(serde::Serialize)]
