@@ -13,6 +13,14 @@ pub(super) fn validate(config: &BridgeConfig) -> Result<(), String> {
                 .to_string(),
         );
     }
+    if !(1024..=64 * 1024 * 1024).contains(&config.protocol.max_sse_line_bytes)
+        || !(1024..=64 * 1024 * 1024).contains(&config.protocol.max_sync_response_bytes)
+    {
+        return Err(
+            "CONFIGURATION ERROR: protocol response limits must be between 1024 bytes and 64 MiB"
+                .to_string(),
+        );
+    }
     if config.retry.max_network_attempts == 0 {
         return Err("CONFIGURATION ERROR: max network attempts must be greater than zero".into());
     }

@@ -391,6 +391,8 @@ upstream_base_url = "https://toml.example/v1"
 active_proxy_count = 1
 rate_limit = 3
 min_reasoning_stream_tokens = 2048
+max_sse_line_bytes = 131072
+max_sync_response_bytes = 2097152
 search_max_results = 4
 search_timeout_secs = 12
 tavily_url = "https://toml-search.example/tavily"
@@ -405,6 +407,8 @@ primary_proxies = ["socks5://127.0.0.1:40001"]
     env::set_var("BRIDGE_ACTIVE_PROXY_COUNT", "2");
     env::set_var("BRIDGE_RATE_LIMIT", "7");
     env::set_var("BRIDGE_MIN_REASONING_STREAM_TOKENS", "4096");
+    env::set_var("BRIDGE_MAX_SSE_LINE_BYTES", "65536");
+    env::set_var("BRIDGE_MAX_SYNC_RESPONSE_BYTES", "1048576");
     env::set_var("BRIDGE_SEARCH_MAX_RESULTS", "6");
     env::set_var("BRIDGE_SEARCH_TIMEOUT_SECS", "9");
     env::set_var("TAVILY_API_URL", "https://env-search.example/tavily");
@@ -419,6 +423,8 @@ primary_proxies = ["socks5://127.0.0.1:40001"]
     assert_eq!(config.egress.active_proxy_count, 2);
     assert_eq!(config.observability.max_concurrent_requests, Some(7));
     assert_eq!(config.protocol.min_reasoning_stream_tokens, 4096);
+    assert_eq!(config.protocol.max_sse_line_bytes, 65_536);
+    assert_eq!(config.protocol.max_sync_response_bytes, 1_048_576);
     assert_eq!(config.search.max_results, 6);
     assert_eq!(
         config.search.request_timeout,
@@ -435,6 +441,8 @@ primary_proxies = ["socks5://127.0.0.1:40001"]
         "BRIDGE_ACTIVE_PROXY_COUNT",
         "BRIDGE_RATE_LIMIT",
         "BRIDGE_MIN_REASONING_STREAM_TOKENS",
+        "BRIDGE_MAX_SSE_LINE_BYTES",
+        "BRIDGE_MAX_SYNC_RESPONSE_BYTES",
         "BRIDGE_SEARCH_MAX_RESULTS",
         "BRIDGE_SEARCH_TIMEOUT_SECS",
         "TAVILY_API_URL",

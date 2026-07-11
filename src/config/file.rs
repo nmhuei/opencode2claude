@@ -69,6 +69,8 @@ pub struct TomlConfig {
     // Runtime policy.
     pub rate_limit: Option<usize>,
     pub min_reasoning_stream_tokens: Option<u32>,
+    pub max_sse_line_bytes: Option<usize>,
+    pub max_sync_response_bytes: Option<usize>,
     pub upstream_base_url: Option<String>,
     pub model_fallbacks: Option<Vec<String>>,
     pub enable_default_fallbacks: Option<bool>,

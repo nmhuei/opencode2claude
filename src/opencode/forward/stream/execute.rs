@@ -159,8 +159,15 @@ pub async fn forward_to_llm_stream(
                 }
 
                 let mut bytes_stream = res.bytes_stream();
-                let mut line_buffer = Vec::new();
+                let max_sse_line_bytes = state_clone.config.protocol.max_sse_line_bytes;
+                let mut line_buffer = Vec::with_capacity(
+                    state_clone
+                        .config
+                        .stream_buffer_size
+                        .min(max_sse_line_bytes),
+                );
                 let mut stream_done = false;
+                let mut client_cancelled = false;
 
                 let mut ctx = StreamContext::new(is_compact);
 
@@ -175,7 +182,18 @@ pub async fn forward_to_llm_stream(
                     ctx.message_started = true;
                 }
 
-                while let Some(chunk_res) = bytes_stream.next().await {
+                loop {
+                    let next_chunk = tokio::select! {
+                        biased;
+                        _ = cancel_token_spawn.cancelled() => {
+                            client_cancelled = true;
+                            None
+                        }
+                        chunk = bytes_stream.next() => chunk,
+                    };
+                    let Some(chunk_res) = next_chunk else {
+                        break;
+                    };
                     let chunk = match chunk_res {
                         Ok(c) => c,
                         Err(e) => {
@@ -185,6 +203,26 @@ pub async fn forward_to_llm_stream(
                         }
                     };
                     line_buffer.extend_from_slice(&chunk);
+                    if line_buffer.len() > max_sse_line_bytes {
+                        error!(
+                            current_bytes = line_buffer.len(),
+                            max_bytes = max_sse_line_bytes,
+                            "Upstream SSE line exceeded configured byte limit"
+                        );
+                        let error_ev = Event::default()
+                            .event("error")
+                            .json_data(serde_json::json!({
+                                "type": "error",
+                                "error": {
+                                    "type": "api_error",
+                                    "message": "Upstream SSE line exceeded configured byte limit"
+                                }
+                            }))
+                            .unwrap_or_else(|_| Event::default().data("{}"));
+                        let _ = send_sse(&tx, error_ev).await;
+                        ctx.stream_failed = true;
+                        break;
+                    }
 
                     while let Some(pos) = line_buffer.iter().position(|&b| b == b'\n') {
                         let line_bytes = line_buffer.drain(..pos + 1).collect::<Vec<u8>>();
@@ -207,6 +245,11 @@ pub async fn forward_to_llm_stream(
                     if stream_done {
                         break;
                     }
+                }
+
+                if client_cancelled {
+                    info!("client disconnected; upstream stream dropped immediately");
+                    break;
                 }
 
                 // Do not drop a final SSE line if upstream closes without trailing newline.

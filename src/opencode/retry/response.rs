@@ -3,7 +3,6 @@
 use crate::proxy_pool::EgressLease;
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
-use serde::de::DeserializeOwned;
 use std::pin::Pin;
 
 #[derive(Debug)]
@@ -25,12 +24,6 @@ impl LeasedResponse {
         let Self { response, lease } = self;
         let _lease = lease;
         response.text().await
-    }
-
-    pub async fn json<T: DeserializeOwned>(self) -> Result<T, reqwest::Error> {
-        let Self { response, lease } = self;
-        let _lease = lease;
-        response.json().await
     }
 
     pub fn bytes_stream(

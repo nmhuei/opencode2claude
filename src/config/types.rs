@@ -172,6 +172,8 @@ pub struct ObservabilityConfig {
 #[derive(Debug, Clone)]
 pub struct ProtocolConfig {
     pub min_reasoning_stream_tokens: u32,
+    pub max_sse_line_bytes: usize,
+    pub max_sync_response_bytes: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -283,6 +285,8 @@ impl Default for BridgeConfig {
             },
             protocol: ProtocolConfig {
                 min_reasoning_stream_tokens: 1024,
+                max_sse_line_bytes: 256 * 1024,
+                max_sync_response_bytes: 4 * 1024 * 1024,
             },
             search: SearchConfig {
                 max_results: 5,

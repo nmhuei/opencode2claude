@@ -1,0 +1,40 @@
+Phase 06 protocol conformance evidence
+Date: 2026-07-11
+Branch: completion/full-repository-20260711
+
+Commands:
+  cargo fmt --all -- --check
+  cargo check --all-targets
+  cargo clippy --all-targets -- -D warnings
+  cargo test --all-targets
+  cargo build --bins
+  timeout 180 bash tests/cli_e2e.sh debug
+
+Results:
+  Rust unit tests: 275 passed, 0 failed, 0 ignored
+  Fast HTTP/dashboard tests: 81 passed, 0 failed
+  Black-box process tests: 18 passed, 0 failed
+  Protocol conformance tests: 10 passed, 0 failed
+  Deterministic CLI E2E: 41 passed, 0 failed
+
+Protocol fixtures cover:
+  - Anthropic sync reasoning/text/usage response mapping
+  - native sync tool calls
+  - DSML sync tool calls
+  - fragmented UTF-8 SSE
+  - reasoning then text block ordering
+  - fragmented native tool arguments
+  - malformed SSE lines
+  - duplicate [DONE]
+  - premature EOF finalization
+  - bounded sync response bodies
+  - bounded SSE line size
+  - downstream disconnect cancelling stalled upstream body
+
+Configured response limits:
+  BRIDGE_MAX_SSE_LINE_BYTES=262144
+  BRIDGE_MAX_SYNC_RESPONSE_BYTES=4194304
+
+Conclusion:
+  The production router and real reqwest HTTP path satisfy the documented
+  sync/stream protocol contracts against deterministic local upstream fixtures.

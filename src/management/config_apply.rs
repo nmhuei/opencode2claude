@@ -43,6 +43,8 @@ const KNOWN_ROOT_KEYS: &[&str] = &[
     "csrf_enabled",
     "rate_limit",
     "min_reasoning_stream_tokens",
+    "max_sse_line_bytes",
+    "max_sync_response_bytes",
     "upstream_base_url",
     "model_fallbacks",
     "enable_default_fallbacks",
@@ -258,6 +260,12 @@ fn validate_document(value: &toml::Value) -> Result<(), ManagementError> {
     }
     if cfg.stream_buffer_size == Some(0)
         || cfg.channel_capacity == Some(0)
+        || cfg
+            .max_sse_line_bytes
+            .is_some_and(|value| !(1024..=64 * 1024 * 1024).contains(&value))
+        || cfg
+            .max_sync_response_bytes
+            .is_some_and(|value| !(1024..=64 * 1024 * 1024).contains(&value))
         || cfg.max_search_loops == Some(0)
         || cfg.search_max_results == Some(0)
         || cfg.search_max_snippet_chars == Some(0)

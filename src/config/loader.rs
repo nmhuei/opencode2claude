@@ -174,6 +174,12 @@ pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
             })
             .filter(|value| *value > 0)
             .unwrap_or(1024);
+    resolved.protocol.max_sse_line_bytes = env_parse("BRIDGE_MAX_SSE_LINE_BYTES")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.max_sse_line_bytes))
+        .unwrap_or(256 * 1024);
+    resolved.protocol.max_sync_response_bytes = env_parse("BRIDGE_MAX_SYNC_RESPONSE_BYTES")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.max_sync_response_bytes))
+        .unwrap_or(4 * 1024 * 1024);
 
     resolved.search.max_results = env_parse("BRIDGE_SEARCH_MAX_RESULTS")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.search_max_results))

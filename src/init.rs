@@ -50,6 +50,11 @@ schema_version = 1
 # rate_limit = 10
 # min_reasoning_stream_tokens = 1024
 
+# Upstream protocol response bounds. These limit data received from the LLM
+# provider, not the incoming client request body.
+# max_sse_line_bytes = 262144
+# max_sync_response_bytes = 4194304
+
 # Max web search tool-call loops
 # max_search_loops = 5
 

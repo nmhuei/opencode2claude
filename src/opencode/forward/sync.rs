@@ -1,6 +1,6 @@
 //! Non-streaming upstream forwarding.
 
-use super::common::{get_correct_tool_name, inject_search_results};
+use super::common::{get_correct_tool_name, inject_search_results, read_bounded_body};
 use crate::error::BridgeError;
 use crate::handlers::MessagesRequest;
 use crate::opencode::mapper::{
@@ -40,14 +40,17 @@ pub async fn forward_to_llm_sync(
         info!("Forwarding sync request for model {}", model);
 
         let res = execute_with_warp_retry(state, &api_key, &openai_req).await?;
+        let status = res.status();
+        let body = read_bounded_body(res, state.config.protocol.max_sync_response_bytes).await?;
 
-        if !res.status().is_success() {
-            let status = res.status();
-            let body = res.text().await.unwrap_or_default();
+        if !status.is_success() {
             error!(
                 "Upstream API returned status {}: {} (truncated)",
                 status,
-                body.chars().take(300).collect::<String>()
+                String::from_utf8_lossy(&body)
+                    .chars()
+                    .take(300)
+                    .collect::<String>()
             );
             return Err(BridgeError::UpstreamError(format!(
                 "Upstream returned status {}",
@@ -55,9 +58,7 @@ pub async fn forward_to_llm_sync(
             )));
         }
 
-        let openai_resp: OpenAiResponse = res
-            .json()
-            .await
+        let openai_resp: OpenAiResponse = serde_json::from_slice(&body)
             .map_err(|e| BridgeError::UpstreamError(format!("Failed to parse response: {}", e)))?;
 
         let choice = openai_resp.choices.first().ok_or_else(|| {
