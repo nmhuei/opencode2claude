@@ -3,7 +3,7 @@
 use crate::config::BridgeConfig;
 use crate::dashboard::DashboardEvent;
 use crate::opencode::search::SearchClient;
-use crate::proxy_pool::{health_monitor, process_restart_queue, ProxyPool};
+use crate::proxy_pool::{health_monitor, identity_monitor, process_restart_queue, ProxyPool};
 use reqwest::Client;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
@@ -58,8 +58,12 @@ impl AppState {
         }
 
         let proxy_pool = if !all_urls.is_empty() {
-            let pool =
-                ProxyPool::new_with_active_count(&all_urls, config.egress.active_proxy_count);
+            let pool = ProxyPool::new_with_egress_policy(
+                &all_urls,
+                config.egress.active_proxy_count,
+                config.egress.require_verified_exit_ip,
+                config.egress.identity_ttl,
+            );
             // Spawn background tasks for pool management
             if !pool.proxies.is_empty() {
                 let pool_arc = Arc::new(RwLock::new(pool));
@@ -75,6 +79,17 @@ impl AppState {
                     process_restart_queue(rq_pool).await;
                 });
                 info!("Proxy pool restart queue processor spawned.");
+
+                if !config.egress.identity_endpoints.is_empty() {
+                    let identity_pool = pool_arc.clone();
+                    let identity_endpoints = config.egress.identity_endpoints.clone();
+                    let identity_interval = config.egress.health_interval;
+                    tokio::spawn(async move {
+                        identity_monitor(identity_pool, identity_endpoints, identity_interval)
+                            .await;
+                    });
+                    info!("Proxy pool exit-identity monitor spawned.");
+                }
 
                 pool_arc
             } else {

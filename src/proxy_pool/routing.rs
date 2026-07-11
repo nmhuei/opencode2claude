@@ -54,7 +54,12 @@ impl ProxyPool {
         let assigned = self.rendezvous_assigned_primary(routing_key);
         if let Some(index) = assigned.filter(|index| Some(*index) != excluded) {
             let node = &self.proxies[index];
-            if is_normal_route(node, Instant::now()) {
+            if is_normal_route(
+                node,
+                Instant::now(),
+                self.require_verified_exit_ip,
+                self.identity_ttl,
+            ) {
                 return Some(proxy_selection(node, index));
             }
             info!(
@@ -125,8 +130,18 @@ impl ProxyPool {
                     && node.role == role
                     && (role != EgressRole::Primary || node.routing_enabled)
                     && match kind {
-                        CandidateKind::Normal => is_normal_route(node, now),
-                        CandidateKind::Probe => is_probe_route(node, now),
+                        CandidateKind::Normal => is_normal_route(
+                            node,
+                            now,
+                            self.require_verified_exit_ip,
+                            self.identity_ttl,
+                        ),
+                        CandidateKind::Probe => is_probe_route(
+                            node,
+                            now,
+                            self.require_verified_exit_ip,
+                            self.identity_ttl,
+                        ),
                     }
             })
             .max_by_key(|(_, node)| {
@@ -157,15 +172,37 @@ enum CandidateKind {
     Probe,
 }
 
-fn is_normal_route(node: &ProxyEntry, now: Instant) -> bool {
+fn is_normal_route(
+    node: &ProxyEntry,
+    now: Instant,
+    require_verified_exit_ip: bool,
+    identity_ttl: std::time::Duration,
+) -> bool {
     node.health == HealthState::Healthy
         && node.circuit == CircuitState::Closed
         && !node.is_duplicate()
+        && (!require_verified_exit_ip
+            || node
+                .exit_identity
+                .as_ref()
+                .is_some_and(|identity| identity.is_fresh(identity_ttl)))
         && !matches!(node.circuit, CircuitState::Open { until } if now < until)
 }
 
-fn is_probe_route(node: &ProxyEntry, now: Instant) -> bool {
-    if node.is_duplicate() || node.active_request_count() > 0 {
+fn is_probe_route(
+    node: &ProxyEntry,
+    now: Instant,
+    require_verified_exit_ip: bool,
+    identity_ttl: std::time::Duration,
+) -> bool {
+    if node.is_duplicate()
+        || node.active_request_count() > 0
+        || (require_verified_exit_ip
+            && !node
+                .exit_identity
+                .as_ref()
+                .is_some_and(|identity| identity.is_fresh(identity_ttl)))
+    {
         return false;
     }
     node.may_receive_probe_traffic()

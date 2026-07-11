@@ -58,16 +58,16 @@ const CONFIG_TEMPLATE: &str = r##"# OpenCode2API configuration
 
 # Primary proxies (managed, normal traffic)
 # primary_proxies = [
-#     "socks5://127.0.0.1:40001",
-#     "socks5://127.0.0.1:40002",
-#     "socks5://127.0.0.1:40003",
+#     "socks5h://127.0.0.1:40001",
+#     "socks5h://127.0.0.1:40002",
+#     "socks5h://127.0.0.1:40003",
 # ]
 
 # Warm-standby proxies (protected failover only). The application never
 # restarts, stops, purges, or recreates these nodes.
 # warm_standby_proxies = [
-#     "socks5://127.0.0.1:40004",
-#     "socks5://127.0.0.1:40005",
+#     "socks5h://127.0.0.1:40004",
+#     "socks5h://127.0.0.1:40005",
 # ]
 
 # Exit identity verification policy.

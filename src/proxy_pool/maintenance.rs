@@ -209,6 +209,8 @@ async fn restart_container(index: usize, pool: Arc<TokioRwLock<ProxyPool>>) {
         node.health = HealthState::Recovering;
         node.circuit = CircuitState::HalfOpen;
         node.restart_attempts = restart_attempt;
+        node.exit_identity = None;
+        node.duplicate_of = None;
     }
 
     let remove = tokio::process::Command::new("docker")

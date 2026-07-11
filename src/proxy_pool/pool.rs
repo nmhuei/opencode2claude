@@ -14,11 +14,36 @@ impl ProxyPool {
             .iter()
             .filter(|url| !is_protected_proxy_port(extract_port(url)))
             .count();
-        Self::new_with_active_count(proxy_urls, primary_count)
+        Self::new_with_policy(proxy_urls, primary_count, false)
     }
 
     pub fn new_with_active_count(proxy_urls: &[String], requested_active_count: usize) -> Self {
-        let mut proxies: Vec<ProxyEntry> = proxy_urls.iter().filter_map(build_entry).collect();
+        Self::new_with_policy(proxy_urls, requested_active_count, false)
+    }
+
+    pub fn new_with_policy(
+        proxy_urls: &[String],
+        requested_active_count: usize,
+        require_verified_exit_ip: bool,
+    ) -> Self {
+        Self::new_with_egress_policy(
+            proxy_urls,
+            requested_active_count,
+            require_verified_exit_ip,
+            Duration::from_secs(300),
+        )
+    }
+
+    pub fn new_with_egress_policy(
+        proxy_urls: &[String],
+        requested_active_count: usize,
+        require_verified_exit_ip: bool,
+        identity_ttl: Duration,
+    ) -> Self {
+        let mut proxies: Vec<ProxyEntry> = proxy_urls
+            .iter()
+            .filter_map(|url| build_entry(url, require_verified_exit_ip))
+            .collect();
         let primary_count = proxies
             .iter()
             .filter(|proxy| proxy.role == EgressRole::Primary)
@@ -45,6 +70,8 @@ impl ProxyPool {
             proxies,
             active_count,
             restart_queue: Vec::new(),
+            require_verified_exit_ip,
+            identity_ttl,
         }
     }
 
@@ -98,7 +125,7 @@ impl ProxyPool {
     }
 }
 
-fn build_entry(url: &String) -> Option<ProxyEntry> {
+fn build_entry(url: &String, require_verified_exit_ip: bool) -> Option<ProxyEntry> {
     let proxy = match reqwest::Proxy::all(url) {
         Ok(proxy) => proxy,
         Err(error) => {
@@ -139,7 +166,11 @@ fn build_entry(url: &String) -> Option<ProxyEntry> {
             LifecyclePolicy::Protected
         },
         routing_enabled: role == EgressRole::Primary,
-        health: HealthState::Healthy,
+        health: if require_verified_exit_ip {
+            HealthState::Unknown
+        } else {
+            HealthState::Healthy
+        },
         circuit: CircuitState::Closed,
         consecutive_failures: 0,
         consecutive_successes: 0,

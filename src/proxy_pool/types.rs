@@ -72,6 +72,16 @@ pub struct ExitIdentity {
     pub verified_at_unix_secs: u64,
 }
 
+impl ExitIdentity {
+    pub fn is_fresh(&self, ttl: std::time::Duration) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        now.saturating_sub(self.verified_at_unix_secs) <= ttl.as_secs()
+    }
+}
+
 #[derive(Debug)]
 pub struct ProxyEntry {
     pub id: String,
@@ -161,6 +171,8 @@ pub struct ProxyPool {
     pub proxies: Vec<ProxyEntry>,
     pub active_count: usize,
     pub restart_queue: Vec<usize>,
+    pub require_verified_exit_ip: bool,
+    pub identity_ttl: std::time::Duration,
 }
 
 #[derive(Debug, Clone, Serialize)]

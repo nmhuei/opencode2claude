@@ -25,8 +25,8 @@ pub const MSG_ID_SHELL: &str = "msg_local_shell";
 
 const DEFAULT_SHELL_ALLOWLIST: &str = "git,ls,pwd,cat,find,grep,echo,wc,head,tail,diff";
 const DEFAULT_PRIMARY_PROXIES: &str =
-    "socks5://127.0.0.1:40001,socks5://127.0.0.1:40002,socks5://127.0.0.1:40003";
-const DEFAULT_WARM_STANDBY_PROXIES: &str = "socks5://127.0.0.1:40004,socks5://127.0.0.1:40005";
+    "socks5h://127.0.0.1:40001,socks5h://127.0.0.1:40002,socks5h://127.0.0.1:40003";
+const DEFAULT_WARM_STANDBY_PROXIES: &str = "socks5h://127.0.0.1:40004,socks5h://127.0.0.1:40005";
 
 impl BridgeConfig {
     pub fn from_env_and_cli(overrides: CliOverrides) -> Self {

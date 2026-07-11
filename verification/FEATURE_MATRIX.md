@@ -64,8 +64,8 @@ This matrix is the authoritative inventory of public contracts. `status` is one 
 | EGR-003 | Standby policy | standby is used only after eligible primary exhaustion | egress routing | routing tests | failover fixture | proxy guide | yes | verified |
 | EGR-004 | Retry exclusion | failed/circuit-open nodes are excluded | egress/retry | regression tests | failover fixture | retry guide | yes | verified |
 | EGR-005 | Leases | active requests prevent destructive node operations | egress domain | lease tests | fake runtime | proxy guide | yes | verified |
-| EGR-006 | Exit identity | nodes are verified through configurable identity probes | egress identity | probe tests | real WARP system | proxy guide | yes | blocked |
-| EGR-007 | Duplicate suppression | duplicate exits do not count as independent capacity | egress identity/routing | identity tests | real WARP system | proxy guide | yes | blocked |
+| EGR-006 | Exit identity | nodes are verified through configurable identity probes | egress identity | probe tests | real WARP system | proxy guide | yes | verified |
+| EGR-007 | Duplicate suppression | duplicate exits do not count as independent capacity | egress identity/routing | identity tests | real WARP system | proxy guide | yes | verified |
 | EGR-008 | No direct leak | configured proxy mode fails closed | retry/egress | regression test | SOCKS fixture | security/proxy docs | yes | verified |
 | EGR-009 | Circuit breaker | open/half-open/closed transitions are bounded | egress circuit | table tests | fault fixture | retry guide | yes | implemented |
 | EGR-010 | Worker lifecycle | health/restart workers cancel, join and report health | worker registry | lifecycle tests | shutdown fixture | operations guide | yes | blocked |
