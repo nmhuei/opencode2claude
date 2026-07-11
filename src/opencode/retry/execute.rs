@@ -201,7 +201,7 @@ pub(crate) async fn execute_with_warp_retry(
                             max_retries,
                             "direct upstream network error; reconnecting host WARP"
                         );
-                        reconnect_warp(&state.config.runtime.warp_cli_binary).await;
+                        reconnect_warp(state.warp_controller.as_ref()).await;
                     }
                     sleep_backoff(state, retry_count, route.proxy_index).await;
                     continue;
@@ -287,7 +287,7 @@ async fn apply_rate_limit_penalty(
             pool.mark_rate_limited_adaptive(index, retry_count);
         }
     } else {
-        reconnect_warp(&state.config.runtime.warp_cli_binary).await;
+        reconnect_warp(state.warp_controller.as_ref()).await;
     }
 }
 

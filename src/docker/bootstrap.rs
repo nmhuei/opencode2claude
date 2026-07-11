@@ -1,221 +1,240 @@
 //! Interactive bootstrap of the local WARP proxy pool.
 
 use super::health::verify_proxy;
-use super::lifecycle::{ensure_container, is_docker_available, ContainerSetupState};
-use super::types::{container_name, DockerResult};
+use super::lifecycle::{default_runtime, ensure_proxy};
+use super::types::{ContainerRuntime, ContainerSetupState, DockerResult, ProxySpec};
+use crate::config::BridgeConfig;
+use futures_util::future::join_all;
+use std::time::Duration;
 use yansi::Paint;
 
 pub async fn bootstrap_proxy_pool(quiet: bool) -> DockerResult<(String, String)> {
-    if !is_docker_available().await {
+    let config = BridgeConfig::from_env_and_cli(Default::default());
+    let runtime = default_runtime();
+    bootstrap_proxy_pool_with_runtime(&runtime, &config, quiet).await
+}
+
+pub async fn bootstrap_proxy_pool_with_runtime(
+    runtime: &dyn ContainerRuntime,
+    config: &BridgeConfig,
+    quiet: bool,
+) -> DockerResult<(String, String)> {
+    if runtime.daemon_version().await.is_err() {
         if !quiet {
             println!(
-                "{} Docker is not available. Skipping proxy pool bootstrap.",
+                "{} Docker is not available; proxy bootstrap skipped.",
                 "ℹ".cyan()
             );
         }
         return Ok((String::new(), String::new()));
     }
 
-    if !quiet {
-        println!(
-            "{} Docker is running. Automating SOCKS5 proxy pool setup for multi-agent support...",
-            "✓".green().bold()
-        );
-    }
+    let primary_ports = [40001_u16, 40002, 40003];
+    let standby_ports = [40004_u16, 40005];
+    let specs = primary_ports
+        .iter()
+        .chain(standby_ports.iter())
+        .map(|port| ProxySpec::new(*port, config.runtime.warp_image.clone()))
+        .collect::<DockerResult<Vec<_>>>()?;
 
-    let primary_ports = [40001, 40002, 40003];
-    let standby_ports = [40004, 40005];
-    let all_ports = [&primary_ports[..], &standby_ports[..]].concat();
+    let setup_results = join_all(specs.iter().map(|spec| async move {
+        (
+            spec.port,
+            spec.is_protected(),
+            ensure_proxy(runtime, spec).await,
+        )
+    }))
+    .await;
 
-    let mut setup_handles = Vec::new();
-    for &port in &all_ports {
-        setup_handles.push(tokio::spawn(
-            async move { (port, ensure_container(port).await) },
-        ));
-    }
-
-    let mut setup_results = Vec::new();
-    for handle in setup_handles {
-        if let Ok(res) = handle.await {
-            setup_results.push(res);
-        }
-    }
-
-    let mut new_count = 0;
-    let mut migrated_count = 0;
-    let mut resumed_count = 0;
-    let mut running_count = 0;
-
-    for (port, res) in &setup_results {
-        match res {
-            Ok(state) => match state {
-                ContainerSetupState::New => new_count += 1,
-                ContainerSetupState::Migrated => migrated_count += 1,
-                ContainerSetupState::Resumed => resumed_count += 1,
-                ContainerSetupState::Running => running_count += 1,
-            },
-            Err(e) => {
+    let mut registration_needed = 0usize;
+    for (port, protected, result) in &setup_results {
+        match result {
+            Ok(ContainerSetupState::New | ContainerSetupState::Migrated) => {
+                registration_needed += 1;
+            }
+            Ok(ContainerSetupState::ProtectedStopped) => {
                 if !quiet {
                     eprintln!(
-                        "{} Failed to setup container on port {}: {}",
-                        "✗".red().bold(),
-                        port,
-                        e
+                        "{} protected standby port {} exists but is stopped; no automatic lifecycle action was taken",
+                        "⚠".yellow(),
+                        port
                     );
                 }
             }
-        }
-    }
-
-    if !quiet {
-        if running_count > 0 {
-            println!(
-                "  {} {} container(s) already running",
-                "✓".green(),
-                running_count
-            );
-        }
-        if resumed_count > 0 {
-            println!(
-                "  {} Resumed {} stopped container(s) (WARP cached — instant start)",
-                "✓".green(),
-                resumed_count
-            );
-        }
-        if migrated_count > 0 {
-            println!(
-                "  {} Migrated {} container(s) to volume-cached mode (one-time WARP registration)",
-                "ℹ".yellow(),
-                migrated_count
-            );
-        }
-        if new_count > 0 {
-            println!(
-                "  {} Created {} new container(s) (WARP registration required)",
-                "ℹ".yellow(),
-                new_count
-            );
-        }
-    }
-
-    let needs_registration = new_count + migrated_count;
-    if needs_registration > 0 {
-        if !quiet {
-            println!(
-                "  {} Waiting 20 seconds for Cloudflare WARP registration ({} new/migrated)...",
-                "ℹ".yellow(),
-                needs_registration
-            );
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(20)).await;
-    } else if resumed_count > 0 && !quiet {
-        println!("  Cached WARP config detected — skipping wait...");
-    }
-
-    // Helper closure to verify proxies in parallel
-    let verify_all = |ports_to_verify: Vec<u16>,
-                      max_attempts: usize,
-                      sleep_secs: u64,
-                      label: &'static str| async move {
-        if !quiet {
-            println!(
-                "  {} Verifying {} proxy(ies) in parallel{}...",
-                "::".blue(),
-                ports_to_verify.len(),
-                label
-            );
-        }
-
-        let mut verify_handles = Vec::new();
-        for port in ports_to_verify {
-            verify_handles.push(tokio::spawn(async move {
-                let mut ok = false;
-                for _ in 0..max_attempts {
-                    if verify_proxy(port).await {
-                        ok = true;
-                        break;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
+            Ok(ContainerSetupState::ProtectedLegacy) => {
+                if !quiet {
+                    eprintln!(
+                        "{} protected standby port {} has legacy configuration; no automatic migration was attempted",
+                        "⚠".yellow(),
+                        port
+                    );
                 }
-                (port, ok)
-            }));
-        }
-
-        let mut failed = Vec::new();
-        for handle in verify_handles {
-            if let Ok((port, ok)) = handle.await {
-                let c_name = container_name(port);
-                if ok {
-                    if !quiet {
-                        println!("  {} {} (port {}) — Online", "✓".green(), c_name, port);
-                    }
-                } else {
-                    if !quiet {
-                        println!("  {} {} (port {}) — Failed", "✗".red(), c_name, port);
-                    }
-                    failed.push(port);
+            }
+            Ok(_) => {}
+            Err(error) => {
+                if !quiet {
+                    eprintln!("{} proxy port {} setup failed: {}", "✗".red(), port, error);
+                }
+                if *protected {
+                    // Protected standby failures are informational; never recover
+                    // them through restart/recreate from bootstrap.
+                    continue;
                 }
             }
         }
-        failed
-    };
-
-    let failed_ports = verify_all(all_ports.clone(), 15, 2, "").await;
-
-    let final_failed_ports = if !failed_ports.is_empty() {
-        if !quiet {
-            println!(
-                "\n  {} Recovering {} failed proxy(ies) — restarting containers...",
-                "ℹ".yellow(),
-                failed_ports.len()
-            );
-        }
-
-        let mut restart_handles = Vec::new();
-        for &port in &failed_ports {
-            let name = container_name(port);
-            restart_handles.push(tokio::spawn(async move {
-                let _ = tokio::process::Command::new("docker")
-                    .args(["restart", &name])
-                    .output()
-                    .await;
-            }));
-        }
-        for h in restart_handles {
-            let _ = h.await;
-        }
-
-        if !quiet {
-            println!("  Waiting 15 seconds for WARP reconnection...");
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-
-        let retry_ports = failed_ports.clone();
-        verify_all(retry_ports, 10, 3, " (retry)").await
-    } else {
-        failed_ports
-    };
-
-    if !quiet && final_failed_ports.is_empty() {
-        println!("  {} All proxies verified and online!", "✓".green());
-    } else if !quiet && !final_failed_ports.is_empty() {
-        println!(
-            "  {} {} proxy(ies) still offline. Bridge will route around them.",
-            "⚠".yellow(),
-            final_failed_ports.len()
-        );
     }
 
-    let primary_str = primary_ports
-        .iter()
-        .map(|p| format!("socks5://127.0.0.1:{}", p))
-        .collect::<Vec<_>>()
-        .join(",");
-    let standby_str = standby_ports
-        .iter()
-        .map(|p| format!("socks5://127.0.0.1:{}", p))
-        .collect::<Vec<_>>()
-        .join(",");
+    if registration_needed > 0 {
+        if !quiet {
+            println!(
+                "{} waiting for {} new/migrated WARP registration(s)...",
+                "ℹ".yellow(),
+                registration_needed
+            );
+        }
+        tokio::time::sleep(Duration::from_secs(20)).await;
+    }
 
-    Ok((primary_str, standby_str))
+    let verification = join_all(specs.iter().map(|spec| async move {
+        let mut online = false;
+        for _ in 0..15 {
+            if verify_proxy(spec.port).await {
+                online = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        (spec, online)
+    }))
+    .await;
+
+    for (spec, online) in verification {
+        if online {
+            if !quiet {
+                println!("{} {} (port {}) online", "✓".green(), spec.name, spec.port);
+            }
+        } else if spec.is_protected() {
+            if !quiet {
+                eprintln!(
+                    "{} protected standby {} is offline; no restart attempted",
+                    "⚠".yellow(),
+                    spec.name
+                );
+            }
+        } else {
+            if !quiet {
+                eprintln!(
+                    "{} restarting failed managed primary {}",
+                    "⚠".yellow(),
+                    spec.name
+                );
+            }
+            runtime.restart_managed(spec).await?;
+        }
+    }
+
+    let primary = primary_ports
+        .iter()
+        .map(|port| format!("socks5h://127.0.0.1:{port}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let standby = standby_ports
+        .iter()
+        .map(|port| format!("socks5h://127.0.0.1:{port}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    Ok((primary, standby))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Debug, Default)]
+    struct FakeRuntime {
+        states: HashMap<u16, super::super::types::ContainerState>,
+        mutations: Arc<Mutex<Vec<(u16, &'static str)>>>,
+    }
+
+    #[async_trait]
+    impl ContainerRuntime for FakeRuntime {
+        async fn daemon_version(&self) -> DockerResult<String> {
+            Ok("test".into())
+        }
+        async fn inspect(
+            &self,
+            spec: &ProxySpec,
+        ) -> DockerResult<super::super::types::ContainerState> {
+            Ok(self.states.get(&spec.port).cloned().unwrap_or(
+                super::super::types::ContainerState {
+                    exists: true,
+                    running: true,
+                    has_expected_volume: true,
+                },
+            ))
+        }
+        async fn create_missing(&self, spec: &ProxySpec) -> DockerResult<()> {
+            self.mutations.lock().unwrap().push((spec.port, "create"));
+            Ok(())
+        }
+        async fn recreate_managed(&self, spec: &ProxySpec) -> DockerResult<()> {
+            self.mutations.lock().unwrap().push((spec.port, "recreate"));
+            Ok(())
+        }
+        async fn remove_managed(&self, spec: &ProxySpec) -> DockerResult<()> {
+            self.mutations.lock().unwrap().push((spec.port, "remove"));
+            Ok(())
+        }
+        async fn restart_managed(&self, spec: &ProxySpec) -> DockerResult<()> {
+            self.mutations.lock().unwrap().push((spec.port, "restart"));
+            Ok(())
+        }
+        async fn stop_managed(&self, spec: &ProxySpec) -> DockerResult<()> {
+            self.mutations.lock().unwrap().push((spec.port, "stop"));
+            Ok(())
+        }
+        async fn start_managed(&self, spec: &ProxySpec) -> DockerResult<()> {
+            self.mutations.lock().unwrap().push((spec.port, "start"));
+            Ok(())
+        }
+        async fn logs(&self, _spec: &ProxySpec, _tail: usize) -> DockerResult<String> {
+            Ok(String::new())
+        }
+        async fn list(
+            &self,
+            _specs: &[ProxySpec],
+        ) -> DockerResult<Vec<super::super::types::ContainerSummary>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn protected_stopped_or_legacy_nodes_are_not_mutated() {
+        let mut runtime = FakeRuntime::default();
+        runtime.states.insert(
+            40004,
+            super::super::types::ContainerState {
+                exists: true,
+                running: false,
+                has_expected_volume: true,
+            },
+        );
+        runtime.states.insert(
+            40005,
+            super::super::types::ContainerState {
+                exists: true,
+                running: true,
+                has_expected_volume: false,
+            },
+        );
+        let config = BridgeConfig::default();
+        for port in [40004_u16, 40005] {
+            let spec = ProxySpec::new(port, config.runtime.warp_image.clone()).unwrap();
+            let _ = ensure_proxy(&runtime, &spec).await.unwrap();
+        }
+        assert!(runtime.mutations.lock().unwrap().is_empty());
+    }
 }

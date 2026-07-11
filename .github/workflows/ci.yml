@@ -21,6 +21,9 @@ jobs:
       - name: Resolved configuration boundary
         run: ./scripts/check_config_boundary.py
 
+      - name: Infrastructure command boundary
+        run: ./scripts/check_infrastructure_boundary.py
+
       - name: Verification (CI profile)
         run: ./scripts/verify.sh all --profile ci
 

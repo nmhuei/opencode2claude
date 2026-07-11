@@ -1,6 +1,7 @@
 //! Egress health, circuit transitions, and managed-primary restart queue.
 
 use super::types::*;
+use crate::docker::{ContainerRuntime, ProxySpec};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock as TokioRwLock;
@@ -120,13 +121,17 @@ fn mark_node_healthy(node: &mut ProxyEntry) {
     node.restart_attempts = 0;
 }
 
-pub async fn process_restart_queue(pool: Arc<TokioRwLock<ProxyPool>>) {
+pub async fn process_restart_queue(
+    pool: Arc<TokioRwLock<ProxyPool>>,
+    runtime: Arc<dyn ContainerRuntime>,
+    warp_image: String,
+) {
     let mut interval = tokio::time::interval(Duration::from_secs(2));
     loop {
         interval.tick().await;
         let indices = pool.write().await.drain_restart_queue();
         for index in indices {
-            restart_container(index, pool.clone()).await;
+            restart_container(index, pool.clone(), runtime.clone(), warp_image.clone()).await;
         }
     }
 }
@@ -175,7 +180,12 @@ pub async fn health_monitor(pool: Arc<TokioRwLock<ProxyPool>>) {
     }
 }
 
-async fn restart_container(index: usize, pool: Arc<TokioRwLock<ProxyPool>>) {
+async fn restart_container(
+    index: usize,
+    pool: Arc<TokioRwLock<ProxyPool>>,
+    runtime: Arc<dyn ContainerRuntime>,
+    warp_image: String,
+) {
     let (port, container_name, restart_attempt) = {
         let guard = pool.read().await;
         if let Err(reason) = guard.can_modify_node(index) {
@@ -213,46 +223,19 @@ async fn restart_container(index: usize, pool: Arc<TokioRwLock<ProxyPool>>) {
         node.duplicate_of = None;
     }
 
-    let remove = tokio::process::Command::new("docker")
-        .args(["rm", "-f", &container_name])
-        .output()
-        .await;
-    if let Ok(output) = &remove {
-        if !output.status.success() {
-            warn!(stderr = %String::from_utf8_lossy(&output.stderr), %container_name, "docker remove returned non-zero");
-        }
-    }
-
-    let run = tokio::process::Command::new("docker")
-        .args([
-            "run",
-            "-d",
-            "--name",
-            &container_name,
-            "--restart",
-            "always",
-            "--cap-add=NET_ADMIN",
-            "--sysctl",
-            "net.ipv4.conf.all.src_valid_mark=1",
-            "-p",
-            &format!("{}:9091", port),
-            "ghcr.io/mon-ius/docker-warp-socks:latest",
-        ])
-        .output()
-        .await;
-
-    match run {
-        Ok(output) if output.status.success() => {}
-        Ok(output) => {
-            error!(stderr = %String::from_utf8_lossy(&output.stderr), %container_name, "failed to recreate managed proxy");
-            apply_restart_failure_shared(&pool, index, restart_attempt).await;
-            return;
-        }
+    let spec = match ProxySpec::new(port, warp_image) {
+        Ok(spec) => spec,
         Err(error) => {
-            error!(%error, %container_name, "docker command failed");
+            error!(%error, %container_name, "invalid managed proxy specification");
             apply_restart_failure_shared(&pool, index, restart_attempt).await;
             return;
         }
+    };
+
+    if let Err(error) = runtime.recreate_managed(&spec).await {
+        error!(%error, %container_name, "container runtime failed to recreate managed proxy");
+        apply_restart_failure_shared(&pool, index, restart_attempt).await;
+        return;
     }
 
     if verify_proxy_socks(port).await {

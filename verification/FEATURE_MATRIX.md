@@ -69,9 +69,9 @@ This matrix is the authoritative inventory of public contracts. `status` is one 
 | EGR-008 | No direct leak | configured proxy mode fails closed | retry/egress | regression test | SOCKS fixture | security/proxy docs | yes | verified |
 | EGR-009 | Circuit breaker | open/half-open/closed transitions are bounded | egress circuit | table tests | fault fixture | retry guide | yes | implemented |
 | EGR-010 | Worker lifecycle | health/restart workers cancel, join and report health | worker registry | lifecycle tests | shutdown fixture | operations guide | yes | blocked |
-| INF-001 | Container runtime adapter | one canonical Docker/WARP spec and injectable runtime | infrastructure/docker | adapter tests | fake/real runtime | deployment guide | yes | partial |
-| INF-002 | Process manager | spawn/probe/terminate validates process identity | infrastructure/supervisor | process tests | OS matrix | operations guide | yes | partial |
-| INF-003 | Atomic file store | config/runtime/update writes are atomic and permissioned | infrastructure/files | file tests | disposable FS | security/upgrade docs | yes | partial |
+| INF-001 | Container runtime adapter | one canonical Docker/WARP spec and injectable runtime | infrastructure/docker | adapter tests | fake/real runtime | deployment guide | yes | verified |
+| INF-002 | Process manager | spawn/probe/terminate validates process identity | infrastructure/supervisor | process tests | OS matrix | operations guide | yes | implemented |
+| INF-003 | Atomic file store | config/runtime/update writes are atomic and permissioned | infrastructure/files | file tests | disposable FS | security/upgrade docs | yes | implemented |
 | INS-001 | Install/uninstall | scripts work in disposable prefix with no leftovers | install scripts | shell tests | container/VM test | install guide | yes | partial |
 | INS-002 | Update/rollback | checksum-verified atomic update restores prior binary on failure | update module | update tests | fixture/system test | upgrade guide | yes | partial |
 | INS-003 | Config migrations | schema version migrations preserve user settings | config migration | migration tests | upgrade fixture | migration guide | yes | blocked |

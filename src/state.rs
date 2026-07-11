@@ -2,6 +2,9 @@
 
 use crate::config::BridgeConfig;
 use crate::dashboard::DashboardEvent;
+use crate::docker::{ContainerRuntime, DockerCliRuntime};
+use crate::infrastructure::file_store::{AtomicFileStore, FileStore};
+use crate::infrastructure::warp::{CliWarpController, WarpController};
 use crate::opencode::search::SearchClient;
 use crate::proxy_pool::{health_monitor, identity_monitor, process_restart_queue, ProxyPool};
 use reqwest::Client;
@@ -26,6 +29,12 @@ pub struct AppState {
     pub rate_limiter: Option<Arc<Semaphore>>,
     /// Thread-safe SOCKS5/HTTP proxy pool for multi-agent support.
     pub proxy_pool: Arc<RwLock<ProxyPool>>,
+    /// Replaceable container runtime used by management and egress workers.
+    pub container_runtime: Arc<dyn ContainerRuntime>,
+    /// Optional host-level WARP controller used only by explicit direct mode.
+    pub warp_controller: Arc<dyn WarpController>,
+    /// Atomic filesystem adapter used by config/runtime management transports.
+    pub file_store: Arc<dyn FileStore>,
     /// Broadcast channel for dashboard SSE events.
     pub event_tx: broadcast::Sender<DashboardEvent>,
     /// Unix timestamp (seconds) when the server started.
@@ -35,6 +44,53 @@ pub struct AppState {
 impl AppState {
     /// Create a new AppState from the given configuration.
     pub fn new(config: BridgeConfig) -> Self {
+        let container_runtime: Arc<dyn ContainerRuntime> =
+            Arc::new(DockerCliRuntime::from_config(&config));
+        let warp_controller: Arc<dyn WarpController> = Arc::new(CliWarpController::new(
+            config.runtime.warp_cli_binary.clone(),
+        ));
+        Self::new_with_infrastructure(
+            config,
+            container_runtime,
+            warp_controller,
+            Arc::new(AtomicFileStore),
+        )
+    }
+
+    pub fn new_with_container_runtime(
+        config: BridgeConfig,
+        container_runtime: Arc<dyn ContainerRuntime>,
+    ) -> Self {
+        let warp_controller: Arc<dyn WarpController> = Arc::new(CliWarpController::new(
+            config.runtime.warp_cli_binary.clone(),
+        ));
+        Self::new_with_infrastructure(
+            config,
+            container_runtime,
+            warp_controller,
+            Arc::new(AtomicFileStore),
+        )
+    }
+
+    pub fn new_with_adapters(
+        config: BridgeConfig,
+        container_runtime: Arc<dyn ContainerRuntime>,
+        warp_controller: Arc<dyn WarpController>,
+    ) -> Self {
+        Self::new_with_infrastructure(
+            config,
+            container_runtime,
+            warp_controller,
+            Arc::new(AtomicFileStore),
+        )
+    }
+
+    pub fn new_with_infrastructure(
+        config: BridgeConfig,
+        container_runtime: Arc<dyn ContainerRuntime>,
+        warp_controller: Arc<dyn WarpController>,
+        file_store: Arc<dyn FileStore>,
+    ) -> Self {
         let http_client = Client::builder()
             .timeout(Duration::from_secs(600))
             .pool_max_idle_per_host(10)
@@ -69,6 +125,8 @@ impl AppState {
                 let pool_arc = Arc::new(RwLock::new(pool));
                 let hc_pool = pool_arc.clone();
                 let rq_pool = pool_arc.clone();
+                let rq_runtime = container_runtime.clone();
+                let rq_image = config.runtime.warp_image.clone();
 
                 tokio::spawn(async move {
                     health_monitor(hc_pool).await;
@@ -76,7 +134,7 @@ impl AppState {
                 info!("Proxy pool health monitor spawned.");
 
                 tokio::spawn(async move {
-                    process_restart_queue(rq_pool).await;
+                    process_restart_queue(rq_pool, rq_runtime, rq_image).await;
                 });
                 info!("Proxy pool restart queue processor spawned.");
 
@@ -116,6 +174,9 @@ impl AppState {
             http_client,
             rate_limiter,
             proxy_pool,
+            container_runtime,
+            warp_controller,
+            file_store,
             event_tx,
             started_at,
         }

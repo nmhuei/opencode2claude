@@ -965,6 +965,7 @@ version = "0.4.2"
 dependencies = [
  "anyhow",
  "async-stream",
+ "async-trait",
  "axum",
  "bytes",
  "clap",

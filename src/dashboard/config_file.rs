@@ -17,13 +17,13 @@ pub async fn handler_config_raw(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     check_admin_token(&state, &headers, None)?;
-    let config_path = state
-        .config
-        .management
-        .config_path
-        .to_string_lossy()
-        .to_string();
-    let raw = std::fs::read_to_string(&config_path).unwrap_or_default();
+    let config_path = &state.config.management.config_path;
+    let raw = state
+        .file_store
+        .read(config_path)
+        .ok()
+        .and_then(|content| String::from_utf8(content).ok())
+        .unwrap_or_default();
     Ok(Json(json!({ "raw": raw })))
 }
 
@@ -80,54 +80,37 @@ pub async fn handler_config_save(
     }
 
     // Read existing config file content
-    let config_path = state
-        .config
-        .management
-        .config_path
-        .to_string_lossy()
-        .to_string();
-    let existing_content = std::fs::read_to_string(&config_path).unwrap_or_default();
+    let config_path = &state.config.management.config_path;
+    let existing_content = state
+        .file_store
+        .read(config_path)
+        .ok()
+        .and_then(|content| String::from_utf8(content).ok())
+        .unwrap_or_default();
 
-    // Merge: incoming overrides existing, existing fills gaps
     let merged = merge_toml_configs(&existing_content, &incoming_toml);
-
-    // Atomic write: write to .tmp, fsync, rename
-    let tmp_path = format!("{}.tmp", config_path);
-
-    match std::fs::write(&tmp_path, merged.as_bytes()) {
+    match state
+        .file_store
+        .atomic_write(config_path, merged.as_bytes(), true)
+    {
         Ok(()) => {
-            // Open file for fsync
-            if let Ok(file) = std::fs::File::open(&tmp_path) {
-                let _ = file.sync_all();
-            }
-            match std::fs::rename(&tmp_path, &config_path) {
-                Ok(()) => {
-                    info!("Dashboard: configuration saved to {}", config_path);
-                    let ts = unix_timestamp();
-                    let _ = state.event_tx.send(DashboardEvent::ConfigSaved {
-                        timestamp: ts.clone(),
-                    });
-                    Ok(Json(
-                        json!({ "status": "ok", "path": config_path, "success": true }),
-                    ))
-                }
-                Err(e) => {
-                    error!("Dashboard: failed to rename config file: {}", e);
-                    let _ = std::fs::remove_file(&tmp_path);
-                    Ok(Json(json!({
-                        "status": "error",
-                        "success": false,
-                        "message": format!("Failed to write config: {}", e),
-                    })))
-                }
-            }
+            info!(path = %config_path.display(), "dashboard configuration saved atomically");
+            let timestamp = unix_timestamp();
+            let _ = state.event_tx.send(DashboardEvent::ConfigSaved {
+                timestamp: timestamp.clone(),
+            });
+            Ok(Json(json!({
+                "status": "ok",
+                "path": config_path.display().to_string(),
+                "success": true
+            })))
         }
-        Err(e) => {
-            error!("Dashboard: failed to write config file: {}", e);
+        Err(error) => {
+            error!(%error, path = %config_path.display(), "dashboard configuration write failed");
             Ok(Json(json!({
                 "status": "error",
                 "success": false,
-                "message": format!("Failed to write config: {}", e),
+                "message": format!("Failed to write config: {error}"),
             })))
         }
     }

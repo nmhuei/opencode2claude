@@ -5,12 +5,12 @@
 //! `stop` reads the PID, kills the process, cleans up the PID file.
 //! `status` checks if the PID file exists and the process is alive.
 
+use crate::infrastructure::process::{ProcessManager, ProcessSpec, SystemProcessManager};
 use crate::pidfile::{PidFile, PidFileError};
 use crate::runtime::RuntimePaths;
-use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::process::Command;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Possible states of the bridge supervisor.
@@ -90,6 +90,7 @@ pub struct Supervisor {
     port: u16,
     host: String,
     child_args: Vec<String>,
+    process_manager: Arc<dyn ProcessManager>,
 }
 
 impl Supervisor {
@@ -100,7 +101,13 @@ impl Supervisor {
             port,
             host: host.into(),
             child_args: Vec::new(),
+            process_manager: Arc::new(SystemProcessManager),
         }
+    }
+
+    pub fn with_process_manager(mut self, process_manager: Arc<dyn ProcessManager>) -> Self {
+        self.process_manager = process_manager;
+        self
     }
 
     /// Override the argv used for the foreground child process.
@@ -138,26 +145,17 @@ impl Supervisor {
             }
         }
 
-        // Open log file for stdout/stderr (append mode)
         let log_path = self.paths.bridge_log();
-        let log_file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .map_err(|e| SupervisorError::SpawnFailed(format!("Cannot open log file: {}", e)))?;
-
-        // Spawn bridge server as child process (detached)
         let current_exe = std::env::current_exe()
-            .map_err(|e| SupervisorError::SpawnFailed(format!("Cannot get binary path: {}", e)))?;
-        let exe = current_exe
+            .map_err(|e| SupervisorError::SpawnFailed(format!("Cannot get binary path: {e}")))?;
+        let executable = current_exe
             .parent()
-            .map(|p| p.join("opencode2api-serve"))
+            .map(|parent| parent.join("opencode2api-serve"))
             .ok_or_else(|| {
                 SupervisorError::SpawnFailed(
                     "Cannot determine parent directory of current exe".to_string(),
                 )
             })?;
-
         let child_args = if self.child_args.is_empty() {
             vec![
                 "--port".to_string(),
@@ -168,33 +166,27 @@ impl Supervisor {
         } else {
             self.child_args.clone()
         };
+        let identity = self
+            .process_manager
+            .spawn_detached(&ProcessSpec {
+                executable,
+                args: child_args,
+                stdout_path: log_path.clone(),
+                stderr_path: log_path.clone(),
+            })
+            .map_err(|error| {
+                SupervisorError::SpawnFailed(format!("Cannot spawn serve: {error}"))
+            })?;
+        let pid = identity.pid;
 
-        use std::os::unix::process::CommandExt;
-        let child = unsafe {
-            Command::new(&exe)
-                .args(&child_args)
-                .pre_exec(|| {
-                    extern "C" {
-                        fn setsid() -> i32;
-                    }
-                    setsid();
-                    Ok(())
-                })
-                .stdout(log_file.try_clone().map_err(|e| {
-                    SupervisorError::SpawnFailed(format!("Cannot clone log fd: {}", e))
-                })?)
-                .stderr(log_file)
-                .spawn()
-        }
-        .map_err(|e| SupervisorError::SpawnFailed(format!("Cannot spawn serve: {}", e)))?;
-
-        let pid = child.id();
-
-        if let Err(e) = wait_for_health(pid, &self.host, self.port, Duration::from_secs(20)) {
-            let _ = Command::new("kill")
-                .arg("-TERM")
-                .arg(pid.to_string())
-                .status();
+        if let Err(e) = wait_for_health(
+            self.process_manager.as_ref(),
+            pid,
+            &self.host,
+            self.port,
+            Duration::from_secs(20),
+        ) {
+            let _ = self.process_manager.terminate(pid);
             let _ = PidFile::remove(&self.paths.pid_file());
             return Err(SupervisorError::SpawnFailed(format!(
                 "{}. See log: {}",
@@ -220,21 +212,10 @@ impl Supervisor {
         let pidfile = PidFile::read(&pidfile_path)?;
         let pid = pidfile.pid;
 
-        // Send SIGTERM
-        let _ = Command::new("kill")
-            .arg("-TERM")
-            .arg(pid.to_string())
-            .status();
-
-        // Wait briefly for graceful shutdown
+        let _ = self.process_manager.terminate(pid);
         std::thread::sleep(Duration::from_millis(500));
-
-        // Force kill if the process did not exit after the graceful signal.
-        if process_exists(pid) {
-            let _ = Command::new("kill")
-                .arg("-KILL")
-                .arg(pid.to_string())
-                .status();
+        if self.process_manager.exists(pid) {
+            let _ = self.process_manager.force_kill(pid);
         }
 
         // Remove PID file
@@ -255,7 +236,7 @@ impl Supervisor {
         let pid = pidfile.pid;
         let healthy = health_check(&pidfile.host, pidfile.port);
 
-        if process_exists(pid) && healthy {
+        if self.process_manager.exists(pid) && healthy {
             Ok(SupervisorStatus::Running {
                 pid: Some(pid),
                 port: pidfile.port,
@@ -293,45 +274,6 @@ impl Supervisor {
     }
 }
 
-/// Check whether a process exists without relying on Linux-only `/proc`.
-#[cfg(unix)]
-fn process_exists(pid: u32) -> bool {
-    // Unix `pid_t` is signed; values above i32::MAX may be interpreted as
-    // negative process-group selectors by the `kill` utility.
-    if pid == 0 || pid > i32::MAX as u32 {
-        return false;
-    }
-
-    match Command::new("kill").arg("-0").arg(pid.to_string()).output() {
-        Ok(output) if output.status.success() => true,
-        Ok(output) => {
-            // A process owned by another user can exist even when signalling it is denied.
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            stderr.contains("Operation not permitted") || stderr.contains("not permitted")
-        }
-        Err(_) => false,
-    }
-}
-
-#[cfg(windows)]
-fn process_exists(pid: u32) -> bool {
-    Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
-        .output()
-        .map(|output| {
-            output.status.success()
-                && String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .any(|line| line.contains(&format!("\"{pid}\"")))
-        })
-        .unwrap_or(false)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn process_exists(_pid: u32) -> bool {
-    false
-}
-
 fn now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -339,16 +281,22 @@ fn now_millis() -> u64 {
         .as_millis() as u64
 }
 
-fn wait_for_health(pid: u32, host: &str, port: u16, timeout: Duration) -> Result<(), &'static str> {
+fn wait_for_health(
+    process_manager: &dyn ProcessManager,
+    pid: u32,
+    host: &str,
+    port: u16,
+    timeout: Duration,
+) -> Result<(), &'static str> {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        if !process_exists(pid) {
+        if !process_manager.exists(pid) {
             return Err("bridge process exited before becoming healthy");
         }
 
         if health_check(host, port) {
             std::thread::sleep(Duration::from_millis(100));
-            if process_exists(pid) {
+            if process_manager.exists(pid) {
                 return Ok(());
             }
             return Err("bridge process exited after health check");
@@ -422,16 +370,14 @@ mod tests {
         port
     }
 
-    #[cfg(unix)]
     #[test]
     fn process_probe_detects_current_process() {
-        assert!(process_exists(std::process::id()));
+        assert!(SystemProcessManager.exists(std::process::id()));
     }
 
-    #[cfg(unix)]
     #[test]
     fn process_probe_rejects_impossible_pid() {
-        assert!(!process_exists(u32::MAX));
+        assert!(!SystemProcessManager.exists(u32::MAX));
     }
 
     #[test]

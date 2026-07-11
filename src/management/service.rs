@@ -1,6 +1,7 @@
 //! Transport-agnostic management operations.
 
 use crate::dashboard::DashboardEvent;
+use crate::docker::ProxySpec;
 use crate::proxy_pool::{is_managed_proxy_port, is_protected_proxy_port, ProxyPoolStats};
 use crate::state::AppState;
 use axum::http::StatusCode;
@@ -104,15 +105,26 @@ pub async fn restart_managed_proxy(
     port: u16,
 ) -> Result<ProxyRestartResult, ManagementError> {
     validate_restart_target(state, port).await?;
-
-    crate::docker::create_container(port).await.map_err(|err| {
-        error!(port, error = %err, "management API failed to restart proxy");
+    let spec = ProxySpec::new(port, state.config.runtime.warp_image.clone()).map_err(|err| {
         ManagementError::new(
-            StatusCode::BAD_GATEWAY,
-            "proxy_restart_failed",
-            format!("Failed to restart proxy port {port}: {err}"),
+            StatusCode::BAD_REQUEST,
+            "invalid_proxy_spec",
+            err.to_string(),
         )
     })?;
+
+    state
+        .container_runtime
+        .recreate_managed(&spec)
+        .await
+        .map_err(|err| {
+            error!(port, error = %err, "management API failed to restart proxy");
+            ManagementError::new(
+                StatusCode::BAD_GATEWAY,
+                "proxy_restart_failed",
+                format!("Failed to restart proxy port {port}: {err}"),
+            )
+        })?;
 
     info!(port, "management API restarted managed proxy");
     let _ = state.event_tx.send(DashboardEvent::ProxyStatus {
@@ -158,18 +170,20 @@ async fn validate_restart_target(state: &AppState, port: u16) -> Result<(), Mana
         ));
     }
 
-    let configured = {
-        let pool = state.proxy_pool.read().await;
-        pool.proxies.iter().any(|entry| entry.port == port)
-    };
-
-    if !configured {
-        return Err(ManagementError::new(
-            StatusCode::NOT_FOUND,
-            "proxy_not_found",
-            format!("Proxy port {port} is not present in the active configuration"),
-        ));
-    }
+    let pool = state.proxy_pool.read().await;
+    let index = pool
+        .proxies
+        .iter()
+        .position(|entry| entry.port == port)
+        .ok_or_else(|| {
+            ManagementError::new(
+                StatusCode::NOT_FOUND,
+                "proxy_not_found",
+                format!("Proxy port {port} is not present in the active configuration"),
+            )
+        })?;
+    pool.can_modify_node(index)
+        .map_err(|message| ManagementError::new(StatusCode::CONFLICT, "proxy_busy", message))?;
 
     Ok(())
 }
@@ -200,5 +214,109 @@ mod tests {
             redact_proxy_url("socks5://127.0.0.1:40001"),
             "socks5://127.0.0.1:40001"
         );
+    }
+}
+
+#[cfg(test)]
+mod runtime_tests {
+    use super::*;
+    use crate::config::{BridgeConfig, EgressMode};
+    use crate::docker::{
+        ContainerRuntime, ContainerState, ContainerSummary, DockerResult, ProxySpec,
+    };
+    use async_trait::async_trait;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Debug, Default)]
+    struct FakeRuntime {
+        recreated: Mutex<Vec<u16>>,
+    }
+
+    #[async_trait]
+    impl ContainerRuntime for FakeRuntime {
+        async fn daemon_version(&self) -> DockerResult<String> {
+            Ok("test".into())
+        }
+        async fn inspect(&self, _spec: &ProxySpec) -> DockerResult<ContainerState> {
+            Ok(ContainerState {
+                exists: true,
+                running: true,
+                has_expected_volume: true,
+            })
+        }
+        async fn create_missing(&self, _spec: &ProxySpec) -> DockerResult<()> {
+            Ok(())
+        }
+        async fn recreate_managed(&self, spec: &ProxySpec) -> DockerResult<()> {
+            self.recreated.lock().unwrap().push(spec.port);
+            Ok(())
+        }
+        async fn remove_managed(&self, _spec: &ProxySpec) -> DockerResult<()> {
+            Ok(())
+        }
+        async fn restart_managed(&self, _spec: &ProxySpec) -> DockerResult<()> {
+            Ok(())
+        }
+        async fn stop_managed(&self, _spec: &ProxySpec) -> DockerResult<()> {
+            Ok(())
+        }
+        async fn start_managed(&self, _spec: &ProxySpec) -> DockerResult<()> {
+            Ok(())
+        }
+        async fn logs(&self, _spec: &ProxySpec, _tail: usize) -> DockerResult<String> {
+            Ok(String::new())
+        }
+        async fn list(&self, _specs: &[ProxySpec]) -> DockerResult<Vec<ContainerSummary>> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn state(runtime: Arc<FakeRuntime>) -> AppState {
+        let mut config = BridgeConfig::default();
+        config.egress.mode = EgressMode::Proxy;
+        config.primary_proxies = Some(vec!["socks5h://127.0.0.1:40001".to_string()]);
+        config.warm_standby_proxies = None;
+        config.egress.identity_endpoints.clear();
+        AppState::new_with_container_runtime(config, runtime)
+    }
+
+    #[tokio::test]
+    async fn management_restart_delegates_to_injected_runtime() {
+        let runtime = Arc::new(FakeRuntime::default());
+        let state = state(runtime.clone());
+        let result = restart_managed_proxy(&state, 40001)
+            .await
+            .expect("restart result");
+        assert_eq!(result.port, 40001);
+        assert_eq!(*runtime.recreated.lock().unwrap(), vec![40001]);
+    }
+
+    #[tokio::test]
+    async fn management_restart_rejects_active_request_lease() {
+        let runtime = Arc::new(FakeRuntime::default());
+        let state = state(runtime.clone());
+        let lease = state.proxy_pool.read().await.begin_lease(0).expect("lease");
+        let error = restart_managed_proxy(&state, 40001)
+            .await
+            .expect_err("busy node must fail");
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert!(runtime.recreated.lock().unwrap().is_empty());
+        drop(lease);
+    }
+
+    #[tokio::test]
+    async fn management_restart_rejects_protected_standby_before_runtime_call() {
+        let runtime = Arc::new(FakeRuntime::default());
+        let mut config = BridgeConfig::default();
+        config.egress.mode = EgressMode::Proxy;
+        config.primary_proxies = None;
+        config.warm_standby_proxies = Some(vec!["socks5h://127.0.0.1:40004".to_string()]);
+        config.egress.identity_endpoints.clear();
+        let state = AppState::new_with_container_runtime(config, runtime.clone());
+        let error = restart_managed_proxy(&state, 40004)
+            .await
+            .expect_err("protected node must fail");
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+        assert!(runtime.recreated.lock().unwrap().is_empty());
     }
 }

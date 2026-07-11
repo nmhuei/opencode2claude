@@ -1,49 +1,54 @@
-//! Host-level WARP reconnection used only when no explicit proxy route exists.
+//! Host-level WARP reconnection used only when explicit proxy mode is disabled.
 
+use crate::infrastructure::warp::WarpController;
 use tracing::{info, warn};
 
-pub(super) async fn reconnect_warp(binary: &str) -> bool {
-    info!("reconnecting host WARP client");
-
-    let disconnect = tokio::process::Command::new(binary)
-        .arg("disconnect")
-        .output()
-        .await;
-    match disconnect {
-        Ok(output) if output.status.success() => {}
-        Ok(output) => {
-            warn!(
-                stderr = %String::from_utf8_lossy(&output.stderr),
-                "warp-cli disconnect returned a non-zero status"
-            );
-        }
-        Err(error) => {
-            warn!(%error, "warp-cli disconnect failed");
-            return false;
-        }
-    }
-
-    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-    let connect = tokio::process::Command::new(binary)
-        .arg("connect")
-        .output()
-        .await;
-    match connect {
-        Ok(output) if output.status.success() => {
-            tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+pub(super) async fn reconnect_warp(controller: &dyn WarpController) -> bool {
+    match controller.reconnect().await {
+        Ok(()) => {
             info!("host WARP client reconnected; exit-IP change was not assumed");
             true
         }
-        Ok(output) => {
-            warn!(
-                stderr = %String::from_utf8_lossy(&output.stderr),
-                "warp-cli connect returned a non-zero status"
-            );
-            false
-        }
         Err(error) => {
-            warn!(%error, "warp-cli connect failed");
+            warn!(%error, "host WARP reconnection failed");
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::infrastructure::warp::{WarpError, WarpStatus};
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug, Default)]
+    struct FakeWarp {
+        reconnects: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl WarpController for FakeWarp {
+        async fn connect(&self) -> Result<(), WarpError> {
+            Ok(())
+        }
+        async fn disconnect(&self) -> Result<(), WarpError> {
+            Ok(())
+        }
+        async fn status(&self) -> Result<WarpStatus, WarpError> {
+            Ok(WarpStatus::Connected)
+        }
+        async fn reconnect(&self) -> Result<(), WarpError> {
+            self.reconnects.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn reconnect_delegates_to_controller() {
+        let controller = FakeWarp::default();
+        assert!(reconnect_warp(&controller).await);
+        assert_eq!(controller.reconnects.load(Ordering::SeqCst), 1);
     }
 }

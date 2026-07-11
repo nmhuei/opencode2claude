@@ -12,6 +12,7 @@ pub mod docker;
 pub mod doctor;
 pub mod error;
 pub mod handlers;
+pub mod infrastructure;
 pub mod init;
 pub mod management;
 pub mod middleware;
