@@ -86,16 +86,6 @@ fn test_search_client_search_no_config_falls_to_ddg() {
     assert!(search_client.searxng_url.is_none());
 }
 
-#[tokio::test]
-#[ignore = "live network call (60s+) — run with --include-ignored or PROFILE=heavy"]
-async fn test_duckduckgo_search_via_client() {
-    let client = Client::new();
-    let config = make_test_config();
-    let search_client = SearchClient::new(client, &config);
-    let results = search_client.search("rust programming").await;
-    assert!(!results.is_empty());
-}
-
 #[test]
 fn test_url_encode_basic() {
     assert_eq!(urlencoding_simple("hello world"), "hello+world");
