@@ -1,0 +1,8 @@
+Command: cargo test --test egress_identity_system -- --ignored --nocapture
+Date: 2026-07-11
+Result: PASS
+Observed:
+- opencode-warp-1 40001 -> 104.28.254.73 unique
+- opencode-warp-2 40002 -> 104.28.222.73 unique owner
+- opencode-warp-3 40003 -> 104.28.222.73 duplicate_of opencode-warp-2
+Conclusion: identity consensus and duplicate suppression operate on real local WARP containers.
