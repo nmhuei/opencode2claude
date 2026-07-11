@@ -6,4 +6,4 @@ mod runtime;
 
 pub use args::ServeArgsBridge;
 pub use routes::build_router;
-pub use runtime::run_server;
+pub use runtime::{run_server, ServerError};

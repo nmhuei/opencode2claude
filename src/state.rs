@@ -7,6 +7,7 @@ use crate::infrastructure::file_store::{AtomicFileStore, FileStore};
 use crate::infrastructure::warp::{CliWarpController, WarpController};
 use crate::opencode::search::SearchClient;
 use crate::proxy_pool::{health_monitor, identity_monitor, process_restart_queue, ProxyPool};
+use crate::workers::WorkerRegistry;
 use reqwest::Client;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
@@ -35,6 +36,8 @@ pub struct AppState {
     pub warp_controller: Arc<dyn WarpController>,
     /// Atomic filesystem adapter used by config/runtime management transports.
     pub file_store: Arc<dyn FileStore>,
+    /// Owner of critical workers and ephemeral request tasks.
+    pub workers: Arc<WorkerRegistry>,
     /// Broadcast channel for dashboard SSE events.
     pub event_tx: broadcast::Sender<DashboardEvent>,
     /// Unix timestamp (seconds) when the server started.
@@ -102,6 +105,7 @@ impl AppState {
             .max_concurrent_requests
             .map(|permits| Arc::new(Semaphore::new(permits)));
         let search_client = SearchClient::new(http_client.clone(), &config);
+        let workers = Arc::new(WorkerRegistry::new());
 
         // Create proxy pool with 2-tier primary + warm-standby model
         // Combine primary (managed) and warm-standby (protected) proxy URLs
@@ -123,30 +127,43 @@ impl AppState {
             // Spawn background tasks for pool management
             if !pool.proxies.is_empty() {
                 let pool_arc = Arc::new(RwLock::new(pool));
-                let hc_pool = pool_arc.clone();
-                let rq_pool = pool_arc.clone();
-                let rq_runtime = container_runtime.clone();
-                let rq_image = config.runtime.warp_image.clone();
-
-                tokio::spawn(async move {
-                    health_monitor(hc_pool).await;
+                let health_pool = pool_arc.clone();
+                let health_interval = config.egress.health_interval;
+                workers.spawn_critical("proxy-health", move |context| async move {
+                    health_monitor(health_pool, health_interval, context).await
                 });
-                info!("Proxy pool health monitor spawned.");
+                info!("Proxy pool health monitor registered.");
 
-                tokio::spawn(async move {
-                    process_restart_queue(rq_pool, rq_runtime, rq_image).await;
+                let restart_pool = pool_arc.clone();
+                let restart_runtime = container_runtime.clone();
+                let restart_image = config.runtime.warp_image.clone();
+                let restart_interval = config.egress.restart_interval;
+                workers.spawn_critical("proxy-restart", move |context| async move {
+                    process_restart_queue(
+                        restart_pool,
+                        restart_runtime,
+                        restart_image,
+                        restart_interval,
+                        context,
+                    )
+                    .await
                 });
-                info!("Proxy pool restart queue processor spawned.");
+                info!("Proxy pool restart queue processor registered.");
 
                 if !config.egress.identity_endpoints.is_empty() {
                     let identity_pool = pool_arc.clone();
                     let identity_endpoints = config.egress.identity_endpoints.clone();
                     let identity_interval = config.egress.health_interval;
-                    tokio::spawn(async move {
-                        identity_monitor(identity_pool, identity_endpoints, identity_interval)
-                            .await;
+                    workers.spawn_critical("proxy-identity", move |context| async move {
+                        identity_monitor(
+                            identity_pool,
+                            identity_endpoints,
+                            identity_interval,
+                            context,
+                        )
+                        .await
                     });
-                    info!("Proxy pool exit-identity monitor spawned.");
+                    info!("Proxy pool exit-identity monitor registered.");
                 }
 
                 pool_arc
@@ -177,6 +194,7 @@ impl AppState {
             container_runtime,
             warp_controller,
             file_store,
+            workers,
             event_tx,
             started_at,
         }

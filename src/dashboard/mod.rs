@@ -11,7 +11,7 @@ pub use assets::{serve_landing, serve_webui};
 pub use auth::{handler_auth_status, handler_login, handler_logout};
 pub use config_file::{handler_config_raw, handler_config_save};
 pub use events::{
-    handler_events, handler_test_stream_get, handler_test_stream_post, spawn_heartbeat,
+    handler_events, handler_test_stream_get, handler_test_stream_post, run_heartbeat,
     DashboardEvent,
 };
 pub use overview::{

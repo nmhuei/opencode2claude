@@ -30,3 +30,4 @@ pub mod stream_tracker;
 pub mod supervisor;
 pub mod tui;
 pub mod update;
+pub mod workers;

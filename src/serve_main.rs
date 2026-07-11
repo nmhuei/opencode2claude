@@ -76,5 +76,8 @@ async fn main() {
         max_body_size: args.max_body_size,
     };
 
-    run_server(bridge_args).await;
+    if let Err(error) = run_server(bridge_args).await {
+        eprintln!("server failed: {error}");
+        std::process::exit(1);
+    }
 }

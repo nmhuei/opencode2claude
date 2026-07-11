@@ -1,66 +1,110 @@
-//! Foreground server lifecycle.
+//! HTTP server lifecycle with owned workers and bounded graceful shutdown.
 
-use super::{build_router, ServeArgsBridge};
-use crate::config::BridgeConfig;
+use super::args::ServeArgsBridge;
+use super::routes::build_router;
+use crate::config::{self, BridgeConfig};
 use crate::dashboard;
 use crate::state::AppState;
 use crate::tui;
+use crate::workers::WorkerShutdownError;
+use std::future::IntoFuture;
 use std::net::SocketAddr;
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use yansi::Paint;
 
-pub async fn run_server(args: ServeArgsBridge) {
-    init_tracing();
-
-    let config = BridgeConfig::from_env_and_cli(args.into());
-    if let Err(error) = config.validate_security() {
-        eprintln!("{error}");
-        std::process::exit(1);
-    }
-
-    let address = SocketAddr::from((config.host, config.bridge_port));
-    log_startup(&config, address);
-
-    let state = AppState::new(config);
-    dashboard::spawn_heartbeat(state.event_tx.clone());
-    let app = build_router(state);
-
-    let listener = tokio::net::TcpListener::bind(address)
-        .await
-        .unwrap_or_else(|error| {
-            eprintln!(
-                "{} Failed to bind to {}: {}",
-                "✗".red().bold(),
-                address,
-                error
-            );
-            eprintln!(
-                "   Hint: Is another process using port {}? Try: lsof -i :{}",
-                address.port(),
-                address.port()
-            );
-            std::process::exit(1);
-        });
-
-    info!(%address, "server started");
-    if let Err(error) = axum::serve(listener, app)
-        .with_graceful_shutdown(termination_signal())
-        .await
-    {
-        eprintln!("{} Server error: {}", "✗".red().bold(), error);
-        std::process::exit(1);
-    }
-    info!("server stopped gracefully");
+#[derive(Debug, thiserror::Error)]
+pub enum ServerError {
+    #[error("invalid server configuration: {0}")]
+    Configuration(String),
+    #[error("failed to bind {address}: {source}")]
+    Bind {
+        address: SocketAddr,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("HTTP server failed: {0}")]
+    Serve(#[from] std::io::Error),
+    #[error("graceful HTTP shutdown exceeded {0:?}")]
+    GracefulTimeout(std::time::Duration),
+    #[error(transparent)]
+    WorkerShutdown(#[from] WorkerShutdownError),
 }
 
-fn init_tracing() {
-    tracing_subscriber::registry()
+pub async fn run_server(args: ServeArgsBridge) -> Result<(), ServerError> {
+    let _ = tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .with(tracing_subscriber::fmt::layer())
-        .init();
+        .try_init();
+
+    let overrides = config::CliOverrides {
+        bridge_port: args.port,
+        host: args.host,
+        model: args.model,
+        shell_policy: args.shell_policy,
+        config_path: args.config,
+        max_body_size: args.max_body_size,
+        tavily_api_key: args.tavily_api_key,
+        exa_api_key: args.exa_api_key,
+        serper_api_key: args.serper_api_key,
+        searxng_url: args.searxng_url,
+        searxng_api_key: args.searxng_api_key,
+    };
+    let config = BridgeConfig::from_env_and_cli(overrides);
+    config
+        .validate_security()
+        .map_err(ServerError::Configuration)?;
+    let address = SocketAddr::from((config.host, config.bridge_port));
+
+    log_startup(&config, address);
+    let state = AppState::new(config.clone());
+    let heartbeat_tx = state.event_tx.clone();
+    state
+        .workers
+        .spawn_critical("dashboard-heartbeat", move |context| async move {
+            dashboard::run_heartbeat(heartbeat_tx, context).await
+        });
+
+    let app = build_router(state.clone());
+    let listener = tokio::net::TcpListener::bind(address)
+        .await
+        .map_err(|source| ServerError::Bind { address, source })?;
+    info!("Server started successfully. Waiting for requests...");
+
+    let shutdown = CancellationToken::new();
+    let server = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown.clone().cancelled_owned())
+        .into_future();
+    tokio::pin!(server);
+
+    let serve_result = tokio::select! {
+        result = &mut server => result.map_err(ServerError::Serve),
+        _ = shutdown_signal() => {
+            state.workers.cancel();
+            shutdown.cancel();
+            match tokio::time::timeout(
+                config.runtime.server_shutdown_timeout,
+                &mut server,
+            ).await {
+                Ok(result) => result.map_err(ServerError::Serve),
+                Err(_) => Err(ServerError::GracefulTimeout(
+                    config.runtime.server_shutdown_timeout,
+                )),
+            }
+        }
+    };
+
+    // Always stop owned workers, including bind/serve-error paths after state
+    // creation. No detached application worker is allowed past this point.
+    state
+        .workers
+        .shutdown(config.runtime.worker_shutdown_timeout)
+        .await?;
+    serve_result?;
+    info!("Server and all owned workers shut down gracefully.");
+    Ok(())
 }
 
 fn log_startup(config: &BridgeConfig, address: SocketAddr) {
@@ -110,26 +154,32 @@ fn log_startup(config: &BridgeConfig, address: SocketAddr) {
     info!("To use: export ANTHROPIC_BASE_URL=\"http://{address}/v1\"");
 }
 
-async fn termination_signal() {
+async fn shutdown_signal() {
     let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::error!(%error, "failed to install Ctrl+C handler");
+            std::future::pending::<()>().await;
+        }
     };
 
     #[cfg(unix)]
     let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to install signal handler")
-            .recv()
-            .await;
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(error) => {
+                tracing::error!(%error, "failed to install SIGTERM handler");
+                std::future::pending::<()>().await;
+            }
+        }
     };
 
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();
 
     tokio::select! {
-        _ = ctrl_c => info!("received Ctrl+C; stopping"),
-        _ = terminate => info!("received SIGTERM; stopping"),
+        _ = ctrl_c => info!("Received Ctrl+C; starting graceful shutdown"),
+        _ = terminate => info!("Received SIGTERM; starting graceful shutdown"),
     }
 }

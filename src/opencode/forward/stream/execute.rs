@@ -19,7 +19,6 @@ use axum::response::sse::Event;
 use futures_util::{Stream, StreamExt};
 use std::convert::Infallible;
 use tokio_stream::wrappers::ReceiverStream;
-use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 /// Perform a streaming completions request to upstream OpenCode API and stream Anthropic SSE chunks.
@@ -33,7 +32,8 @@ pub async fn forward_to_llm_stream(
     max_search_loops: u32,
 ) -> Result<impl Stream<Item = Result<Event, Infallible>>, BridgeError> {
     let (tx, rx) = tokio::sync::mpsc::channel(channel_capacity);
-    let cancel_token = CancellationToken::new();
+    // Child token is cancelled both by client stream drop and by global server shutdown.
+    let cancel_token = state.workers.cancellation_token();
     let msg_id = format!(
         "msg_opencode_{}",
         std::time::SystemTime::now()
@@ -46,7 +46,8 @@ pub async fn forward_to_llm_stream(
     let api_key_clone = api_key;
     let model_clone = model.clone();
 
-    tokio::spawn({
+    let workers = state_clone.workers.clone();
+    workers.spawn_ephemeral("llm-stream", {
         // Clone the token so the spawn and DropCancel share the same cancellation state
         let cancel_token_spawn = cancel_token.clone();
         async move {

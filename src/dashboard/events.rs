@@ -3,6 +3,7 @@
 use super::auth::check_admin_token;
 use super::time::unix_timestamp;
 use crate::state::AppState;
+use crate::workers::WorkerContext;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -12,7 +13,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::time::Duration;
 use tokio::sync::broadcast;
-use tracing::{info, warn};
+use tracing::warn;
 
 const SSE_KEEPALIVE_SECS: u64 = 15;
 const HEARTBEAT_INTERVAL_SECS: u64 = 30;
@@ -60,31 +61,33 @@ pub async fn handler_events(
     check_admin_token(&state, &headers, token)?;
 
     let mut rx = state.event_tx.subscribe();
+    let cancellation = state.workers.cancellation_token();
     let stream = async_stream::stream! {
         loop {
-            match rx.recv().await {
-                Ok(event) => {
-                    let event_type = match &event {
-                        DashboardEvent::ProxyStatus { .. } => "proxy_status",
-                        DashboardEvent::ProxyLog { .. } => "proxy_log",
-                        DashboardEvent::ConfigSaved { .. } => "config_saved",
-                        DashboardEvent::Heartbeat { .. } => "heartbeat",
-                        DashboardEvent::DashboardError { .. } => "error",
-                    };
-                    let json = serde_json::to_string(&event).unwrap_or_default();
-                    yield Ok(Event::default().event(event_type).data(json));
-                }
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    warn!("Dashboard SSE client lagged, dropped {} events", n);
-                    let fallback = DashboardEvent::DashboardError {
-                        message: format!("dropped {} events", n),
-                        timestamp: unix_timestamp(),
-                    };
-                    let json = serde_json::to_string(&fallback).unwrap_or_default();
-                    yield Ok(Event::default().data(json));
-                }
-                Err(broadcast::error::RecvError::Closed) => {
-                    break;
+            tokio::select! {
+                _ = cancellation.cancelled() => break,
+                received = rx.recv() => match received {
+                    Ok(event) => {
+                        let event_type = match &event {
+                            DashboardEvent::ProxyStatus { .. } => "proxy_status",
+                            DashboardEvent::ProxyLog { .. } => "proxy_log",
+                            DashboardEvent::ConfigSaved { .. } => "config_saved",
+                            DashboardEvent::Heartbeat { .. } => "heartbeat",
+                            DashboardEvent::DashboardError { .. } => "error",
+                        };
+                        let json = serde_json::to_string(&event).unwrap_or_default();
+                        yield Ok(Event::default().event(event_type).data(json));
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("Dashboard SSE client lagged, dropped {} events", n);
+                        let fallback = DashboardEvent::DashboardError {
+                            message: format!("dropped {} events", n),
+                            timestamp: unix_timestamp(),
+                        };
+                        let json = serde_json::to_string(&fallback).unwrap_or_default();
+                        yield Ok(Event::default().data(json));
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
         }
@@ -291,24 +294,21 @@ fn chunk_text_for_stream(text: &str) -> Vec<String> {
     chunks
 }
 
-/// Spawn a heartbeat task that sends a `Heartbeat` event every 30 seconds.
-pub fn spawn_heartbeat(event_tx: broadcast::Sender<DashboardEvent>) {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
-        loop {
-            interval.tick().await;
-            if event_tx
-                .send(DashboardEvent::Heartbeat {
+/// Run the dashboard heartbeat until application cancellation.
+pub async fn run_heartbeat(
+    event_tx: broadcast::Sender<DashboardEvent>,
+    context: WorkerContext,
+) -> Result<(), String> {
+    let mut interval = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
+    loop {
+        tokio::select! {
+            _ = context.cancellation().cancelled() => return Ok(()),
+            _ = interval.tick() => {
+                context.heartbeat();
+                let _ = event_tx.send(DashboardEvent::Heartbeat {
                     timestamp: unix_timestamp(),
-                })
-                .is_err()
-            {
-                // No subscribers — that's fine, keep going
+                });
             }
         }
-    });
-    info!(
-        "Dashboard heartbeat task spawned ({}s interval).",
-        HEARTBEAT_INTERVAL_SECS
-    );
+    }
 }

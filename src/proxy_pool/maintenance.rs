@@ -2,6 +2,7 @@
 
 use super::types::*;
 use crate::docker::{ContainerRuntime, ProxySpec};
+use crate::workers::WorkerContext;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock as TokioRwLock;
@@ -125,54 +126,70 @@ pub async fn process_restart_queue(
     pool: Arc<TokioRwLock<ProxyPool>>,
     runtime: Arc<dyn ContainerRuntime>,
     warp_image: String,
-) {
-    let mut interval = tokio::time::interval(Duration::from_secs(2));
+    cadence: Duration,
+    context: WorkerContext,
+) -> Result<(), String> {
+    let mut interval = tokio::time::interval(cadence.max(Duration::from_millis(100)));
     loop {
-        interval.tick().await;
-        let indices = pool.write().await.drain_restart_queue();
-        for index in indices {
-            restart_container(index, pool.clone(), runtime.clone(), warp_image.clone()).await;
+        tokio::select! {
+            _ = context.cancellation().cancelled() => return Ok(()),
+            _ = interval.tick() => {
+                context.heartbeat();
+                let indices = pool.write().await.drain_restart_queue();
+                for index in indices {
+                    restart_container(index, pool.clone(), runtime.clone(), warp_image.clone()).await;
+                }
+            }
         }
     }
 }
 
-pub async fn health_monitor(pool: Arc<TokioRwLock<ProxyPool>>) {
-    let mut interval = tokio::time::interval(Duration::from_secs(10));
+pub async fn health_monitor(
+    pool: Arc<TokioRwLock<ProxyPool>>,
+    cadence: Duration,
+    context: WorkerContext,
+) -> Result<(), String> {
+    let mut interval = tokio::time::interval(cadence.max(Duration::from_millis(100)));
     loop {
-        interval.tick().await;
-        pool.write().await.recover_expired_cooldowns();
+        tokio::select! {
+            _ = context.cancellation().cancelled() => return Ok(()),
+            _ = interval.tick() => {
+                context.heartbeat();
+                pool.write().await.recover_expired_cooldowns();
 
-        let targets: Vec<(usize, u16)> = {
-            let pool = pool.read().await;
-            pool.proxies
-                .iter()
-                .enumerate()
-                .filter(|(_, node)| {
-                    matches!(
-                        node.health,
-                        HealthState::Recovering | HealthState::Unhealthy
-                    ) && !node.circuit.is_open(Instant::now())
-                })
-                .map(|(index, node)| (index, node.port))
-                .collect()
-        };
+                let targets: Vec<(usize, u16)> = {
+                    let pool = pool.read().await;
+                    pool.proxies
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, node)| {
+                            matches!(
+                                node.health,
+                                HealthState::Recovering | HealthState::Unhealthy
+                            ) && !node.circuit.is_open(Instant::now())
+                        })
+                        .map(|(index, node)| (index, node.port))
+                        .collect()
+                };
 
-        for (index, port) in targets {
-            if port == 0 {
-                continue;
-            }
-            if tokio::net::TcpStream::connect(("127.0.0.1", port))
-                .await
-                .is_ok()
-            {
-                let mut pool = pool.write().await;
-                if let Some(node) = pool.proxies.get_mut(index) {
-                    if matches!(
-                        node.health,
-                        HealthState::Recovering | HealthState::Unhealthy
-                    ) {
-                        mark_node_healthy(node);
-                        info!(node_id = %node.id, "egress node recovered via TCP probe");
+                for (index, port) in targets {
+                    if port == 0 {
+                        continue;
+                    }
+                    if tokio::net::TcpStream::connect(("127.0.0.1", port))
+                        .await
+                        .is_ok()
+                    {
+                        let mut pool = pool.write().await;
+                        if let Some(node) = pool.proxies.get_mut(index) {
+                            if matches!(
+                                node.health,
+                                HealthState::Recovering | HealthState::Unhealthy
+                            ) {
+                                mark_node_healthy(node);
+                                info!(node_id = %node.id, "egress node recovered via TCP probe");
+                            }
+                        }
                     }
                 }
             }

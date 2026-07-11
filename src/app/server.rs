@@ -317,7 +317,10 @@ pub(super) async fn cmd_run_server(args: ServeArgsBridge) {
         eprintln!("   Use `o2a server status`, `o2a server stop`, or `o2a server start -f --port <port>`.");
         return;
     }
-    run_server(args).await;
+    if let Err(error) = run_server(args).await {
+        eprintln!("{} {}", "✗".red().bold(), error);
+        std::process::exit(1);
+    }
 }
 
 // ── Runtime helpers ──

@@ -1,6 +1,7 @@
 //! Exit-identity probing, normalization, and duplicate suppression.
 
 use super::types::*;
+use crate::workers::WorkerContext;
 use futures_util::{future::join_all, StreamExt};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -23,11 +24,17 @@ pub async fn identity_monitor(
     pool: Arc<RwLock<ProxyPool>>,
     endpoints: Vec<String>,
     interval: Duration,
-) {
+    context: WorkerContext,
+) -> Result<(), String> {
     let mut ticker = tokio::time::interval(interval.max(Duration::from_secs(5)));
     loop {
-        ticker.tick().await;
-        refresh_exit_identities(pool.clone(), &endpoints).await;
+        tokio::select! {
+            _ = context.cancellation().cancelled() => return Ok(()),
+            _ = ticker.tick() => {
+                context.heartbeat();
+                refresh_exit_identities(pool.clone(), &endpoints).await;
+            }
+        }
     }
 }
 
