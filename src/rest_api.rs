@@ -1,13 +1,16 @@
 //! Versioned REST management API backed by shared typed DTOs.
 
+use crate::audit::AuditOutcome;
 use crate::management::{auth, config_apply, dto, service};
+use crate::observability::RequestId;
 use crate::state::AppState;
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -18,6 +21,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/config/apply", post(apply_config))
         .route("/api/v1/proxies/:port/restart", post(restart_proxy))
         .route("/api/v1/metrics", get(metrics))
+        .route("/api/v1/audit", get(audit_events))
         .route("/api/v1/openapi.json", get(openapi))
 }
 
@@ -154,32 +158,94 @@ async fn preview_config(
 async fn apply_config(
     State(state): State<AppState>,
     headers: HeaderMap,
+    request_id: Option<Extension<RequestId>>,
     Json(request): Json<dto::ConfigDocumentRequest>,
 ) -> Result<Json<dto::ConfigApplyResponse>, ApiError> {
     authorize(&headers, &state)?;
-    let result = config_apply::apply_config(&state, &request.content)?;
-    let _ = state
-        .event_tx
-        .send(crate::dashboard::DashboardEvent::ConfigSaved {
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs()
-                .to_string(),
-        });
-    Ok(Json(result))
+    let correlation = request_id.map(|Extension(value)| value.0);
+    match config_apply::apply_config(&state, &request.content) {
+        Ok(result) => {
+            state.audit_log.record(
+                "rest",
+                "config_apply",
+                "configuration",
+                AuditOutcome::Success,
+                correlation,
+                BTreeMap::from([
+                    (
+                        "changed_key_count".to_string(),
+                        result.changed_keys.len().to_string(),
+                    ),
+                    (
+                        "restart_required".to_string(),
+                        result.restart_required.to_string(),
+                    ),
+                    (
+                        "rollback_performed".to_string(),
+                        result.rollback_performed.to_string(),
+                    ),
+                ]),
+            );
+            let _ = state
+                .event_tx
+                .send(crate::dashboard::DashboardEvent::ConfigSaved {
+                    timestamp: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs()
+                        .to_string(),
+                });
+            Ok(Json(result))
+        }
+        Err(error) => {
+            state.audit_log.record(
+                "rest",
+                "config_apply",
+                "configuration",
+                AuditOutcome::Failure,
+                correlation,
+                BTreeMap::from([("error_code".to_string(), error.code.to_string())]),
+            );
+            Err(error.into())
+        }
+    }
 }
 
 async fn restart_proxy(
     State(state): State<AppState>,
     headers: HeaderMap,
+    request_id: Option<Extension<RequestId>>,
     Path(port): Path<u16>,
 ) -> Result<Json<dto::ProxyActionResponse>, ApiError> {
     authorize(&headers, &state)?;
-    Ok(Json(dto::ProxyActionResponse {
-        status: "ok".to_string(),
-        proxy: service::restart_managed_proxy(&state, port).await?,
-    }))
+    let correlation = request_id.map(|Extension(value)| value.0);
+    match service::restart_managed_proxy(&state, port).await {
+        Ok(proxy) => {
+            state.audit_log.record(
+                "rest",
+                "proxy_restart",
+                format!("proxy:{port}"),
+                AuditOutcome::Success,
+                correlation,
+                BTreeMap::new(),
+            );
+            Ok(Json(dto::ProxyActionResponse {
+                status: "ok".to_string(),
+                proxy,
+            }))
+        }
+        Err(error) => {
+            state.audit_log.record(
+                "rest",
+                "proxy_restart",
+                format!("proxy:{port}"),
+                AuditOutcome::Failure,
+                correlation,
+                BTreeMap::from([("error_code".to_string(), error.code.to_string())]),
+            );
+            Err(error.into())
+        }
+    }
 }
 
 async fn metrics(
@@ -197,6 +263,16 @@ async fn metrics(
     Ok(Json(dto::MetricsResponse {
         metrics: state.metrics.snapshot(),
         workers: state.workers.snapshot(),
+    }))
+}
+
+async fn audit_events(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<dto::AuditEventsResponse>, ApiError> {
+    authorize(&headers, &state)?;
+    Ok(Json(dto::AuditEventsResponse {
+        events: state.audit_log.snapshot(100),
     }))
 }
 
@@ -246,6 +322,7 @@ fn openapi_document() -> Value {
             "/api/v1/config/apply": {"post":{"summary":"Atomically apply validated configuration","requestBody":request_schema::<dto::ConfigDocumentRequest>(),"responses":{"200":response_schema::<dto::ConfigApplyResponse>(),"400":{"description":"Invalid configuration"},"401":{"description":"Unauthorized"},"500":{"description":"Write or verification failure"}}}},
             "/api/v1/proxies/{port}/restart": {"post":{"summary":"Restart a managed primary proxy","parameters":[{"name":"port","in":"path","required":true,"schema":{"type":"integer","minimum":1,"maximum":65535}}],"responses":{"200":response_schema::<dto::ProxyActionResponse>(),"400":{"description":"Invalid port"},"401":{"description":"Unauthorized"},"403":{"description":"Protected proxy"},"404":{"description":"Not configured"},"409":{"description":"Proxy busy"},"502":{"description":"Container failure"}}}},
             "/api/v1/metrics": {"get":{"summary":"Get bounded in-process counters and worker state","responses":{"200":response_schema::<dto::MetricsResponse>(),"401":{"description":"Unauthorized"},"404":{"description":"Metrics disabled"}}}},
+            "/api/v1/audit": {"get":{"summary":"Get recent secret-safe management audit events","responses":{"200":response_schema::<dto::AuditEventsResponse>(),"401":{"description":"Unauthorized"}}}},
             "/api/v1/openapi.json": {"get":{"summary":"Get this OpenAPI document","responses":{"200":{"description":"OpenAPI 3.1 document"},"401":{"description":"Unauthorized"}}}}
         }
     })
@@ -319,6 +396,11 @@ mod tests {
                 ["application/json"]["schema"]["$ref"],
             "#/components/schemas/MetricsResponse"
         );
+        assert_eq!(
+            body["paths"]["/api/v1/audit"]["get"]["responses"]["200"]["content"]
+                ["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AuditEventsResponse"
+        );
     }
 
     #[tokio::test]
@@ -336,6 +418,36 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn failed_management_mutation_is_recorded_without_secret_content() {
+        let state = state();
+        let app = router().with_state(state.clone());
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/proxies/40004/restart")
+                    .header(header::AUTHORIZATION, "Bearer test-rest-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let response = app.oneshot(authorized("/api/v1/audit")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body["events"][0]["action"], "proxy_restart");
+        assert_eq!(body["events"][0]["outcome"], "failure");
+        let encoded = serde_json::to_string(&body).unwrap();
+        assert!(!encoded.contains("test-rest-token"));
+        assert!(!encoded.contains("secret-that-must-not-leak"));
     }
 
     #[tokio::test]

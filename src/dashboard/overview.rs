@@ -2,13 +2,16 @@
 
 use super::auth::{check_admin_mutation, check_admin_token};
 use super::time::uptime_string;
+use crate::audit::AuditOutcome;
 use crate::management::{auth, service};
+use crate::observability::RequestId;
 use crate::state::AppState;
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 
 /// GET /api/dashboard/status — bridge status with uptime and proxy tier stats.
 pub async fn handler_rest_status(
@@ -91,19 +94,41 @@ pub async fn handler_config(
 pub async fn handler_proxy_restart(
     State(state): State<AppState>,
     headers: HeaderMap,
+    request_id: Option<Extension<RequestId>>,
     Path(port): Path<u16>,
 ) -> Result<impl axum::response::IntoResponse, (StatusCode, Json<Value>)> {
     check_admin_mutation(&state, &headers)?;
+    let correlation = request_id.map(|Extension(value)| value.0);
 
     match service::restart_managed_proxy(&state, port).await {
-        Ok(result) => Ok(Json(json!({
-            "status": "ok",
-            "port": result.port,
-        }))),
-        Err(error) => Ok(Json(json!({
-            "status": "error",
-            "message": error.message,
-        }))),
+        Ok(result) => {
+            state.audit_log.record(
+                "dashboard",
+                "proxy_restart",
+                format!("proxy:{port}"),
+                AuditOutcome::Success,
+                correlation,
+                BTreeMap::new(),
+            );
+            Ok(Json(json!({
+                "status": "ok",
+                "port": result.port,
+            })))
+        }
+        Err(error) => {
+            state.audit_log.record(
+                "dashboard",
+                "proxy_restart",
+                format!("proxy:{port}"),
+                AuditOutcome::Failure,
+                correlation,
+                BTreeMap::from([("error_code".to_string(), error.code.to_string())]),
+            );
+            Ok(Json(json!({
+                "status": "error",
+                "message": error.message,
+            })))
+        }
     }
 }
 

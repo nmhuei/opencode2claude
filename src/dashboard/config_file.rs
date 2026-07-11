@@ -3,12 +3,15 @@
 use super::auth::{check_admin_mutation, check_admin_token};
 use super::events::DashboardEvent;
 use super::time::unix_timestamp;
+use crate::audit::AuditOutcome;
 use crate::management::config_apply;
+use crate::observability::RequestId;
 use crate::state::AppState;
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 
 /// GET /api/dashboard/config/raw — authenticated raw config inspection.
 pub async fn handler_config_raw(
@@ -30,9 +33,11 @@ pub async fn handler_config_raw(
 pub async fn handler_config_save(
     State(state): State<AppState>,
     headers: HeaderMap,
+    request_id: Option<Extension<RequestId>>,
     body: Option<Json<Value>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     check_admin_mutation(&state, &headers)?;
+    let correlation = request_id.map(|Extension(value)| value.0);
     let content = body
         .as_ref()
         .and_then(|Json(payload)| payload.get("content"))
@@ -50,6 +55,27 @@ pub async fn handler_config_save(
 
     match config_apply::apply_config(&state, content) {
         Ok(result) => {
+            state.audit_log.record(
+                "dashboard",
+                "config_apply",
+                "configuration",
+                AuditOutcome::Success,
+                correlation,
+                BTreeMap::from([
+                    (
+                        "changed_key_count".to_string(),
+                        result.changed_keys.len().to_string(),
+                    ),
+                    (
+                        "restart_required".to_string(),
+                        result.restart_required.to_string(),
+                    ),
+                    (
+                        "rollback_performed".to_string(),
+                        result.rollback_performed.to_string(),
+                    ),
+                ]),
+            );
             let _ = state.event_tx.send(DashboardEvent::ConfigSaved {
                 timestamp: unix_timestamp(),
             });
@@ -62,14 +88,24 @@ pub async fn handler_config_save(
                 "rollback_performed":result.rollback_performed,
             })))
         }
-        Err(error) => Err((
-            error.status,
-            Json(json!({
-                "status":"error",
-                "success":false,
-                "code":error.code,
-                "message":error.message,
-            })),
-        )),
+        Err(error) => {
+            state.audit_log.record(
+                "dashboard",
+                "config_apply",
+                "configuration",
+                AuditOutcome::Failure,
+                correlation,
+                BTreeMap::from([("error_code".to_string(), error.code.to_string())]),
+            );
+            Err((
+                error.status,
+                Json(json!({
+                    "status":"error",
+                    "success":false,
+                    "code":error.code,
+                    "message":error.message,
+                })),
+            ))
+        }
     }
 }

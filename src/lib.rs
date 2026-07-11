@@ -5,6 +5,7 @@
 //! All public API items are exposed through their respective modules.
 
 pub mod app;
+pub mod audit;
 pub mod cli;
 pub mod config;
 pub mod dashboard;

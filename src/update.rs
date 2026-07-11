@@ -195,7 +195,10 @@ fn parse_sha256(text: &str) -> Result<String> {
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 async fn install_candidate(target: &Path, bytes: &[u8], expected_sha256: &str) -> Result<()> {
@@ -209,7 +212,13 @@ async fn install_candidate(target: &Path, bytes: &[u8], expected_sha256: &str) -
     let parent = target
         .parent()
         .context("current binary has no parent directory")?;
-    let suffix = format!("{}-{}", std::process::id(), uuid::Uuid::new_v4().simple());
+    let suffix = format!(
+        "{}-{}",
+        std::process::id(),
+        crate::infrastructure::random::secure_random_hex(8).map_err(|error| {
+            anyhow!("failed to generate update transaction identifier: {error}")
+        })?
+    );
     let file_name = target
         .file_name()
         .and_then(|value| value.to_str())
@@ -260,19 +269,22 @@ async fn install_candidate(target: &Path, bytes: &[u8], expected_sha256: &str) -
 }
 
 async fn smoke_binary(path: &Path) -> Result<()> {
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        tokio::process::Command::new(path).arg("--version").output(),
-    )
-    .await
-    .context("binary smoke test timed out")??;
-    if output.status.success() {
+    use crate::infrastructure::command::{CommandRequest, CommandRunner, SystemCommandRunner};
+
+    let output = SystemCommandRunner
+        .output(
+            CommandRequest::new(path.to_string_lossy().to_string(), ["--version"])
+                .with_timeout(std::time::Duration::from_secs(5)),
+        )
+        .await
+        .context("binary smoke test failed to execute")?;
+    if output.success {
         Ok(())
     } else {
         Err(anyhow!(
-            "binary smoke test returned {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
+            "binary smoke test returned {:?}: {}",
+            output.code,
+            output.stderr_text()
         ))
     }
 }
@@ -438,7 +450,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!(
             "opencode2api-update-{name}-{}-{}",
             std::process::id(),
-            uuid::Uuid::new_v4().simple()
+            crate::infrastructure::random::secure_random_hex(8).unwrap()
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir

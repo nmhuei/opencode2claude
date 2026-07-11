@@ -1,5 +1,6 @@
 //! Application state shared across all handlers.
 
+use crate::audit::AuditLog;
 use crate::config::BridgeConfig;
 use crate::dashboard::DashboardEvent;
 use crate::docker::{ContainerRuntime, DockerCliRuntime};
@@ -41,6 +42,8 @@ pub struct AppState {
     pub workers: Arc<WorkerRegistry>,
     /// In-process request counters and latency aggregates.
     pub metrics: Arc<Metrics>,
+    /// Bounded secret-safe management audit trail.
+    pub audit_log: Arc<AuditLog>,
     /// Broadcast channel for dashboard SSE events.
     pub event_tx: broadcast::Sender<DashboardEvent>,
     /// Unix timestamp (seconds) when the server started.
@@ -109,6 +112,7 @@ impl AppState {
             .map(|permits| Arc::new(Semaphore::new(permits)));
         let workers = Arc::new(WorkerRegistry::new());
         let metrics = Arc::new(Metrics::default());
+        let audit_log = Arc::new(AuditLog::default());
         let search_client =
             SearchClient::new_with_metrics(http_client.clone(), &config, metrics.clone());
 
@@ -203,6 +207,7 @@ impl AppState {
             file_store,
             workers,
             metrics,
+            audit_log,
             event_tx,
             started_at,
         }

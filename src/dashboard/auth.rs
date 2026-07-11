@@ -32,7 +32,15 @@ pub async fn handler_login(
             if !token.is_empty()
                 && management_auth::token_eq(token.as_bytes(), admin_token.as_bytes()) =>
         {
-            let csrf_token = uuid::Uuid::new_v4().simple().to_string();
+            let csrf_token =
+                crate::infrastructure::random::secure_random_hex(24).map_err(|_| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(
+                            json!({"status": "error", "message": "failed to generate CSRF token"}),
+                        ),
+                    )
+                })?;
             let mut response = Json(json!({
                 "status": "ok",
                 "success": true,

@@ -2,6 +2,28 @@
 
 All notable changes to opencode2api will be documented in this file.
 
+## [0.5.0] — 2026-07-11
+
+### Added
+- Typed management DTO schemas, generated OpenAPI, authenticated metrics, config preview/apply, CSRF enforcement, audit-safe lifecycle operations, and truthful liveness/readiness.
+- Deterministic protocol conformance fixtures for sync/SSE, fragmented UTF-8 and tool arguments, malformed upstream data, bounded response parsing, and downstream cancellation.
+- Typed search-provider adapters for Tavily, Exa, Serper, SearXNG, and DuckDuckGo with local HTTP fixtures, SSRF policy, timeouts, and response bounds.
+- Tier A/B/C verification scripts, parser fuzz-smoke corpus, repository secret scanner, disposable installer tests, and scheduled real-WARP system workflow.
+- Release checksums, SPDX SBOMs, build provenance, release-artifact install smoke, and keyless container signing.
+- Complete configuration, compatibility, management, security, deployment, observability, troubleshooting, testing, rollback, and release documentation.
+
+### Changed
+- Supervisor PID files now carry executable/start identity and refuse to terminate unrelated reused PIDs.
+- Self-update and install are checksum-verified transactions with candidate smoke tests and rollback.
+- Dependency graph upgraded and normalized; security and license policy now passes `cargo audit` and `cargo deny`.
+- README and CLI documentation now describe only executable, tested contracts.
+
+### Fixed
+- Streaming tasks now observe client cancellation while blocked on upstream body reads.
+- Direct-mode stop and doctor no longer touch or require Docker proxy infrastructure.
+- Retry metrics distinguish transport, timeout, rate-limit, provider errors, malformed responses, and model fallback.
+- Proxy restart accounting, protected-standby lifecycle, config migration, and recursive atomic config apply behavior.
+
 ## [0.4.2] — 2026-07-10
 
 ### Fixed

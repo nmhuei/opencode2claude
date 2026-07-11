@@ -10,6 +10,8 @@ allow = [
     "ISC",
     "Unicode-3.0",
     "CDLA-Permissive-2.0",
+    # Transitive dependency `option-ext` used by rust-embed's path handling.
+    "MPL-2.0",
 ]
 confidence-threshold = 0.8
 [bans]
@@ -20,6 +22,8 @@ skip = [
     { crate = "tower", reason = "0.4 direct dep, 0.5 required by axum" },
     # tower-http 0.5 vs 0.6: 0.5 used directly, 0.6 required by reqwest
     { crate = "tower-http", reason = "0.5 direct dep, 0.6 required by reqwest" },
+    # hashbrown 0.15 comes from tokio-util/tower while 0.17 comes from toml/indexmap.
+    { crate = "hashbrown", reason = "independent transitive trees: async runtime and TOML parser" },
     # windows-sys: unavoidable transitive dupes on linux
     { crate = "windows-sys", reason = "unavoidable transitive dep on non-Windows" },
 ]

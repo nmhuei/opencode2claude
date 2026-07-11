@@ -339,6 +339,31 @@ impl Drop for ActiveRequestGuard<'_> {
 #[derive(Debug, Clone)]
 pub struct RequestId(pub String);
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct RequestCompletionLog {
+    request_id: String,
+    method: String,
+    path: String,
+    status: u16,
+    elapsed_ms: u64,
+}
+
+fn request_completion_log(
+    request_id: String,
+    method: impl ToString,
+    path: String,
+    status: u16,
+    elapsed_ms: u64,
+) -> RequestCompletionLog {
+    RequestCompletionLog {
+        request_id,
+        method: method.to_string(),
+        path,
+        status,
+        elapsed_ms,
+    }
+}
+
 pub async fn request_observability_middleware(
     State(state): State<AppState>,
     mut request: Request,
@@ -353,6 +378,8 @@ pub async fn request_observability_middleware(
         .parse::<HeaderName>()
         .unwrap_or_else(|_| HeaderName::from_static("x-request-id"));
 
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
     let request_id = request
         .headers()
         .get(&header_name)
@@ -369,9 +396,17 @@ pub async fn request_observability_middleware(
         response.headers_mut().insert(header_name, value);
     }
     let elapsed_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-    state
-        .metrics
-        .record_response(response.status().as_u16(), elapsed_ms);
+    let status = response.status().as_u16();
+    state.metrics.record_response(status, elapsed_ms);
+    let log = request_completion_log(request_id, method, path, status, elapsed_ms);
+    tracing::info!(
+        request_id = %log.request_id,
+        method = %log.method,
+        path = %log.path,
+        status = log.status,
+        elapsed_ms = log.elapsed_ms,
+        "http request completed"
+    );
     response
 }
 
@@ -399,6 +434,27 @@ mod tests {
         assert!(!valid_request_id("has space"));
         assert!(!valid_request_id("a,b"));
         assert!(!valid_request_id(&"x".repeat(129)));
+    }
+
+    #[test]
+    fn request_log_record_has_a_strict_secret_free_field_whitelist() {
+        let log = request_completion_log(
+            "capture-123".to_string(),
+            "POST",
+            "/v1/messages".to_string(),
+            200,
+            42,
+        );
+        let encoded = serde_json::to_value(&log).unwrap();
+        assert_eq!(encoded["request_id"], "capture-123");
+        assert_eq!(encoded["method"], "POST");
+        assert_eq!(encoded["path"], "/v1/messages");
+        assert_eq!(encoded["status"], 200);
+        assert_eq!(encoded["elapsed_ms"], 42);
+        assert_eq!(encoded.as_object().unwrap().len(), 5);
+        assert!(encoded.get("authorization").is_none());
+        assert!(encoded.get("headers").is_none());
+        assert!(encoded.get("body").is_none());
     }
 
     #[test]

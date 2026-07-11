@@ -1,5 +1,6 @@
 //! Typed management API data-transfer objects and their OpenAPI schemas.
 
+use crate::audit::AuditEvent;
 use crate::management::service::{ProxyRestartResult, SafeConfigSnapshot};
 use crate::observability::MetricsSnapshot;
 use crate::proxy_pool::ProxyPoolStats;
@@ -213,6 +214,39 @@ impl ApiSchema for MetricsResponse {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct AuditEventsResponse {
+    pub events: Vec<AuditEvent>,
+}
+
+impl ApiSchema for AuditEventsResponse {
+    const NAME: &'static str = "AuditEventsResponse";
+    fn schema() -> Value {
+        object_schema(
+            &["events"],
+            json!({
+                "events": {
+                    "type":"array",
+                    "items": {
+                        "type":"object",
+                        "additionalProperties":false,
+                        "required":["timestamp_secs","actor","action","target","outcome"],
+                        "properties": {
+                            "timestamp_secs":{"type":"integer","minimum":0},
+                            "actor":{"type":"string"},
+                            "action":{"type":"string"},
+                            "target":{"type":"string"},
+                            "outcome":{"type":"string","enum":["success","failure"]},
+                            "request_id":{"type":["string","null"]},
+                            "details":{"type":"object","additionalProperties":{"type":"string"}}
+                        }
+                    }
+                }
+            }),
+        )
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ConfigDocumentRequest {
     pub content: String,
@@ -310,6 +344,7 @@ pub fn schema_components() -> Value {
     insert_schema::<ConfigResponse>(&mut schemas);
     insert_schema::<ProxyActionResponse>(&mut schemas);
     insert_schema::<MetricsResponse>(&mut schemas);
+    insert_schema::<AuditEventsResponse>(&mut schemas);
     insert_schema::<ConfigDocumentRequest>(&mut schemas);
     insert_schema::<ConfigPreviewResponse>(&mut schemas);
     insert_schema::<ConfigApplyResponse>(&mut schemas);
@@ -347,6 +382,7 @@ mod tests {
             ConfigResponse::NAME,
             ProxyActionResponse::NAME,
             MetricsResponse::NAME,
+            AuditEventsResponse::NAME,
             ConfigDocumentRequest::NAME,
             ConfigPreviewResponse::NAME,
             ConfigApplyResponse::NAME,

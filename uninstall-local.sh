@@ -16,7 +16,6 @@
 # ══════════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
-BOLD=$'\033[1m'
 NC=$'\033[0m'
 GREEN=$'\033[0;32m'
 BLUE=$'\033[0;34m'
@@ -61,9 +60,16 @@ add_dir() {
     DIRS+=("$dir")
 }
 
-add_dir "$HOME/.local/bin"
-add_dir "$HOME/.cargo/bin"
-add_dir "/usr/local/bin"
+if [ -n "${OPENCODE2API_UNINSTALL_DIRS:-}" ]; then
+    IFS=':' read -r -a configured_dirs <<< "$OPENCODE2API_UNINSTALL_DIRS"
+    for dir in "${configured_dirs[@]}"; do
+        add_dir "$dir"
+    done
+else
+    add_dir "$HOME/.local/bin"
+    add_dir "$HOME/.cargo/bin"
+    add_dir "/usr/local/bin"
+fi
 
 if [ "$ALL_PATH" = true ]; then
     IFS=':' read -r -a path_dirs <<< "${PATH:-}"
@@ -81,25 +87,25 @@ removed=0
 found=0
 needs_sudo=false
 
-# Also clean stale Cargo build artifacts in this checkout. These are not valid
-# current binaries anymore and can shadow ~/.local/bin when target/* is in PATH.
-for stale in opencode2claude oc2api o2a; do
-    for dir in target/release target/debug; do
-        path="$dir/$stale"
-        if [ -e "$path" ] || [ -L "$path" ]; then
-            found=$((found + 1))
-            if [ "$DRY_RUN" = true ]; then
-                printf '  would remove %s
-' "$path"
-            else
-                rm -f "$path"
-                printf '  removed %s
-' "$path"
-                removed=$((removed + 1))
+# Also clean stale Cargo build artifacts in this checkout unless an isolated
+# test/operator scope explicitly disables it.
+if [ "${OPENCODE2API_SKIP_BUILD_ARTIFACTS:-false}" != "true" ]; then
+    for stale in opencode2claude oc2api o2a; do
+        for dir in target/release target/debug; do
+            path="$dir/$stale"
+            if [ -e "$path" ] || [ -L "$path" ]; then
+                found=$((found + 1))
+                if [ "$DRY_RUN" = true ]; then
+                    printf '  would remove %s\n' "$path"
+                else
+                    rm -f "$path"
+                    printf '  removed %s\n' "$path"
+                    removed=$((removed + 1))
+                fi
             fi
-        fi
+        done
     done
-done
+fi
 
 info "Scanning install directories..."
 for dir in "${DIRS[@]}"; do

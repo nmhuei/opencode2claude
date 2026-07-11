@@ -1,147 +1,160 @@
-# CLI Reference
+# CLI reference
 
-`opencode2api` provides a unified, hierarchical subcommand-based CLI (v2) for managing the bridge lifecycle, proxy pools, and system diagnostics.
+OpenCode2API uses hierarchical commands and supports `--json`, `--quiet`, and `--color auto|always|never` as global output options.
 
-## Global Flags
-
-Global flags can be placed anywhere in the command line invocation:
-
-*   `--json`: Output in JSON format (machine-readable, hides human-only dashboards/tables/spinners).
-*   `--quiet`: Minimal output (displays compact status line summaries or errors only).
-*   `--color <auto|always|never>`: Control terminal color styling (default: `auto`).
-
----
-
-## Command Tree
+## Command tree
 
 ```text
 opencode2api
 ├── server
-│   ├── start [-f] [-p PORT] [--host HOST] [-c CONFIG] [-m MODEL] [--shell-policy POLICY]
-│   ├── stop [-p PORT] [--host HOST]
-│   ├── status [-p PORT] [--host HOST]
+│   ├── start
+│   ├── stop
+│   ├── status
 │   ├── restart
 │   ├── logs
 │   └── config
 ├── proxy
-│   ├── ps (status)
+│   ├── ps
 │   ├── restart
-│   ├── purge [-y]
+│   ├── purge
 │   └── logs
+├── dashboard
+│   ├── start
+│   └── status
 ├── env
 ├── doctor
-├── completion <SHELL>
-├── update [--check] [--force]
-└── init [-o OUTPUT] [-f]
+├── completion <shell>
+├── update
+└── init
 ```
 
----
+Use `opencode2api <command> --help` as the executable source of truth.
 
-## 1. `server` Commands
+## Global output
 
-Manage the bridge server process lifecycle.
+- `--json` returns machine-readable output for commands that expose a schema.
+- `--quiet` suppresses presentation detail and retains compact success/error output.
+- `--color auto|always|never` controls ANSI output.
 
-### `server start`
-Start the bridge server process. By default, this spawns the bridge as a detached background daemon and writes its PID to `~/.opencode2api/opencode2api.pid.json`.
+## Server lifecycle
 
-*   **Flags:**
-    *   `-f, --foreground`: Run in the current terminal foreground (do not daemonize).
-    *   `-p, --port <PORT>`: Port for the API bridge (default: `4000`, env: `BRIDGE_PORT`).
-    *   `--host <HOST>`: Bind host address (default: `127.0.0.1`, env: `BRIDGE_HOST`).
-    *   `-c, --config <PATH>`: Custom TOML configuration path.
-    *   `-m, --model <MODEL>`: Upstream model override (e.g., `opencode/deepseek-v4-flash-free`).
-    *   `--shell-policy <disabled|allowlist|unrestricted>`: Enable local shell execution from prompts starting with `!`.
-    *   `--tavily-api-key <KEY>`: Tavily web search API key override.
-    *   `--exa-api-key <KEY>`: Exa web search API key override.
-    *   `--serper-api-key <KEY>`: Serper.dev web search API key override.
-    *   `--searxng-url <URL>`: SearXNG web search URL override.
-    *   `--searxng-api-key <KEY>`: SearXNG web search API key override.
+### Start
 
-### `server stop`
-Stop the running bridge daemon cleanly. Reads the PID file to terminate the exact process and frees the port.
+```bash
+opencode2api server start [OPTIONS]
+```
 
-*   **Flags:**
-    *   `-p, --port <PORT>`: Target port of the daemon to stop (default: `4000`).
-    *   `--host <HOST>`: Target host of the daemon to stop (default: `127.0.0.1`).
+Important options:
 
-### `server status`
-Show the detailed runtime dashboard (PID, port, model, auth, uptime, and proxy pool table).
+- `-f, --foreground` — stay attached to the current terminal;
+- `-p, --port PORT` and `--host HOST` — override bind address;
+- `-c, --config PATH` — select TOML file;
+- `-m, --model MODEL` — override model;
+- `--shell-policy disabled|allowlist|unrestricted` — override delegation policy;
+- provider credential/URL overrides for Tavily, Exa, Serper, and SearXNG;
+- `--no-proxy` — resolve to direct mode and do not touch Docker proxy containers;
+- `--max-body-size BYTES` — override incoming request limit, with `0` meaning unlimited.
 
-*   **Flags:**
-    *   `-p, --port <PORT>`: Target port of the daemon to query (default: `4000`).
-    *   `--host <HOST>`: Target host of the daemon to query (default: `127.0.0.1`).
-*   **Quiet Output:** Outputs a single compact status string: `running`, `stopped`, or `error`.
+Background start writes process identity metadata to the runtime directory. Duplicate start is idempotent when the existing managed process is healthy.
 
-### `server restart`
-Restart the bridge daemon process.
+### Stop
 
-### `server logs`
-View recent bridge daemon logs (tailing `~/.opencode2api/opencode2api.log`).
+```bash
+opencode2api server stop [--port PORT] [--host HOST] [--purge]
+```
 
-### `server config`
-Display the current resolved configuration schema derived from CLI overrides, environment variables, TOML, and hardcoded defaults.
+Stop signals only a process whose executable and start marker match the PID record. `--purge` additionally removes managed primary proxy resources; protected standbys remain untouched. Direct-mode stop never invokes Docker.
 
----
+### Status, restart, logs, config
 
-## 2. `proxy` Commands
+```bash
+opencode2api server status
+opencode2api server restart
+opencode2api server logs
+opencode2api server config
+```
 
-Manage proxy pool Docker containers for multi-agent Cloudflare WARP egress.
+Status distinguishes managed running, unmanaged running, and stopped states. Config output is safe/redacted. Restart performs bounded stop/start. Logs read the managed daemon log path.
 
-### `proxy ps`
-List SOCKS5 proxy containers (role, port, status, name).
+## Proxy commands
 
-*   **Quiet Output:** Outputs a single-line summary: `primary=X/Y standby=A/B`.
+```bash
+opencode2api proxy ps
+opencode2api proxy restart [--dry-run]
+opencode2api proxy purge [--yes] [--dry-run]
+opencode2api proxy logs
+```
 
-### `proxy restart`
-Recreate primary managed proxy containers (ports `40001`–`40003`) to rotate egress IPs. Warm-standby proxies are skipped/protected.
+Restart and purge target managed primary nodes only. Protected warm standbys and actively leased nodes are rejected before container-runtime access. Use `--dry-run` in automation to inspect the exact action plan.
 
-### `proxy purge`
-Fully remove and recreate all primary proxy containers to wipe Docker caches and enforce fresh container state.
+## Dashboard
 
-*   **Flags:**
-    *   `-y, --yes`: Skip verification prompt.
+```bash
+opencode2api dashboard start
+opencode2api dashboard status
+```
 
-### `proxy logs`
-Tail recent logs from active SOCKS5 proxy containers.
+These commands report or open the dashboard URL; they do not create a second HTTP service.
 
----
+## Environment and diagnostics
 
-## 3. General Utilities
+```bash
+opencode2api env
+opencode2api doctor
+```
 
-### `env`
-Display resolved environment configuration details for Claude Code integrations.
+`env` emits the Claude Code integration variables derived from resolved configuration. `doctor` evaluates configuration, port, runtime, Docker/proxy requirements, and other dependencies appropriate to the selected egress mode. Docker is not treated as required in direct mode.
 
-### `doctor`
-Diagnose common issues with the bridge and its requirements (Docker daemon, port availability, container health, config formats, security auth state, and upstream API reachability).
+## Completion
 
-*   **Quiet Output:** Outputs aggregate summary results: `warnings=X failures=Y`. Fails with exit code 1 if failures > 0.
+```bash
+opencode2api completion bash
+opencode2api completion zsh
+opencode2api completion fish
+opencode2api completion powershell
+opencode2api completion elvish
+```
 
-### `completion <SHELL>`
-Generate shell autocomplete scripts. Supported values: `bash`, `zsh`, `fish`, `powershell`, `elvish`.
+## Initialize configuration
 
-### `update`
-Self-update the running binary atomically by checking GitHub releases.
+```bash
+opencode2api init --output opencode2api.toml
+opencode2api init --output opencode2api.toml --force
+```
 
-*   **Flags:**
-    *   `--check`: Inspect if an update is available without downloading.
-    *   `--force`: Reinstall even if the local version is already up-to-date.
+Without `--force`, an existing file is not overwritten.
 
-### `init`
-Generate a fully commented default TOML configuration template (`opencode2api.toml`).
+## Update
 
-*   **Flags:**
-    *   `-o, --output <PATH>`: Output path (default: `opencode2api.toml`).
-    *   `-f, --force`: Overwrite existing configuration file without prompting.
+```bash
+opencode2api update --check
+opencode2api update
+opencode2api update --force
+```
 
----
+Update requires a companion SHA-256 checksum, smoke-tests the candidate, replaces atomically, and rolls back when post-install smoke fails.
 
-## Backward-Compatible Aliases (Hidden)
+## Legacy aliases
 
-The legacy flat commands remain supported for backward-compatibility but will log a deprecation warning:
+Hidden compatibility aliases remain for `serve`, `start`, `status`, `stop`, `restart`, and `logs`. New scripts should use the hierarchical command form.
 
-*   `serve` $\rightarrow$ Alias for `server start -f`
-*   `start` $\rightarrow$ Alias for `server start`
-*   `status` $\rightarrow$ Alias for `server status`
-*   `stop` $\rightarrow$ Alias for `server stop`
-*   `restart` $\rightarrow$ Alias for `server restart`
-*   `logs` $\rightarrow$ Alias for `server logs`
+## Exit codes
+
+| Code | Meaning |
+|---:|---|
+| `0` | Command completed successfully. |
+| `1` | Operational, validation, dependency, lifecycle, or diagnostic failure. |
+| `2` | Invalid CLI syntax or missing required argument as reported by Clap. |
+
+`doctor` returns nonzero when its report contains failures. Machine-readable output does not change exit-code semantics.
+
+## Automation examples
+
+```bash
+opencode2api --json server status | jq
+opencode2api --json proxy restart --dry-run | jq
+opencode2api --json doctor > doctor.json
+opencode2api completion bash > ~/.local/share/bash-completion/completions/opencode2api
+```
+
+The deterministic command contract is exercised by `tests/cli_e2e.sh`.

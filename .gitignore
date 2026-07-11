@@ -40,6 +40,8 @@ start_setsid.log
 /test
 /test.*
 /target.tmp
+__pycache__/
+*.py[cod]
 
 # ── Documentation Build ───────────────────────────────
 /target/doc/

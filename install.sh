@@ -11,8 +11,10 @@
 #   sh install.sh
 #
 # Environment variables
-#   OPENCODE2API_VERSION  Version tag to install (default: latest)
-#   OPENCODE2API_BINDIR   Install directory (default: auto-detect)
+#   OPENCODE2API_VERSION       Version tag to install (default: latest)
+#   OPENCODE2API_BINDIR        Install directory (default: auto-detect)
+#   OPENCODE2API_DOWNLOAD_URL  Explicit binary URL (tests/private mirrors)
+#   OPENCODE2API_CHECKSUM_URL  Explicit SHA-256 URL (default: <binary-url>.sha256)
 #
 
 set -eu
@@ -114,17 +116,43 @@ find_download_tool() {
     fi
 }
 
+verify_sha256() {
+    file="$1"
+    checksum_file="$2"
+    expected="$(grep -Eo '[A-Fa-f0-9]{64}' "$checksum_file" | head -1 | tr 'A-F' 'a-f')"
+    if [ -z "$expected" ]; then
+        err "Checksum file does not contain a SHA-256 value."
+        return 1
+    fi
+
+    if command -v sha256sum >/dev/null 2>&1; then
+        actual="$(sha256sum "$file" | awk '{print $1}')"
+    elif command -v shasum >/dev/null 2>&1; then
+        actual="$(shasum -a 256 "$file" | awk '{print $1}')"
+    else
+        err "Neither sha256sum nor shasum is available."
+        return 1
+    fi
+
+    if [ "$actual" != "$expected" ]; then
+        err "SHA-256 verification failed."
+        err "Expected: $expected"
+        err "Actual:   $actual"
+        return 1
+    fi
+    ok "SHA-256 verified."
+}
+
 # ══════════════════════════════════════════════════════════════════════
 #  Version helpers
 # ══════════════════════════════════════════════════════════════════════
 fetch_latest_version() {
     # May fail due to rate-limiting or network — caller handles empty return.
-    local tmpfile
-    tmpfile="$(mktemp 2>/dev/null || echo "/tmp/opencode2api-version.$$")"
-    dl "$API_URL" "$tmpfile" 2>/dev/null || true
-    grep '"tag_name"' "$tmpfile" 2>/dev/null |
+    fetch_tmpfile="$(mktemp 2>/dev/null || echo "/tmp/opencode2api-version.$$")"
+    dl "$API_URL" "$fetch_tmpfile" 2>/dev/null || true
+    grep '"tag_name"' "$fetch_tmpfile" 2>/dev/null |
         sed 's/.*"tag_name": *"\([^"]*\)".*/\1/' || true
-    rm -f "$tmpfile" 2>/dev/null || true
+    rm -f "$fetch_tmpfile" 2>/dev/null || true
 }
 
 get_installed_version() {
@@ -166,7 +194,7 @@ confirm() {
 # ══════════════════════════════════════════════════════════════════════
 choose_install_dir() {
     # 1. Env-var override
-    local env_override="${OPENCODE2API_BINDIR:-${OPENCODE2CLAUDE_BINDIR:-}}"
+    env_override="${OPENCODE2API_BINDIR:-${OPENCODE2CLAUDE_BINDIR:-}}"
     if [ -n "$env_override" ]; then
         installdir="$env_override"
         use_sudo=false
@@ -174,7 +202,7 @@ choose_install_dir() {
         return
     fi
 
-    local home="${HOME:-~}"
+    home_dir="${HOME:-~}"
 
     # 2. /usr/local/bin — with sudo when needed
     if [ -d /usr/local/bin ]; then
@@ -185,11 +213,11 @@ choose_install_dir() {
             installdir="/usr/local/bin"
             use_sudo=true
         else
-            installdir="${home}/.local/bin"
+            installdir="${home_dir}/.local/bin"
             use_sudo=false
         fi
     else
-        installdir="${home}/.local/bin"
+        installdir="${home_dir}/.local/bin"
         use_sudo=false
     fi
 
@@ -212,13 +240,17 @@ do_install() {
     tmpdir="$(mktemp -d "/tmp/${PROJECT}.XXXXXX")"
 
     version="${OPENCODE2API_VERSION:-${OPENCODE2CLAUDE_VERSION:-latest}}"
-    if [ "$version" = "latest" ]; then
+    if [ -n "${OPENCODE2API_DOWNLOAD_URL:-}" ]; then
+        download_url="$OPENCODE2API_DOWNLOAD_URL"
+    elif [ "$version" = "latest" ]; then
         download_url="${GITHUB}/releases/latest/download/${binary}"
     else
         download_url="${GITHUB}/releases/download/${version}/${binary}"
     fi
+    checksum_url="${OPENCODE2API_CHECKSUM_URL:-${download_url}.sha256}"
 
     target="${tmpdir}/${PROJECT}"
+    checksum_target="${tmpdir}/${PROJECT}.sha256"
 
     info "Downloading ${BOLD}${binary}${NC}..."
     if ! dl "$download_url" "$target"; then
@@ -226,9 +258,19 @@ do_install() {
         err "Binary download failed."
         return 1
     fi
+    info "Downloading SHA-256 checksum..."
+    if ! dl "$checksum_url" "$checksum_target"; then
+        err "Checksum download failed; refusing to install an unverified binary."
+        return 1
+    fi
+    verify_sha256 "$target" "$checksum_target" || return 1
     echo ""
 
     chmod +x "$target"
+    if ! "$target" --version >/dev/null 2>&1; then
+        err "Downloaded binary failed the pre-install smoke test."
+        return 1
+    fi
 
     info "Installing to ${BOLD}${installdir}${NC}..."
     if [ "$use_sudo" = true ]; then
@@ -268,9 +310,9 @@ check_opencode() {
         printf '%s\n' ""
         printf '  %s%s%s\n' "${BOLD}" "Alternative methods:" "${NC}"
         printf '%s\n' ""
-        printf '  %s%s  %s%s%s\n' "• npm:" "${CYAN}" "npm install -g @opencode/cli" "${NC}"
-        printf '  %s%s  %s%s%s\n' "• brew:" "${CYAN}" "brew install opencode-ai/cli/opencode" "${NC}"
-        printf '  %s%s  %s%s%s\n' "• cargo:" "${CYAN}" "cargo install opencode-cli" "${NC}"
+        printf '  %s  %s%s%s\n' "• npm:" "${CYAN}" "npm install -g @opencode/cli" "${NC}"
+        printf '  %s  %s%s%s\n' "• brew:" "${CYAN}" "brew install opencode-ai/cli/opencode" "${NC}"
+        printf '  %s  %s%s%s\n' "• cargo:" "${CYAN}" "cargo install opencode-cli" "${NC}"
         printf '%s\n' ""
         printf '  %s\n' "See: https://github.com/opencode-ai/opencode"
     fi

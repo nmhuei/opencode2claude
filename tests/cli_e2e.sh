@@ -5,8 +5,8 @@ set -Eeuo pipefail
 
 PROFILE="${1:-debug}"
 BIN="./target/${PROFILE}/opencode2api"
-ROOT_DIR="$(pwd)"
-TEST_ROOT="$(mktemp -d -t opencode2api-cli-e2e.XXXXXX)"
+EXPECTED_VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
+TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/opencode2api-cli-e2e.XXXXXX")"
 RUNTIME_DIR="$TEST_ROOT/runtime"
 CONFIG_FILE="$TEST_ROOT/opencode2api.toml"
 INIT_FILE="$TEST_ROOT/generated.toml"
@@ -135,7 +135,7 @@ export NO_COLOR=1
 
 section "CLI parsing and output contracts"
 assert_contains "help shows usage" "Usage:" "$BIN" --help
-assert_contains "version shows semver" "0.4.2" "$BIN" --version
+assert_contains "version shows package semver" "$EXPECTED_VERSION" "$BIN" --version
 assert_contains "server help exposes lifecycle" "restart" "$BIN" server --help
 assert_contains "proxy help exposes dry-run" "--dry-run" "$BIN" proxy restart --help
 assert_failure "invalid subcommand exits non-zero" "$BIN" server nonexistent
@@ -155,13 +155,21 @@ assert_json "proxy purge dry-run plans six actions" "len(d) == 6 and all(x['dry_
 
 section "Config initialization and migration surface"
 assert_success "init creates config" "$BIN" init --output "$INIT_FILE"
-[[ -f "$INIT_FILE" ]] && pass "generated config exists" || fail "generated config exists" "missing $INIT_FILE"
+if [[ -f "$INIT_FILE" ]]; then
+  pass "generated config exists"
+else
+  fail "generated config exists" "missing $INIT_FILE"
+fi
 assert_failure "init refuses overwrite without force" "$BIN" init --output "$INIT_FILE"
 assert_success "init force overwrites" "$BIN" init --output "$INIT_FILE" --force
 
 section "Managed daemon lifecycle"
 assert_success "daemon starts in direct mode" "$BIN" server start --port "$TEST_PORT" --config "$CONFIG_FILE" --no-proxy
-[[ -f "$PID_FILE" ]] && pass "PID file created" || fail "PID file created" "missing $PID_FILE"
+if [[ -f "$PID_FILE" ]]; then
+  pass "PID file created"
+else
+  fail "PID file created" "missing $PID_FILE"
+fi
 if [[ -f "$PID_FILE" ]] && python3 - "$PID_FILE" <<'PY'
 import json,sys
 p=json.load(open(sys.argv[1]))
@@ -184,7 +192,11 @@ assert_success "server restart succeeds" "$BIN" server restart
 if wait_http /health/live 200; then pass "server is live after restart"; else fail "server is live after restart" "liveness unavailable"; fi
 assert_success "server logs command succeeds" "$BIN" server logs
 assert_success "daemon stops" "$BIN" server stop --port "$TEST_PORT"
-[[ ! -f "$PID_FILE" ]] && pass "PID file removed after stop" || fail "PID file removed after stop" "still exists"
+if [[ ! -f "$PID_FILE" ]]; then
+  pass "PID file removed after stop"
+else
+  fail "PID file removed after stop" "still exists"
+fi
 if ! curl -fsS "http://127.0.0.1:${TEST_PORT}/health/live" >/dev/null 2>&1; then pass "port no longer serves after stop"; else fail "port no longer serves after stop" "server still responding"; fi
 assert_success "second stop is idempotent" "$BIN" server stop --port "$TEST_PORT"
 

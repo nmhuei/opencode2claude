@@ -4,45 +4,93 @@ on:
   push:
   pull_request:
 
-jobs:
-  verify:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+permissions:
+  contents: read
 
-      - name: Install Rust toolchain
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tier-a:
+    name: Tier A (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
 
-      - name: Feature contract matrix
-        run: ./scripts/check_feature_matrix.py
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
 
-      - name: Resolved configuration boundary
-        run: ./scripts/check_config_boundary.py
+      - name: Run deterministic Tier A
+        run: |
+          chmod +x scripts/*.sh tests/*.sh
+          scripts/tier-a.sh
 
-      - name: Infrastructure command boundary
-        run: ./scripts/check_infrastructure_boundary.py
+      - name: Upload Tier A evidence
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: tier-a-${{ matrix.os }}-${{ github.sha }}
+          path: |
+            verification/completion/
+            target/debug/opencode2api
+          if-no-files-found: warn
+          retention-days: 14
 
-      - name: Verification (CI profile)
-        run: ./scripts/verify.sh all --profile ci
-
-      - name: Shellcheck
-        run: shellcheck --shell=bash scripts/verify.sh scripts/lib/*.sh scripts/phases/*.sh start.sh stop.sh install.sh
-
-      - name: Cargo audit
-        run: cargo install cargo-audit --locked && cargo audit
-
-      - name: Cargo deny
-        run: cargo install cargo-deny --locked && cargo deny check
-
-  release-build:
-    runs-on: ubuntu-latest
+  tier-b:
+    name: Tier B (${{ matrix.os }})
+    needs: tier-a
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - name: Install Rust toolchain
+      - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
 
-      - name: Build release
-        run: cargo build --release --locked
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install ShellCheck on Linux
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y shellcheck
+
+      - name: Install ShellCheck on macOS
+        if: runner.os == 'macOS'
+        run: brew install shellcheck
+
+      - name: Install supply-chain tools
+        run: |
+          cargo install cargo-audit --locked
+          cargo install cargo-deny --locked
+
+      - name: Run protected Tier B
+        env:
+          SKIP_TIER_A: '1'
+        run: |
+          chmod +x scripts/*.sh tests/*.sh
+          scripts/tier-b.sh
+
+      - name: Version-check release binary
+        run: python3 scripts/check_version_consistency.py --binary target/release/opencode2api
+
+      - name: Upload release smoke binary
+        uses: actions/upload-artifact@v5
+        with:
+          name: tier-b-${{ matrix.os }}-${{ github.sha }}
+          path: target/release/opencode2api
+          retention-days: 14

@@ -48,7 +48,7 @@ impl PidFile {
                 .as_millis() as u64,
             executable: identity.executable,
             start_marker: identity.start_marker,
-            instance_id: Some(uuid::Uuid::new_v4().simple().to_string()),
+            instance_id: crate::infrastructure::random::secure_random_hex(16).ok(),
         }
     }
 

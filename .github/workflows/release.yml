@@ -5,12 +5,82 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: read
+
 jobs:
-  # ── Job 1: Build binary cho nhiều nền tảng ──────────────────────────
+  release-gates:
+    name: Release gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install gate tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y shellcheck
+          cargo install cargo-audit --locked
+          cargo install cargo-deny --locked
+
+      - name: Verify tag and package versions
+        run: python3 scripts/check_version_consistency.py --tag "${GITHUB_REF_NAME}"
+
+      - name: Require completion matrix closure
+        env:
+          REQUIRE_VERIFIED: '1'
+        run: python3 scripts/check_feature_matrix.py
+
+      - name: Run Tier B
+        run: |
+          chmod +x scripts/*.sh tests/*.sh
+          scripts/tier-b.sh
+
+      - name: Validate local release bundle contract
+        run: scripts/release_smoke.sh target/release/opencode2api
+
+  system-gate:
+    name: Tier C release system gate
+    needs: release-gates
+    runs-on: [self-hosted, linux, warp]
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run real WARP and soak gate
+        env:
+          SOAK_SECONDS: '900'
+          RUN_EXTERNAL_SEARCH_CANARY: '1'
+        run: |
+          chmod +x scripts/*.sh tests/*.sh
+          scripts/tier-c.sh | tee tier-c-release.log
+
+      - name: Upload release system evidence
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: tier-c-release-${{ github.sha }}
+          path: tier-c-release.log
+          if-no-files-found: error
+          retention-days: 90
+
   build-release:
-    name: Build (${{ matrix.target }})
+    name: Build ${{ matrix.artifact_name }}
+    needs: [release-gates, system-gate]
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -25,139 +95,176 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact_name: opencode2api-macos-arm64
-
     steps:
-      - name: Checkout source
-        uses: actions/checkout@v5
+      - uses: actions/checkout@v5
 
-      - name: Install Rust toolchain
+      - name: Install target
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install cross-compilation packages (Linux ARM64)
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install Linux ARM64 cross compiler
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          {
+            echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc"
+            echo "AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar"
+            echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc"
+          } >> "$GITHUB_ENV"
 
-      - name: Set aarch64 cross-compiler env
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
+      - name: Build locked release
+        run: cargo build --release --locked --target "${{ matrix.target }}" --bin opencode2api
+
+      - name: Stage binary and checksum
+        shell: bash
         run: |
-          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
-          echo "AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar" >> "$GITHUB_ENV"
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
-
-      - name: Build release binary
-        run: cargo build --release --locked --target ${{ matrix.target }}
-
-      - name: Check binary size
-        run: ls -lh target/${{ matrix.target }}/release/opencode2api
-
-      - name: Rename binary for upload
-        run: |
+          set -Eeuo pipefail
           mkdir -p staging
-          cp target/${{ matrix.target }}/release/opencode2api staging/${{ matrix.artifact_name }}
+          cp "target/${{ matrix.target }}/release/opencode2api" "staging/${{ matrix.artifact_name }}"
+          chmod +x "staging/${{ matrix.artifact_name }}"
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd staging && sha256sum "${{ matrix.artifact_name }}" > "${{ matrix.artifact_name }}.sha256")
+          else
+            (cd staging && shasum -a 256 "${{ matrix.artifact_name }}" > "${{ matrix.artifact_name }}.sha256")
+          fi
 
-      - name: Upload workflow artifact
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: staging/${{ matrix.artifact_name }}
+          format: spdx-json
+          output-file: staging/${{ matrix.artifact_name }}.spdx.json
+
+      - name: Verify staged version
+        if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-apple-darwin'
+        run: python3 scripts/check_version_consistency.py --binary "staging/${{ matrix.artifact_name }}" --tag "${GITHUB_REF_NAME}"
+
+      - name: Upload staged artifacts
         uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.artifact_name }}
-          path: staging/${{ matrix.artifact_name }}
+          path: staging/
+          if-no-files-found: error
+          retention-days: 30
 
-  # ── Job 2: Upload tất cả binary lên GitHub Release ──────────────────
-  upload-release:
-    name: Upload to GitHub Release
-    needs: [build-release]
+  publish-release:
+    name: Publish checksummed release
+    needs: build-release
     runs-on: ubuntu-latest
     permissions:
       contents: write
-
+      id-token: write
+      attestations: write
     steps:
-      - name: Download all build artifacts
+      - uses: actions/checkout@v5
+
+      - name: Download all platform artifacts
         uses: actions/download-artifact@v5
         with:
           path: artifacts
           merge-multiple: true
 
-      - name: List artifacts
-        run: ls -lh artifacts/
+      - name: Build aggregate checksum file
+        run: |
+          set -Eeuo pipefail
+          cd artifacts
+          cat ./*.sha256 | sort > SHA256SUMS
+          sha256sum --check SHA256SUMS
 
-      - name: Upload to GitHub Release
+      - name: Smoke Linux release artifact
+        run: |
+          chmod +x artifacts/opencode2api-linux-amd64 tests/install_e2e.sh
+          python3 scripts/check_version_consistency.py \
+            --binary artifacts/opencode2api-linux-amd64 \
+            --tag "${GITHUB_REF_NAME}"
+          bash tests/install_e2e.sh artifacts/opencode2api-linux-amd64
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: artifacts/*
+
+      - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: artifacts/*
           generate_release_notes: true
+          fail_on_unmatched_files: true
 
-  # ── Job 3: Publish lên crates.io ────────────────────────────────────
   publish-cratesio:
-    name: Publish to crates.io
-    needs: [build-release]
-    # Chỉ chạy cho stable versions (v*.*.* không có pre-release suffix)
+    name: Publish crate
+    needs: build-release
     if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout source
-        uses: actions/checkout@v5
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Regenerate Cargo.lock for --locked consistency
-        run: cargo generate-lockfile
-
-      - name: Check crate version exists
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify package
+        run: cargo package --locked
+      - name: Check whether version exists
         id: crate
         shell: bash
         run: |
-          VERSION="$(grep '^version =' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
+          VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["package"]["version"])')"
           if curl -fsSL "https://crates.io/api/v1/crates/opencode2api/$VERSION" >/dev/null; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
-
-      - name: Publish to crates.io
+      - name: Publish
         if: steps.crate.outputs.exists == 'false'
         run: cargo publish --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
-  # ── Job 4: Build và push Docker image ───────────────────────────────
   docker:
-    name: Build and Push Docker Image
-    needs: [build-release]
+    name: Publish signed container
+    needs: [release-gates, system-gate]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-
+      id-token: write
     steps:
-      - name: Checkout source
-        uses: actions/checkout@v5
-
-      - name: Log in to GitHub Container Registry
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - name: Login to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.CR_PAT }}
-
-      - name: Extract Docker metadata (tags, labels)
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Docker metadata
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ghcr.io/${{ github.repository_owner }}/opencode2api
+          images: ghcr.io/${{ github.repository }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable={{ is_default_branch }}
-
-      - name: Build and push Docker image
+            type=raw,value=latest
+      - name: Build and push with SBOM and provenance
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
           push: true
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          sbom: true
+          provenance: mode=max
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+      - name: Sign image digest keylessly
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ghcr.io/${{ github.repository }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"

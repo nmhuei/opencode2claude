@@ -1,570 +1,184 @@
-<div align="center">
+# OpenCode2API
 
-# 🌉 OpenCode2API
+OpenCode2API is a local Rust bridge that accepts a subset of the Anthropic Messages API and forwards requests to an OpenAI-compatible upstream. It supports synchronous and streaming responses, reasoning blocks, native tool calls, DSML tool calls, bounded web-search interception, model fallback, and an optional managed WARP/SOCKS egress pool.
 
-### Bridge OpenCode tools to Claude Code — with **token estimation**, **automatic casing resolution**, and a **resilient Cloudflare WARP proxy pool**.
+The implementation is designed to fail closed: public binding requires strong authentication, proxy mode does not silently fall back to the host network, protected warm-standby nodes cannot be modified by normal lifecycle commands, and downloaded updates are checksum-verified before replacement.
 
-[![Crates.io](https://img.shields.io/crates/v/opencode2api?style=for-the-badge&logo=rust)](https://crates.io/crates/opencode2api)
-[![CI](https://img.shields.io/github/actions/workflow/status/nmhuei/opencode2api/ci.yml?style=for-the-badge&branch=main)](https://github.com/nmhuei/opencode2api/actions)
-[![Docker](https://img.shields.io/badge/docker-ghcr.io-2496ED?style=for-the-badge&logo=docker)](https://github.com/nmhuei/opencode2api/pkgs/container/opencode2api)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)](LICENSE)
-[![GitHub Release](https://img.shields.io/github/v/release/nmhuei/opencode2api?style=for-the-badge&logo=github)](https://github.com/nmhuei/opencode2api/releases)
+## Supported platforms
 
-[![Watch Demo](https://img.shields.io/badge/🎬_Watch_Demo-asciinema-4c4c4c?style=for-the-badge)](https://asciinema.org/a/opencode2api-demo)
-[![Try Playground](https://img.shields.io/badge/🚀_Try_Playground-Vercel-000000?style=for-the-badge&logo=vercel)](https://opencode2api.playground.dev)
+Release targets are Linux x86_64, Linux ARM64, macOS x86_64, and macOS ARM64. Runtime lifecycle tests run on Linux and macOS CI. Windows is not currently advertised as a supported release target.
 
----
+## Installation
 
-**Claude Code** → `opencode2api` → **opencode.ai/zen/v1/chat/completions** → **Any LLM**
+Using Cargo:
 
 ```bash
-opencode2api start  # Start the bridge daemon (background)
-opencode2api status # Check if it's running
-claude                 # Works with any model
+cargo install opencode2api
 ```
 
-[Install](#-installation) • [Quick Start](#-quick-start) • [Architecture](#%EF%B8%8F-architecture) • [Features](#-features) • [Configuration](#-configuration) • [Benchmarks](#-benchmarks)
-
-</div>
-
----
-
-## ✨ Why OpenCode2API?
-
-Claude Code is locked to Anthropic's API. This bridge routes it through [OpenCode](https://github.com/opencode-ai/opencode) to access **50+ models** — including free tiers like `deepseek-v4-flash-free` — while adding **production-grade observability**, **cost prediction**, and **resilient egress**.
-
-| Before | After |
-|--------|-------|
-| 🔒 Claude Code → Anthropic only | 🌐 Claude Code → **Any LLM** |
-| 💸 Pay per token (no visibility) | 🎯 **Token estimation** — know cost & latency *before* calling |
-| 🔧 Manual proxy config | 🌐 **WARP proxy pool** — rotating IPs, auto-failover, zero-config |
-| 🤷 Tool casing mismatches | 🔄 **Casing resolution** — snake_case ⇄ camelCase ⇄ kebab-case, automatic |
-
----
-
-## 🏗️ Architecture
-
-```mermaid
-graph LR
-    subgraph Client["🖥️  Client"]
-        OC[OpenCode CLI]
-    end
-    
-    subgraph Bridge["🌉  OpenCode2API Bridge"]
-        BR[HTTP Server\nAxum + Tokio]
-        TE[Token Estimator]
-        CR[Casing Resolver]
-        WP[WARP Proxy Pool]
-    end
-    
-    subgraph Target["☁️  Target"]
-        CC[Claude Code API\nAnthropic / Proxied]
-    end
-    
-    OC -->|Tools: snake_case\nOpenAI-format requests| BR
-    BR --> TE
-    BR --> CR
-    BR --> WP
-    WP -.->|HTTPS + Rotating Egress IP\nHealth-checked| CC
-    CC -->|Tools: camelCase\nAnthropic-format responses| BR
-    CR -->|Auto-transform| OC
-    
-    style WP fill:#f3502f,color:#fff,stroke:#c62828,stroke-width:2px
-    style TE fill:#00b8d4,color:#fff,stroke:#00838f,stroke-width:2px
-    style CR fill:#8e24aa,color:#fff,stroke:#4a148c,stroke-width:2px
-    style BR fill:#1565c0,color:#fff,stroke:#0d47a1,stroke-width:2px
-```
-
-**Request Flow:**
-1. **OpenCode** sends tool calls in `snake_case` (OpenAI Chat Completions format)
-2. **Bridge** parses request → **Token Estimator** predicts cost/latency → **Casing Resolver** normalizes tool names
-3. **WARP Pool** selects healthy egress node (latency-weighted, sticky per-session)
-4. **Claude Code API** receives `camelCase` tools (Anthropic Messages format)
-5. **Response** flows back through reverse transforms
-
----
-
-## 🎬 Quick Demo
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/nmhuei/opencode2api/main/assets/demo-dark.gif">
-  <img src="https://raw.githubusercontent.com/nmhuei/opencode2api/main/assets/demo-light.gif" alt="OpenCode2API demo — token estimation, proxy pool, and casing resolution in action" width="900">
-</picture>
-
-<details>
-<summary>📺 <strong>Watch full terminal recording on asciinema</strong></summary>
-
-[![asciicast](https://asciinema.org/a/opencode2api-demo.svg)](https://asciinema.org/a/opencode2api-demo)
-
-</details>
-
----
-
-## 🚀 Installation
-
-<details open>
-<summary><strong>📦 Installation Methods</strong> (click to collapse)</summary>
-
-| Platform | Command | Notes |
-|----------|---------|-------|
-| **Cargo** (recommended) | `cargo install opencode2api` | Requires Rust toolchain |
-| **Homebrew** | `brew install nmhuei/tap/opencode2api` | macOS / Linux |
-| **Binary** | [Download Latest](https://github.com/nmhuei/opencode2api/releases) | No Rust needed, ~5MB static binary |
-| **Docker** | `docker pull ghcr.io/nmhuei/opencode2api:latest` | Multi-arch (amd64/arm64) |
-| **Nix** | `nix profile install github:nmhuei/opencode2api` | Flakes supported |
-| **Quick Install Script** | `curl -fsSL https://raw.githubusercontent.com/nmhuei/opencode2api/main/install.sh \| sh` | Auto-detects OS/arch, no deps |
-
-</details>
-
-**No dependencies needed.** The binary is **~5MB** (static musl) and starts in **<5ms**.
-
----
-
-## ⚡ Quick Start
+Using a release binary:
 
 ```bash
-# 1. Start the bridge daemon (background, auto-spawns WARP proxies if Docker available)
-opencode2api start
-
-# 2. Verify it's running
-opencode2api status
-# → Bridge: RUNNING (pid 12345)
-# → WARP Pool: 3 primary + 2 warm-standby healthy
-
-# 3. Use Claude Code normally — it now works with ANY model!
-claude
+curl -fsSL https://raw.githubusercontent.com/nmhuei/opencode2api/main/install.sh | sh
 ```
 
-**That's it.** Zero-config works out of the box. The bridge listens on `http://127.0.0.1:4000` and OpenCode auto-discovers it.
+The install script downloads the binary and its companion `.sha256` file, verifies the checksum, runs a `--version` smoke check, and only then installs it.
+
+## Quick start
+
+The default bind address is `127.0.0.1:4000`. The default proxy topology expects three primary SOCKS proxies on ports `40001-40003` and two protected warm-standby proxies on `40004-40005`.
+
+Start with managed proxy egress:
 
 ```bash
-# Want a specific model? Override via env or CLI flag:
-export OPENCODE_MODEL="openai/gpt-4o"
-# or
-opencode2api serve --port 4000 --model "google/gemini-2.5-pro"
-
-# Shell commands bypass the LLM entirely — prefix with `!`:
-You: !git status          # → instant local exec (~10ms)
-You: !docker ps           # → direct terminal output
-You: What is recursion?   # → routed through LLM as normal
+opencode2api server start
+opencode2api server status
 ```
 
----
-
-## 🎯 Features
-
-<div align="center">
-
-| Feature | Status | Description |
-|---------|--------|-------------|
-| 🎯 **Token Estimation** | 🟢 Production | Predict cost & latency before API calls |
-| 🔄 **Casing Resolution** | 🟢 Production | snake_case ⇄ camelCase ⇄ kebab-case, heuristic + configurable |
-| 🌐 **WARP Proxy Pool** | 🟡 Beta | Rotating egress IPs, health checks, auto-failover, zero-config |
-| ⚡ **Shell Interception** | 🟢 Production | `!` prefix executes locally, configurable policy (disabled/allowlist/unrestricted) |
-| 🔍 **Web Search** | 🟢 Production | 5-provider fallback (Tavily → Exa → Serper → SearXNG → DuckDuckGo) |
-| 📊 **Observability** | 🟢 Production | Prometheus metrics (`/metrics`), structured logging, health endpoint |
-| 🔐 **Auth & Rate Limiting** | 🟢 Production | Bearer tokens, configurable concurrent request limits |
-
-</div>
-
----
-
-### 🎯 Token Estimation — Know the Cost Before You Call
+Start without Docker/WARP proxy management and use direct host egress:
 
 ```bash
-$ opencode2api estimate "refactor the auth module to use JWT"
-┌─────────────────────────────────────────────────────────────────────┐
-│ 📊 Token Estimation Result                                          │
-├─────────────────────────────────────────────────────────────────────┤
-│ Prompt: "refactor the auth module to use JWT"                       │
-│ ──────────────────────────────────────────────────────────────────  │
-│ Estimated Input Tokens:  1,847                                      │
-│ Estimated Output Tokens: 2,341                                      │
-│ ──────────────────────────────────────────────────────────────────  │
-│ 💰 Cost (Sonnet 4):     ~$0.012                                     │
-│ 💰 Cost (Haiku 4.5):    ~$0.003                                     │
-│ 💰 Cost (GPT-4o):       ~$0.018                                     │
-│ ──────────────────────────────────────────────────────────────────  │
-│ 📈 Confidence: 94%                                                  │
-│ ⏱️  Predicted Latency: ~1.3s                                        │
-└─────────────────────────────────────────────────────────────────────┘
+opencode2api server start --no-proxy
 ```
 
-<details>
-<summary>📖 <strong>How It Works</strong></summary>
-
-- **Static Analysis**: Parses prompt intent, estimates tool call count & complexity
-- **Historical Calibration**: Learns from your actual usage patterns (stored locally in `~/.cache/opencode2api/calibration.json`)
-- **Model-Aware**: Different tokenizers per model (Claude, GPT, Gemini, etc.) — uses `tiktoken`/`tokenizers` crate
-- **Export Formats**: `--format json` for CI/CD integration, `--format table` for human reading
-- **Confidence Scoring**: Based on prompt similarity to historical data + tool call predictability
-
-</details>
-
-**Integration:** Also available as a library — `opencode2api::estimate::estimate_tokens(&prompt, &model)`
-
----
-
-### 🔄 Tool Casing Resolution — Seamless Bridging
-
-OpenCode uses `snake_case`, Claude Code expects `camelCase`. We handle it automatically:
-
-| OpenCode (snake_case) | Claude Code (camelCase) | Resolution Strategy |
-|-----------------------|-------------------------|---------------------|
-| `read_file` | `readFile` | ✅ Heuristic (known tool) |
-| `write_file` | `writeFile` | ✅ Heuristic (known tool) |
-| `bash_command` | `bashCommand` | ✅ Heuristic (known tool) |
-| `glob_pattern` | `globPattern` | ✅ Heuristic (known tool) |
-| `task_tool` | `taskTool` | ✅ Heuristic (known tool) |
-| `my_custom_tool` | `myCustomTool` | ✅ Heuristic (PascalCase words) |
-| `weird_tool_name_v2` | `weirdToolNameV2` | ✅ Heuristic (handles suffixes) |
-| `legacy_tool` | `legacyTool` | ⚠️ Configurable mapping |
-
-**Custom Mappings** (in `~/.config/opencode2api/config.toml`):
-```toml
-[tool_casing]
-fallback_strategy = "heuristic"  # heuristic | passthrough | error
-custom_mappings = { 
-    "internal_db_query" = "internalDbQuery",
-    "legacy_soap_call" = "legacySoapCall"
-}
-```
-
-<details>
-<summary>🔧 <strong>Fallback Strategies</strong></summary>
-
-| Strategy | Behavior |
-|----------|----------|
-| `heuristic` (default) | Split on `_`, capitalize each word after first → `snake_case` → `snakeCase` |
-| `passthrough` | Send as-is, let upstream handle it |
-| `error` | Return 400 if unknown tool encountered |
-
-</details>
-
----
-
-### 🌐 Cloudflare WARP Proxy Pool — Resilient Egress
-
-When running multiple concurrent Claude Code agents, they hit free-tier rate limits quickly if sharing a single IP. **OpenCode2API solves this with a two-tier proxy pool:**
-
-```mermaid
-graph TB
-    subgraph "WARP Proxy Pool"
-        LB[Load Balancer\nLatency-Weighted RR + Health]
-        
-        subgraph "Primary Pool (Normal Traffic)"
-            W1[WARP Node 1\nASH ✓ 8ms]
-            W2[WARP Node 2\nIAD ✓ 12ms]
-            W3[WARP Node 3\nORD ✓ 15ms]
-        end
-        
-        subgraph "Warm-Standby Pool (Failover Only, Protected)"
-            WS1[WARP Node 4\nLAX 🛡️ 18ms]
-            WS2[WARP Node 5\nSEA 🛡️ 22ms]
-        end
-        
-        LB --> W1
-        LB --> W2
-        LB --> W3
-        LB -.->|Failover| WS1
-        LB -.->|Failover| WS2
-    end
-    
-    Client[Your App\nClaude Code] -->|HTTPS| LB
-    
-    style W1 fill:#4caf50,color:#fff,stroke:#2e7d32
-    style W2 fill:#4caf50,color:#fff,stroke:#2e7d32
-    style W3 fill:#4caf50,color:#fff,stroke:#2e7d32
-    style WS1 fill:#ff9800,color:#fff,stroke:#e65100
-    style WS2 fill:#ff9800,color:#fff,stroke:#e65100
-    style LB fill:#1565c0,color:#fff,stroke:#0d47a1
-```
-
-**Key Properties:**
-- 🔄 **Rendezvous Hashing** — Each session deterministically maps to a primary proxy (sticky assignment)
-- ⚖️ **Latency-Weighted** — Healthier/lower-latency nodes get more traffic
-- 🛡️ **Protected Warm-Standby** — Never used for normal traffic; only activated on primary failure
-- 🎯 **Affected-Only Remap** — When a primary fails, **only its sessions** remap to standby; healthy primaries keep their sessions
-- 📊 **Observability** — `/health` endpoint exposes per-node stats, cooldown counts, protected flags
-- 🔧 **Zero-Config** — `start.sh` auto-spawns `warp-cli` Docker containers if Docker is running
+Generate a documented configuration file:
 
 ```bash
-# Enable WARP pool (requires warp-cli registered on host)
-opencode2api serve --warp-pool --pool-size 3 --standby-size 2
-
-# Or via env vars:
-export BRIDGE_WARP_POOL=true
-export BRIDGE_WARP_POOL_SIZE=3
-export BRIDGE_WARP_STANDBY_SIZE=2
-opencode2api start
-
-# Manage proxy containers:
-opencode2api proxy status      # List with roles (primary vs protected) + health
-opencode2api proxy restart     # Recreate primary proxies only (40001-40003)
-opencode2api proxy purge       # Remove + recreate primary proxies
-opencode2api proxy logs        # View proxy container logs
+opencode2api init --output opencode2api.toml
+opencode2api server start --config opencode2api.toml
 ```
 
-**Manual Proxy Pool** (bring your own SOCKS5/HTTP):
-```bash
-export BRIDGE_PRIMARY_PROXIES="socks5://127.0.0.1:40001,socks5://127.0.0.1:40002,socks5://127.0.0.1:40003"
-export BRIDGE_WARM_STANDBY_PROXIES="socks5://127.0.0.1:40004,socks5://127.0.0.1:40005"
-opencode2api start
-```
-
----
-
-## 🔌 REST Management API
-
-The bridge exposes a versioned management API under `/api/v1`. This API is separate from the Anthropic-compatible `/v1/*` endpoints and from the browser dashboard's internal `/api/dashboard/*` routes.
-
-Set a management token before using it:
+Configure Claude Code or another Anthropic-compatible client using the values emitted by:
 
 ```bash
-export REST_API_TOKEN="replace-with-a-long-random-token"
+opencode2api env
 ```
 
-Clients authenticate with a standard Bearer header:
+## API surface
+
+Anthropic-compatible routes:
+
+| Method | Route | Contract |
+|---|---|---|
+| `POST` | `/v1/messages` | Sync or SSE Messages response |
+| `POST` | `/v1/messages/count_tokens` | Explicit token estimate |
+| `GET` | `/v1/models` | Configured/default model metadata |
+
+Public health routes:
+
+| Method | Route | Contract |
+|---|---|---|
+| `GET` | `/health` | Minimal compatibility health |
+| `GET` | `/health/live` | Process/event-loop liveness |
+| `GET` | `/health/ready` | Worker and permitted-egress readiness |
+
+Versioned management routes require `Authorization: Bearer <REST_API_TOKEN>` or the configured dashboard token fallback:
+
+| Method | Route | Contract |
+|---|---|---|
+| `GET` | `/api/v1/status` | Typed bridge status |
+| `GET` | `/api/v1/proxies` | Redacted egress-node state |
+| `GET` | `/api/v1/config` | Safe resolved configuration |
+| `POST` | `/api/v1/config/preview` | Validate and preview config changes |
+| `POST` | `/api/v1/config/apply` | Atomically apply with rollback verification |
+| `POST` | `/api/v1/proxies/:port/restart` | Restart a managed primary only |
+| `GET` | `/api/v1/metrics` | Authenticated operational counters |
+| `GET` | `/api/v1/audit` | Recent bounded secret-safe management audit events |
+| `GET` | `/api/v1/openapi.json` | OpenAPI 3.1 management contract |
+
+The browser dashboard is served at `/dashboard`. Cookie-authenticated mutations use a double-submit CSRF token.
+
+## CLI
+
+```text
+opencode2api server start|stop|status|restart|logs|config
+opencode2api proxy ps|restart|purge|logs
+opencode2api dashboard start|status
+opencode2api env
+opencode2api doctor
+opencode2api completion <shell>
+opencode2api update [--check] [--force]
+opencode2api init [--output PATH] [--force]
+```
+
+Machine-readable output is available through `--json`; reduced output is available through `--quiet`. Destructive proxy operations support `--dry-run`, and purge requires explicit confirmation.
+
+Shell-prefixed prompts are **delegated** as client `tool_use` output according to the configured shell policy. The HTTP bridge does not execute arbitrary shell commands inside request handlers. Shell delegation is disabled by default.
+
+## Egress model
+
+The default pool contains:
+
+- three managed primary nodes;
+- two protected warm-standby nodes;
+- stable rendezvous routing for sticky assignment;
+- retry exclusion and circuit-breaker state;
+- active-request leases that block destructive lifecycle actions;
+- optional multi-endpoint exit-identity verification;
+- duplicate public-exit suppression;
+- fail-closed behavior when proxy mode has no eligible route.
+
+Warm-standby containers are never restarted, stopped, purged, or recreated by normal management operations.
+
+## Web search
+
+Search interception uses this fallback order:
+
+```text
+Tavily → Exa → Serper → SearXNG → DuckDuckGo HTML
+```
+
+Providers return typed results, and a central formatter bounds result count, snippet length, response bytes, and request duration. Configurable private SearXNG endpoints require an explicit opt-in because they expand SSRF reach.
+
+## Security defaults
+
+- Bind address: loopback only.
+- Client API auth: optional on loopback, mandatory for non-loopback binding.
+- Management API: fails closed when no management token is configured.
+- Shell policy: disabled.
+- Proxy mode: no direct fallback.
+- Request, sync-response, search-response, and SSE-line sizes: bounded.
+- Config/runtime/PID writes: atomic and permission constrained.
+- Update/install: SHA-256 verification and executable smoke test.
+- Secrets: redacted from safe config, diagnostics, metrics, and public health.
+
+## Verification
+
+Per-commit deterministic checks:
 
 ```bash
-curl -H "Authorization: Bearer $REST_API_TOKEN" \
-  http://127.0.0.1:4000/api/v1/status
+scripts/tier-a.sh
 ```
 
-If `REST_API_TOKEN` is unset, the API falls back to `DASHBOARD_ADMIN_TOKEN`. If neither token is configured, the REST API fails closed with HTTP `401`.
-
-| Method | Endpoint | Purpose |
-|--------|----------|---------|
-| GET | `/api/v1/status` | Bridge uptime, model, bind information, and proxy-pool snapshot |
-| GET | `/api/v1/proxies` | Primary and warm-standby proxy status |
-| GET | `/api/v1/config` | Safe operational configuration; secret values are never returned |
-| POST | `/api/v1/proxies/:port/restart` | Restart a configured managed primary proxy |
-| GET | `/api/v1/openapi.json` | OpenAPI 3.1 document for the management API |
-
-Examples:
+Protected release/security checks:
 
 ```bash
-# List proxy state
-curl -H "Authorization: Bearer $REST_API_TOKEN" \
-  http://127.0.0.1:4000/api/v1/proxies
-
-# Restart managed primary proxy 40001
-curl -X POST \
-  -H "Authorization: Bearer $REST_API_TOKEN" \
-  http://127.0.0.1:4000/api/v1/proxies/40001/restart
+scripts/tier-b.sh
 ```
 
-Protected warm-standby ports cannot be restarted through this API. Unknown or unconfigured ports return an explicit `4xx` response instead of invoking Docker.
-
----
-
-## 📊 Benchmarks
-
-| Scenario | Latency (p50) | Latency (p99) | Throughput | Notes |
-|----------|---------------|---------------|------------|-------|
-| Bridge startup | **<5ms** | — | — | Cold start, no WARP |
-| Request routing | **<1ms** | **<3ms** | 50,000 req/s | In-memory, no allocation |
-| Token estimation | **2.1ms** | **8.4ms** | 12,000 req/s | With calibration cache |
-| Casing resolution | **0.04ms** | **0.12ms** | 2,500,000 req/s | Heuristic path |
-| WARP pool (4 nodes) | **45ms** | **180ms** | 800 req/s | Includes TLS handshake |
-| Shell command (`!`) | **~10ms** | **~50ms** | — | Local subprocess |
-
-<details>
-<summary>🔬 <strong>Benchmark Methodology</strong></summary>
-
-- **Hardware**: AMD Ryzen 9 7950X, 64GB DDR5-6000, Samsung 990 Pro 2TB, 10Gbps NIC
-- **OS**: Arch Linux (kernel 6.19), Rust 1.80, musl libc
-- **WARP Nodes**: 4× Cloudflare WARP (ASH, IAD, ORD, LAX) via `warp-cli` in Docker
-- **Workload**: Mixed tool calls (read_file, write_file, bash_command, glob_pattern, task_tool)
-- **Duration**: 60s warmup + 300s measurement, 100 concurrent clients
-- **Tooling**: `hyperfine` for CLI benchmarks, `wrk` for HTTP throughput, custom harness for token estimation
-
-</details>
-
-> **The bottleneck is always the LLM provider, never the bridge.**
-
----
-
-## ⚙️ Configuration
-
-**Priority:** CLI args → Env vars → TOML file (`~/.config/opencode2api/config.toml`) → Defaults
-
-<details>
-<summary><strong>📋 Full Config Reference</strong> (click to expand)</summary>
-
-```toml
-# ~/.config/opencode2api/config.toml
-# All values shown are defaults — override only what you need
-
-[server]
-port = 4000                    # Bridge listen port
-host = "127.0.0.1"             # Bind address (use 0.0.0.0 for LAN, requires auth)
-workers = 0                    # 0 = auto (num_cpus)
-
-[token_estimation]
-enabled = true
-model = "claude-3-5-sonnet-20241022"  # Model for tokenization calibration
-calibration_file = "~/.cache/opencode2api/calibration.json"
-confidence_threshold = 0.75    # Below this, returns "low confidence"
-
-[tool_casing]
-fallback_strategy = "heuristic"  # heuristic | passthrough | error
-custom_mappings = {}             # e.g. "my_tool" = "myTool"
-
-[warp_pool]
-enabled = false                  # Auto-enabled if Docker + warp-cli detected
-size = 3                         # Primary pool size (ports 40001+)
-standby_size = 2                 # Warm-standby size (ports 40001+size+)
-health_check_interval = 30       # Seconds between health checks
-failover_threshold = 3           # Consecutive failures before failover
-recovery_success_count = 2       # Successes to exit cooldown
-
-[shell_policy]
-mode = "disabled"                # disabled | allowlist | unrestricted
-allowlist = []                   # Commands allowed in "allowlist" mode
-
-[auth]
-tokens = []                      # Comma-separated Bearer tokens (empty = no auth)
-rate_limit = 0                   # Max concurrent requests (0 = unlimited)
-
-[web_search]
-enabled = true
-providers = ["tavily", "exa", "serper", "searxng", "duckduckgo"]
-timeout = 10                     # Seconds per provider
-max_results = 10
-
-[observability]
-metrics_port = 9090              # Prometheus /metrics (0 = disabled)
-log_level = "info"               # trace | debug | info | warn | error
-log_format = "json"              # json | pretty
-```
-
-</details>
-
-**Quick CLI Overrides:**
-```bash
-# All config via flags (highest priority)
-opencode2api serve \
-  --port 8080 \
-  --host 0.0.0.0 \
-  --model "openai/gpt-4o" \
-  --warp-pool \
-  --pool-size 5 \
-  --shell-policy allowlist \
-  --allowlist "git,ls,cat" \
-  --auth-token "secret1,secret2" \
-  --rate-limit 100 \
-  --log-level debug
-```
-
----
-
-## 🔧 CLI Reference
+Real Docker/WARP and bounded soak checks:
 
 ```bash
-opencode2api <COMMAND> [OPTIONS]
-
-COMMANDS:
-  serve          Run bridge server (foreground)
-  start          Start bridge daemon (background)
-  stop           Stop bridge daemon
-  restart        Restart bridge daemon
-  status         Show bridge + proxy pool status
-  proxy          Manage WARP proxy pool
-  config         Manage configuration
-  estimate       Estimate tokens for a prompt
-  env            Print resolved configuration
-  --help         Show help
-  --version      Show version
-
-# Proxy subcommands:
-opencode2api proxy status      # List proxies with roles + health
-opencode2api proxy restart     # Recreate primary proxies only
-opencode2api proxy purge       # Remove + recreate primary proxies
-opencode2api proxy logs        # View proxy container logs
-
-# Config subcommands:
-opencode2api config init       # Create default config.toml
-opencode2api config show       # Print resolved config
-opencode2api config path       # Show config file path
+scripts/tier-c.sh
 ```
 
----
+Tier C requires local WARP SOCKS proxies on `127.0.0.1:40001-40003` and Internet access.
 
-## 🤝 Comparison
+## Documentation
 
-| Feature | OpenCode2API | Manual Proxy | Other Bridges |
-|---------|-----------------|--------------|---------------|
-| Token estimation | ✅ Native, calibrated | ❌ | ❌ |
-| Casing resolution | ✅ Heuristic + config | ❌ Manual | ⚠️ Partial |
-| WARP proxy pool | ✅ Built-in, auto-failover | ❌ Manual | ❌ |
-| Zero-config | ✅ Works out of box | ❌ | ❌ |
-| Observability | ✅ Prometheus + health | ❌ Manual | ⚠️ Partial |
-| Shell interception | ✅ Policy-based | ❌ | ❌ |
-| Web search fallback | ✅ 5-provider chain | ❌ | ❌ |
-| Binary size | ~5MB (static) | N/A | ~50MB+ |
-| Startup time | <5ms | N/A | ~200ms |
+- [Configuration and precedence](docs/configuration.md)
+- [CLI and exit codes](docs/cli.md)
+- [Anthropic compatibility](docs/compatibility.md)
+- [Management API and OpenAPI](docs/management-api.md)
+- [Proxy/WARP architecture](docs/proxy-pool.md)
+- [Security model](docs/security.md)
+- [Production deployment](docs/deployment.md)
+- [Health, readiness, and metrics](docs/observability.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [Upgrade and rollback](docs/upgrade-rollback.md)
+- [Contributor test tiers](docs/testing.md)
+- [Release checklist](docs/release-checklist.md)
 
----
+## License
 
-## 📚 Documentation
-
-| Guide | Description |
-|-------|-------------|
-| [Configuration Guide](docs/configuration.md) | Full config.toml reference, env vars, CLI flags |
-| [Token Estimation Deep Dive](docs/token-estimation.md) | Methodology, calibration, custom models |
-| [WARP Pool Operations](docs/warp-pool.md) | Pool sizing, failover tuning, manual proxies |
-| [Custom Tool Mappings](docs/custom-tools.md) | Casing resolver, custom schemas, fallback strategies |
-| [Shell Policy Guide](docs/shell-policy.md) | Security model, allowlist patterns, unrestricted mode |
-| [Architecture Overhaul](docs/architecture/) | Source audit, current boundaries, target architecture, and migration rules |
-| [Architecture Decision Records](docs/adr/) | Design decisions & trade-offs |
-
----
-
-## 🛣️ Roadmap
-
-- [ ] **v0.4**: WebSocket streaming support (real-time token streaming)
-- [ ] **v0.4**: Custom tool schema registration (OpenAPI → Anthropic tools)
-- [ ] **v0.5**: Multi-model estimation (GPT, Gemini, Llama, local Ollama)
-- [ ] **v0.5**: Request/response caching (semantic deduplication)
-- [ ] **v1.0**: Stable API, plugin system, WASM embeddable core
-
----
-
-## 🤝 Contributing
-
-Contributions welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) first.
-
-```bash
-# Development setup
-git clone https://github.com/nmhuei/opencode2api
-cd opencode2api
-cargo build --all-features
-cargo test --all-features
-
-# Run verification gates (same as CI)
-./scripts/verify.sh all --profile local
-```
-
-**Areas we'd love help with:**
-- 🌍 More WARP region coverage & latency optimization
-- 🧮 Token estimation for more model families (Gemini, Llama, Mistral)
-- 🔌 Plugin architecture for custom transforms
-- 📱 Windows/macOS binary testing & packaging
-- 📖 Documentation translations
-
----
-
-## 📄 License
-
-MIT © [nmhuei](https://github.com/nmhuei)
-
----
-
-<div align="center">
-
-**Star this repo** if it saves you time — it helps others discover it!
-
-[⭐ Star on GitHub](https://github.com/nmhuei/opencode2api/stargazers) • [🐛 Report Bug](https://github.com/nmhuei/opencode2api/issues) • [💡 Request Feature](https://github.com/nmhuei/opencode2api/issues/new) • [💬 Discussions](https://github.com/nmhuei/opencode2api/discussions)
-
-</div>
+MIT. See [LICENSE](LICENSE).

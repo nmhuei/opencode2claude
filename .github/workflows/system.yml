@@ -1,0 +1,65 @@
+name: Tier C System
+
+on:
+  schedule:
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
+    inputs:
+      soak_seconds:
+        description: Bounded soak duration in seconds
+        required: false
+        default: '300'
+      external_search_canary:
+        description: Run the public DuckDuckGo search canary
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tier-c-warp
+  cancel-in-progress: false
+
+jobs:
+  tier-c:
+    name: Real WARP and soak
+    runs-on: [self-hosted, linux, warp]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run Tier C
+        env:
+          SOAK_SECONDS: ${{ inputs.soak_seconds || '300' }}
+          RUN_EXTERNAL_SEARCH_CANARY: ${{ inputs.external_search_canary == false && '0' || '1' }}
+        run: |
+          chmod +x scripts/*.sh tests/*.sh
+          scripts/tier-c.sh | tee tier-c.log
+
+      - name: Capture system evidence
+        if: always()
+        run: |
+          mkdir -p verification/completion/system-run
+          cp tier-c.log verification/completion/system-run/tier-c.log 2>/dev/null || true
+          git rev-parse HEAD > verification/completion/system-run/commit.txt
+          date -u +%Y-%m-%dT%H:%M:%SZ > verification/completion/system-run/timestamp.txt
+          docker ps --format '{{.Names}}\t{{.Status}}\t{{.Ports}}' > verification/completion/system-run/docker-ps.txt 2>&1 || true
+
+      - name: Upload Tier C evidence
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: tier-c-${{ github.sha }}
+          path: verification/completion/system-run/
+          if-no-files-found: error
+          retention-days: 30
