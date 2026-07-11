@@ -16,6 +16,7 @@ pub const PID_FILE_NAME: &str = "opencode2api.pid.json";
 pub const LOG_FILE_NAME: &str = "opencode2api.log";
 
 /// Manages paths for runtime artifacts under `~/.opencode2api/`.
+#[derive(Debug, Clone)]
 pub struct RuntimePaths {
     root: PathBuf,
 }

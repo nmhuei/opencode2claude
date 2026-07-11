@@ -82,6 +82,14 @@ pub enum SupervisorError {
     /// Spawning the bridge child process failed.
     #[error("Failed to start bridge: {0}")]
     SpawnFailed(String),
+
+    /// PID exists but does not match the process identity captured at start.
+    #[error("Refusing to terminate PID {0}: process identity does not match the managed bridge")]
+    OwnershipMismatch(u32),
+
+    /// Legacy/corrupt PID metadata cannot prove ownership safely.
+    #[error("Refusing to terminate PID {0}: PID file has no verifiable process identity")]
+    OwnershipUnverified(u32),
 }
 
 /// Supervisor orchestrates the bridge lifecycle.
@@ -195,8 +203,9 @@ impl Supervisor {
             )));
         }
 
-        // Write PID file
-        let pidfile = PidFile::new(pid, self.port, &self.host);
+        // Persist the exact process identity captured after spawn so a reused
+        // PID can never be mistaken for the managed bridge.
+        let pidfile = PidFile::with_identity(identity, self.port, &self.host);
         pidfile.write(&self.paths.pid_file())?;
 
         Ok(())
@@ -211,16 +220,35 @@ impl Supervisor {
 
         let pidfile = PidFile::read(&pidfile_path)?;
         let pid = pidfile.pid;
-
-        let _ = self.process_manager.terminate(pid);
-        std::thread::sleep(Duration::from_millis(500));
-        if self.process_manager.exists(pid) {
-            let _ = self.process_manager.force_kill(pid);
+        if !pidfile.has_identity_evidence() {
+            return Err(SupervisorError::OwnershipUnverified(pid));
+        }
+        let Some(actual) = self.process_manager.identity(pid)? else {
+            PidFile::remove(&pidfile_path)?;
+            return Ok(());
+        };
+        if !pidfile.owns(&actual) {
+            return Err(SupervisorError::OwnershipMismatch(pid));
         }
 
-        // Remove PID file
-        PidFile::remove(&pidfile_path)?;
+        self.process_manager.terminate(pid)?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && self.process_manager.exists(pid) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        if self.process_manager.exists(pid) {
+            // Re-check ownership immediately before the destructive fallback.
+            let Some(actual) = self.process_manager.identity(pid)? else {
+                PidFile::remove(&pidfile_path)?;
+                return Ok(());
+            };
+            if !pidfile.owns(&actual) {
+                return Err(SupervisorError::OwnershipMismatch(pid));
+            }
+            self.process_manager.force_kill(pid)?;
+        }
 
+        PidFile::remove(&pidfile_path)?;
         Ok(())
     }
 
@@ -235,8 +263,10 @@ impl Supervisor {
         let pidfile = PidFile::read(&pidfile_path)?;
         let pid = pidfile.pid;
         let healthy = health_check(&pidfile.host, pidfile.port);
+        let identity = self.process_manager.identity(pid)?;
+        let owned = identity.as_ref().is_some_and(|actual| pidfile.owns(actual));
 
-        if self.process_manager.exists(pid) && healthy {
+        if owned && healthy {
             Ok(SupervisorStatus::Running {
                 pid: Some(pid),
                 port: pidfile.port,
@@ -244,8 +274,8 @@ impl Supervisor {
                 managed: true,
             })
         } else {
-            // Stale PID file — clean up. If the service is still healthy on the
-            // PID file port, report it as unmanaged rather than falsely stopped.
+            // Never treat a merely-existing PID as managed. Remove stale or
+            // unverifiable metadata and report a healthy socket as unmanaged.
             PidFile::remove(&pidfile_path)?;
             if healthy {
                 Ok(SupervisorStatus::Running {
@@ -425,6 +455,112 @@ mod tests {
         }
 
         assert!(!root.join(crate::runtime::PID_FILE_NAME).exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[derive(Debug)]
+    struct FakeProcessManager {
+        identity: std::sync::Mutex<Option<crate::infrastructure::process::ProcessIdentity>>,
+        terminate_calls: std::sync::Mutex<Vec<u32>>,
+        force_calls: std::sync::Mutex<Vec<u32>>,
+    }
+
+    impl FakeProcessManager {
+        fn new(identity: crate::infrastructure::process::ProcessIdentity) -> Self {
+            Self {
+                identity: std::sync::Mutex::new(Some(identity)),
+                terminate_calls: std::sync::Mutex::new(Vec::new()),
+                force_calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl ProcessManager for FakeProcessManager {
+        fn spawn_detached(
+            &self,
+            _spec: &ProcessSpec,
+        ) -> std::io::Result<crate::infrastructure::process::ProcessIdentity> {
+            self.identity
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or_else(|| std::io::Error::other("no identity"))
+        }
+
+        fn identity(
+            &self,
+            _pid: u32,
+        ) -> std::io::Result<Option<crate::infrastructure::process::ProcessIdentity>> {
+            Ok(self.identity.lock().unwrap().clone())
+        }
+
+        fn terminate(&self, pid: u32) -> std::io::Result<()> {
+            self.terminate_calls.lock().unwrap().push(pid);
+            *self.identity.lock().unwrap() = None;
+            Ok(())
+        }
+
+        fn force_kill(&self, pid: u32) -> std::io::Result<()> {
+            self.force_calls.lock().unwrap().push(pid);
+            *self.identity.lock().unwrap() = None;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn stop_refuses_reused_pid_without_sending_signal() {
+        let root = temp_runtime_root("ownership-mismatch");
+        let paths = RuntimePaths::from_root(&root);
+        paths.ensure_dirs().unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let expected = crate::infrastructure::process::ProcessIdentity {
+            pid: 4242,
+            executable: Some(executable.clone()),
+            start_marker: Some("old-start".to_string()),
+        };
+        PidFile::with_identity(expected, 4000, "127.0.0.1")
+            .write(&paths.pid_file())
+            .unwrap();
+        let actual = crate::infrastructure::process::ProcessIdentity {
+            pid: 4242,
+            executable: Some(executable),
+            start_marker: Some("new-start".to_string()),
+        };
+        let manager = Arc::new(FakeProcessManager::new(actual));
+        let supervisor =
+            Supervisor::new(paths.clone(), 4000, "127.0.0.1").with_process_manager(manager.clone());
+
+        assert!(matches!(
+            supervisor.stop(),
+            Err(SupervisorError::OwnershipMismatch(4242))
+        ));
+        assert!(manager.terminate_calls.lock().unwrap().is_empty());
+        assert!(manager.force_calls.lock().unwrap().is_empty());
+        assert!(paths.pid_file().exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn stop_terminates_only_matching_identity_and_removes_pidfile() {
+        let root = temp_runtime_root("ownership-match");
+        let paths = RuntimePaths::from_root(&root);
+        paths.ensure_dirs().unwrap();
+        let identity = crate::infrastructure::process::ProcessIdentity {
+            pid: 4343,
+            executable: Some(std::env::current_exe().unwrap()),
+            start_marker: Some("same-start".to_string()),
+        };
+        PidFile::with_identity(identity.clone(), 4000, "127.0.0.1")
+            .write(&paths.pid_file())
+            .unwrap();
+        let manager = Arc::new(FakeProcessManager::new(identity));
+        let supervisor =
+            Supervisor::new(paths.clone(), 4000, "127.0.0.1").with_process_manager(manager.clone());
+
+        supervisor.stop().unwrap();
+        assert_eq!(*manager.terminate_calls.lock().unwrap(), vec![4343]);
+        assert!(manager.force_calls.lock().unwrap().is_empty());
+        assert!(!paths.pid_file().exists());
         let _ = std::fs::remove_dir_all(root);
     }
 }

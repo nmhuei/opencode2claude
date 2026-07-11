@@ -5,7 +5,8 @@
 //! needed or requested.
 
 use anyhow::{anyhow, Context, Result};
-use std::path::PathBuf;
+use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
 
 /// Info about a single release asset (binary for a specific platform).
 #[derive(Debug, Clone)]
@@ -133,56 +134,147 @@ pub fn find_matching_asset(release: &ReleaseInfo) -> Option<&AssetInfo> {
     release.assets.iter().find(|a| a.name == asset_name)
 }
 
-/// Replace the current binary by downloading the new one.
+/// Download, verify, smoke-test, atomically replace, and rollback on failure.
 ///
-/// Downloads into a temp file next to the current binary, then renames
-/// atomically (POSIX: rename works even while the binary is running).
+/// Every release binary must have a companion asset named `<binary>.sha256`.
+/// The updater never replaces the current executable without a valid SHA-256
+/// and a successful `--version` smoke test.
 pub async fn apply_update(client: &reqwest::Client, asset: &AssetInfo) -> Result<PathBuf> {
-    let current_exe = std::env::current_exe().context("cannot determine current binary path")?;
-    let parent = current_exe
-        .parent()
-        .context("current binary has no parent directory")?;
+    #[cfg(windows)]
+    {
+        let _ = (client, asset);
+        return Err(anyhow!(
+            "self-update is not supported on Windows; install a signed release artifact manually"
+        ));
+    }
 
-    // Download to a temp file first
-    let tmp_path = parent.join(format!(".{}.download", asset.name));
+    #[cfg(not(windows))]
+    {
+        let current_exe =
+            std::env::current_exe().context("cannot determine current binary path")?;
+        let binary = download_bytes(client, &asset.download_url, &asset.name).await?;
+        let checksum_url = format!("{}.sha256", asset.download_url);
+        let checksum_text = download_text(client, &checksum_url, "checksum").await?;
+        let expected = parse_sha256(&checksum_text).context("invalid checksum asset")?;
+        install_candidate(&current_exe, &binary, &expected).await?;
+        Ok(current_exe)
+    }
+}
 
-    let resp = client
-        .get(&asset.download_url)
+async fn download_bytes(client: &reqwest::Client, url: &str, label: &str) -> Result<Vec<u8>> {
+    let response = client
+        .get(url)
         .header("User-Agent", user_agent())
         .send()
         .await
-        .with_context(|| format!("failed to download {}", asset.name))?;
-
-    if !resp.status().is_success() {
-        return Err(anyhow!("download returned {}", resp.status()));
+        .with_context(|| format!("failed to download {label}"))?;
+    if !response.status().is_success() {
+        return Err(anyhow!(
+            "download of {label} returned {}",
+            response.status()
+        ));
     }
-
-    let bytes = resp
+    Ok(response
         .bytes()
         .await
-        .context("failed to read download stream")?;
+        .with_context(|| format!("failed to read {label} response body"))?
+        .to_vec())
+}
 
-    tokio::fs::write(&tmp_path, &bytes)
+async fn download_text(client: &reqwest::Client, url: &str, label: &str) -> Result<String> {
+    let bytes = download_bytes(client, url, label).await?;
+    String::from_utf8(bytes).with_context(|| format!("{label} is not valid UTF-8"))
+}
+
+fn parse_sha256(text: &str) -> Result<String> {
+    let hash = text
+        .split_whitespace()
+        .find(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or_else(|| anyhow!("checksum file does not contain a 64-character SHA-256"))?;
+    Ok(hash.to_ascii_lowercase())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+async fn install_candidate(target: &Path, bytes: &[u8], expected_sha256: &str) -> Result<()> {
+    let actual = sha256_hex(bytes);
+    if actual != expected_sha256.to_ascii_lowercase() {
+        return Err(anyhow!(
+            "SHA-256 mismatch: expected {expected_sha256}, received {actual}"
+        ));
+    }
+
+    let parent = target
+        .parent()
+        .context("current binary has no parent directory")?;
+    let suffix = format!("{}-{}", std::process::id(), uuid::Uuid::new_v4().simple());
+    let file_name = target
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("opencode2api");
+    let temp = parent.join(format!(".{file_name}.update-{suffix}"));
+    let backup = parent.join(format!(".{file_name}.backup-{suffix}"));
+
+    tokio::fs::write(&temp, bytes)
         .await
-        .context("failed to write temp download file")?;
-
-    // Make it executable (Unix)
+        .context("failed to write update candidate")?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o755);
-        std::fs::set_permissions(&tmp_path, perms)
-            .context("failed to set executable permissions")?;
+        tokio::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o755))
+            .await
+            .context("failed to set update candidate executable")?;
     }
 
-    // Rename temp file → current binary location.
-    // On Unix this atomically replaces the running binary.
-    // On Windows we'd have to handle the file lock differently.
-    tokio::fs::rename(&tmp_path, &current_exe)
-        .await
-        .with_context(|| format!("failed to replace binary at {}", current_exe.display()))?;
+    if let Err(error) = smoke_binary(&temp).await {
+        let _ = tokio::fs::remove_file(&temp).await;
+        return Err(error.context("downloaded binary failed pre-install smoke test"));
+    }
 
-    Ok(current_exe)
+    tokio::fs::rename(target, &backup)
+        .await
+        .with_context(|| format!("failed to create backup at {}", backup.display()))?;
+    if let Err(error) = tokio::fs::rename(&temp, target).await {
+        let _ = tokio::fs::rename(&backup, target).await;
+        let _ = tokio::fs::remove_file(&temp).await;
+        return Err(error).context("failed to install update; previous binary restored");
+    }
+
+    if let Err(error) = smoke_binary(target).await {
+        let _ = tokio::fs::remove_file(target).await;
+        let rollback = tokio::fs::rename(&backup, target).await;
+        return match rollback {
+            Ok(()) => Err(error.context("installed binary failed smoke test; rollback completed")),
+            Err(rollback_error) => Err(anyhow!(
+                "installed binary failed smoke test ({error}); rollback failed ({rollback_error})"
+            )),
+        };
+    }
+
+    tokio::fs::remove_file(&backup)
+        .await
+        .context("update succeeded but backup cleanup failed")?;
+    Ok(())
+}
+
+async fn smoke_binary(path: &Path) -> Result<()> {
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::process::Command::new(path).arg("--version").output(),
+    )
+    .await
+    .context("binary smoke test timed out")??;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "binary smoke test returned {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
 }
 
 // ── Tests ──
@@ -329,5 +421,104 @@ mod tests {
         if let (Some(pn), Some(fa)) = (platform_name, found) {
             assert_eq!(fa.name, pn);
         }
+    }
+
+    #[test]
+    fn checksum_parser_accepts_standard_companion_format() {
+        let hash = "a".repeat(64);
+        assert_eq!(
+            parse_sha256(&format!("{hash}  opencode2api-linux-amd64\n")).unwrap(),
+            hash
+        );
+        assert!(parse_sha256("not-a-checksum").is_err());
+    }
+
+    #[cfg(unix)]
+    fn update_test_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "opencode2api-update-{name}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[cfg(unix)]
+    fn write_old_binary(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, b"#!/bin/sh\necho old\n").unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn checksum_mismatch_never_replaces_existing_binary() {
+        let dir = update_test_dir("checksum");
+        let target = dir.join("opencode2api");
+        write_old_binary(&target);
+        let candidate = b"#!/bin/sh\nexit 0\n";
+        let error = install_candidate(&target, candidate, &"0".repeat(64))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("SHA-256 mismatch"));
+        assert_eq!(std::fs::read(&target).unwrap(), b"#!/bin/sh\necho old\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_preinstall_smoke_leaves_existing_binary_untouched() {
+        let dir = update_test_dir("pre-smoke");
+        let target = dir.join("opencode2api");
+        write_old_binary(&target);
+        let candidate = b"#!/bin/sh\nexit 9\n";
+        let error = install_candidate(&target, candidate, &sha256_hex(candidate))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("pre-install smoke test"));
+        assert_eq!(std::fs::read(&target).unwrap(), b"#!/bin/sh\necho old\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn postinstall_smoke_failure_rolls_back_previous_binary() {
+        let dir = update_test_dir("rollback");
+        let target = dir.join("opencode2api");
+        let marker = dir.join("smoke-marker");
+        write_old_binary(&target);
+        let candidate = format!(
+            "#!/bin/sh\nif [ -f '{}' ]; then exit 7; fi\ntouch '{}'\nexit 0\n",
+            marker.display(),
+            marker.display()
+        )
+        .into_bytes();
+        let error = install_candidate(&target, &candidate, &sha256_hex(&candidate))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("rollback completed"));
+        assert_eq!(std::fs::read(&target).unwrap(), b"#!/bin/sh\necho old\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn valid_candidate_replaces_binary_and_removes_backup() {
+        let dir = update_test_dir("success");
+        let target = dir.join("opencode2api");
+        write_old_binary(&target);
+        let candidate = b"#!/bin/sh\necho opencode2api-test\nexit 0\n";
+        install_candidate(&target, candidate, &sha256_hex(candidate))
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), candidate);
+        let leftovers = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains("backup"))
+            .count();
+        assert_eq!(leftovers, 0);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
