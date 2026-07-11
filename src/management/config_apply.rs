@@ -26,6 +26,15 @@ const KNOWN_ROOT_KEYS: &[&str] = &[
     "searxng_url",
     "searxng_api_key",
     "max_search_loops",
+    "search_max_results",
+    "search_max_snippet_chars",
+    "search_max_response_bytes",
+    "search_timeout_secs",
+    "allow_private_searxng",
+    "tavily_url",
+    "exa_url",
+    "serper_url",
+    "duckduckgo_url",
     "proxies",
     "primary_proxies",
     "warm_standby_proxies",
@@ -250,6 +259,12 @@ fn validate_document(value: &toml::Value) -> Result<(), ManagementError> {
     if cfg.stream_buffer_size == Some(0)
         || cfg.channel_capacity == Some(0)
         || cfg.max_search_loops == Some(0)
+        || cfg.search_max_results == Some(0)
+        || cfg.search_max_snippet_chars == Some(0)
+        || cfg
+            .search_max_response_bytes
+            .is_some_and(|value| value < 1024)
+        || cfg.search_timeout_secs == Some(0)
         || cfg.active_proxy_count == Some(0)
         || cfg.minimum_unique_exit_ips == Some(0)
         || cfg.max_network_attempts == Some(0)
@@ -258,7 +273,14 @@ fn validate_document(value: &toml::Value) -> Result<(), ManagementError> {
         return Err(error(
             StatusCode::BAD_REQUEST,
             "invalid_zero_value",
-            "Buffer, loop, proxy, identity, and retry counts must be greater than zero",
+            "Buffer, search, loop, proxy, identity, and retry limits must satisfy their minimum values",
+        ));
+    }
+    if cfg.search_max_results.is_some_and(|value| value > 20) {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "invalid_search_limit",
+            "search_max_results cannot exceed 20",
         ));
     }
     if let Some(url) = cfg.upstream_base_url.as_deref() {

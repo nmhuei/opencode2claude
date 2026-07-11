@@ -391,6 +391,9 @@ upstream_base_url = "https://toml.example/v1"
 active_proxy_count = 1
 rate_limit = 3
 min_reasoning_stream_tokens = 2048
+search_max_results = 4
+search_timeout_secs = 12
+tavily_url = "https://toml-search.example/tavily"
 model_fallbacks = ["toml-fallback"]
 egress_mode = "proxy"
 primary_proxies = ["socks5://127.0.0.1:40001"]
@@ -402,6 +405,9 @@ primary_proxies = ["socks5://127.0.0.1:40001"]
     env::set_var("BRIDGE_ACTIVE_PROXY_COUNT", "2");
     env::set_var("BRIDGE_RATE_LIMIT", "7");
     env::set_var("BRIDGE_MIN_REASONING_STREAM_TOKENS", "4096");
+    env::set_var("BRIDGE_SEARCH_MAX_RESULTS", "6");
+    env::set_var("BRIDGE_SEARCH_TIMEOUT_SECS", "9");
+    env::set_var("TAVILY_API_URL", "https://env-search.example/tavily");
     env::set_var("OPENCODE_MODEL_FALLBACKS", "env-a,env-b");
 
     let config = BridgeConfig::from_env_and_cli(CliOverrides {
@@ -413,6 +419,15 @@ primary_proxies = ["socks5://127.0.0.1:40001"]
     assert_eq!(config.egress.active_proxy_count, 2);
     assert_eq!(config.observability.max_concurrent_requests, Some(7));
     assert_eq!(config.protocol.min_reasoning_stream_tokens, 4096);
+    assert_eq!(config.search.max_results, 6);
+    assert_eq!(
+        config.search.request_timeout,
+        std::time::Duration::from_secs(9)
+    );
+    assert_eq!(
+        config.search.tavily_url,
+        "https://env-search.example/tavily"
+    );
     assert_eq!(config.retry.model_fallbacks, vec!["env-a", "env-b"]);
 
     for name in [
@@ -420,6 +435,9 @@ primary_proxies = ["socks5://127.0.0.1:40001"]
         "BRIDGE_ACTIVE_PROXY_COUNT",
         "BRIDGE_RATE_LIMIT",
         "BRIDGE_MIN_REASONING_STREAM_TOKENS",
+        "BRIDGE_SEARCH_MAX_RESULTS",
+        "BRIDGE_SEARCH_TIMEOUT_SECS",
+        "TAVILY_API_URL",
         "OPENCODE_MODEL_FALLBACKS",
     ] {
         env::remove_var(name);

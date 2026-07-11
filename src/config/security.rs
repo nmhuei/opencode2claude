@@ -21,6 +21,29 @@ pub(super) fn validate(config: &BridgeConfig) -> Result<(), String> {
             "CONFIGURATION ERROR: retry base backoff cannot exceed retry max backoff".into(),
         );
     }
+    if config.search.max_results == 0
+        || config.search.max_results > 20
+        || config.search.max_snippet_chars == 0
+        || config.search.max_response_bytes < 1024
+        || config.search.request_timeout.is_zero()
+    {
+        return Err("CONFIGURATION ERROR: search limits must be positive, max_results <= 20, and max_response_bytes >= 1024".into());
+    }
+    for (name, endpoint) in [
+        ("Tavily", config.search.tavily_url.as_str()),
+        ("Exa", config.search.exa_url.as_str()),
+        ("Serper", config.search.serper_url.as_str()),
+        ("DuckDuckGo", config.search.duckduckgo_url.as_str()),
+    ] {
+        validate_http_url(name, endpoint)?;
+    }
+    if let Some(endpoint) = config.searxng_url.as_deref() {
+        let parsed = validate_http_url("SearXNG", endpoint)?;
+        if !config.search.allow_private_searxng && is_private_endpoint(&parsed) {
+            return Err("SECURITY VIOLATION: private/loopback SearXNG endpoints require allow_private_searxng=true".into());
+        }
+    }
+
     if config.egress.mode == EgressMode::Proxy {
         let configured = config.primary_proxies.as_ref().map_or(0, Vec::len)
             + config.warm_standby_proxies.as_ref().map_or(0, Vec::len);
@@ -80,4 +103,84 @@ pub(super) fn validate(config: &BridgeConfig) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn validate_http_url(name: &str, endpoint: &str) -> Result<reqwest::Url, String> {
+    let parsed = reqwest::Url::parse(endpoint)
+        .map_err(|error| format!("CONFIGURATION ERROR: invalid {name} URL: {error}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err(format!(
+            "CONFIGURATION ERROR: {name} URL must use http or https and include a host"
+        ));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(format!(
+            "SECURITY VIOLATION: {name} URL must not contain embedded credentials"
+        ));
+    }
+    Ok(parsed)
+}
+
+fn is_private_endpoint(url: &reqwest::Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return true;
+    };
+    let normalized = host.trim_end_matches('.').to_ascii_lowercase();
+    if normalized == "localhost"
+        || normalized.ends_with(".localhost")
+        || normalized.ends_with(".local")
+    {
+        return true;
+    }
+    normalized
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| match ip {
+            std::net::IpAddr::V4(ip) => {
+                ip.is_private()
+                    || ip.is_loopback()
+                    || ip.is_link_local()
+                    || ip.is_unspecified()
+                    || ip.is_broadcast()
+                    || ip.octets()[0] == 0
+            }
+            std::net::IpAddr::V6(ip) => {
+                ip.is_loopback()
+                    || ip.is_unspecified()
+                    || (ip.segments()[0] & 0xfe00) == 0xfc00
+                    || (ip.segments()[0] & 0xffc0) == 0xfe80
+            }
+        })
+}
+
+#[cfg(test)]
+mod search_security_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_private_searxng_without_explicit_opt_in() {
+        let mut config = BridgeConfig {
+            searxng_url: Some("http://127.0.0.1:8080".to_string()),
+            ..Default::default()
+        };
+        assert!(validate(&config)
+            .unwrap_err()
+            .contains("allow_private_searxng"));
+        config.search.allow_private_searxng = true;
+        assert!(validate(&config).is_ok());
+    }
+
+    #[test]
+    fn rejects_embedded_credentials_in_provider_url() {
+        let defaults = BridgeConfig::default();
+        let config = BridgeConfig {
+            search: super::super::SearchConfig {
+                tavily_url: "https://user:secret@example.com/search".to_string(),
+                ..defaults.search
+            },
+            ..defaults
+        };
+        assert!(validate(&config)
+            .unwrap_err()
+            .contains("embedded credentials"));
+    }
 }

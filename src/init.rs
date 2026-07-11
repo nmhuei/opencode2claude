@@ -53,6 +53,20 @@ schema_version = 1
 # Max web search tool-call loops
 # max_search_loops = 5
 
+# Search result and network bounds.
+# search_max_results = 5
+# search_max_snippet_chars = 500
+# search_max_response_bytes = 1048576
+# search_timeout_secs = 15
+
+# Search provider endpoints. Override mainly for controlled tests or approved
+# private deployments. Private SearXNG is blocked unless explicitly allowed.
+# tavily_url = "https://api.tavily.com/search"
+# exa_url = "https://api.exa.ai/search"
+# serper_url = "https://google.serper.dev/search"
+# duckduckgo_url = "https://html.duckduckgo.com/html/"
+# allow_private_searxng = false
+
 # ── Proxy Pool (WARP SOCKS5) ──────────────────────────────────────────
 # Egress mode: "direct" or "proxy". Proxy mode fails closed.
 # egress_mode = "proxy"

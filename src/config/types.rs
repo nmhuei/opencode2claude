@@ -175,6 +175,19 @@ pub struct ProtocolConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct SearchConfig {
+    pub max_results: usize,
+    pub max_snippet_chars: usize,
+    pub max_response_bytes: usize,
+    pub request_timeout: Duration,
+    pub allow_private_searxng: bool,
+    pub tavily_url: String,
+    pub exa_url: String,
+    pub serper_url: String,
+    pub duckduckgo_url: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct BridgeConfig {
     pub host: IpAddr,
     pub bridge_port: u16,
@@ -201,6 +214,7 @@ pub struct BridgeConfig {
     pub runtime: RuntimeConfig,
     pub observability: ObservabilityConfig,
     pub protocol: ProtocolConfig,
+    pub search: SearchConfig,
 }
 
 impl Default for BridgeConfig {
@@ -269,6 +283,17 @@ impl Default for BridgeConfig {
             },
             protocol: ProtocolConfig {
                 min_reasoning_stream_tokens: 1024,
+            },
+            search: SearchConfig {
+                max_results: 5,
+                max_snippet_chars: 500,
+                max_response_bytes: 1024 * 1024,
+                request_timeout: Duration::from_secs(15),
+                allow_private_searxng: false,
+                tavily_url: "https://api.tavily.com/search".to_string(),
+                exa_url: "https://api.exa.ai/search".to_string(),
+                serper_url: "https://google.serper.dev/search".to_string(),
+                duckduckgo_url: "https://html.duckduckgo.com/html/".to_string(),
             },
         }
     }

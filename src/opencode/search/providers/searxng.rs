@@ -1,9 +1,18 @@
-use super::format_results;
+use super::{map_reqwest_error, read_json_response};
+use crate::opencode::search::types::{
+    SearchError, SearchErrorKind, SearchPolicy, SearchProviderKind, SearchQuery, SearchResult,
+};
 use crate::opencode::search::util::urlencoding_simple;
 use reqwest::Client;
+use serde_json::Value;
 
-pub(crate) async fn search(client: &Client, query: &str, base_url: &str) -> Result<String, String> {
-    let encoded = urlencoding_simple(query);
+pub(crate) async fn search(
+    client: &Client,
+    query: &SearchQuery,
+    base_url: &str,
+    policy: &SearchPolicy,
+) -> Result<Vec<SearchResult>, SearchError> {
+    let encoded = urlencoding_simple(&query.text);
     let url = if base_url.contains('?') {
         format!("{base_url}&q={encoded}&format=json")
     } else {
@@ -14,37 +23,67 @@ pub(crate) async fn search(client: &Client, query: &str, base_url: &str) -> Resu
     };
     let response = client
         .get(url)
+        .timeout(policy.request_timeout)
         .send()
         .await
-        .map_err(|error| error.to_string())?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(format!(
-            "SearXNG status {status}: {}",
-            response.text().await.unwrap_or_default()
-        ));
-    }
+        .map_err(|error| map_reqwest_error(SearchProviderKind::SearXng, error))?;
+    let payload = read_json_response(
+        SearchProviderKind::SearXng,
+        response,
+        policy.max_response_bytes,
+    )
+    .await?;
+    parse_payload(&payload, policy)
+}
 
-    let payload: serde_json::Value = response.json().await.map_err(|error| error.to_string())?;
-    let results = payload
+pub(super) fn parse_payload(
+    payload: &Value,
+    policy: &SearchPolicy,
+) -> Result<Vec<SearchResult>, SearchError> {
+    let items = payload
         .get("results")
-        .and_then(|value| value.as_array())
-        .into_iter()
-        .flatten()
-        .map(|item| {
-            format!(
-                "URL: {}\nTitle: {}\nSnippet: {}\n",
-                item.get("url")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or(""),
-                item.get("title")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or(""),
-                item.get("content")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            SearchError::new(
+                SearchProviderKind::SearXng,
+                SearchErrorKind::MalformedResponse,
+                "missing results array",
+            )
+        })?;
+    Ok(items
+        .iter()
+        .filter_map(|item| {
+            SearchResult::normalized(
+                item.get("title").and_then(Value::as_str).unwrap_or(""),
+                item.get("url").and_then(Value::as_str).unwrap_or(""),
+                item.get("content").and_then(Value::as_str).unwrap_or(""),
+                policy.max_snippet_chars,
             )
         })
-        .collect();
-    Ok(format_results(results, "No results found on SearXNG."))
+        .take(policy.max_results)
+        .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_fixture() {
+        let payload = serde_json::json!({
+            "results":[{"title":"Local result","url":"https://example.com/local","content":"snippet"}]
+        });
+        let results = parse_payload(&payload, &SearchPolicy::default()).unwrap();
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn rejects_missing_results() {
+        assert_eq!(
+            parse_payload(&serde_json::json!({}), &SearchPolicy::default())
+                .unwrap_err()
+                .kind,
+            SearchErrorKind::MalformedResponse
+        );
+    }
 }

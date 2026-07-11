@@ -175,6 +175,36 @@ pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
             .filter(|value| *value > 0)
             .unwrap_or(1024);
 
+    resolved.search.max_results = env_parse("BRIDGE_SEARCH_MAX_RESULTS")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.search_max_results))
+        .unwrap_or(5);
+    resolved.search.max_snippet_chars = env_parse("BRIDGE_SEARCH_MAX_SNIPPET_CHARS")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.search_max_snippet_chars))
+        .unwrap_or(500);
+    resolved.search.max_response_bytes = env_parse("BRIDGE_SEARCH_MAX_RESPONSE_BYTES")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.search_max_response_bytes))
+        .unwrap_or(1024 * 1024);
+    resolved.search.request_timeout = Duration::from_secs(
+        env_parse("BRIDGE_SEARCH_TIMEOUT_SECS")
+            .or_else(|| file.as_ref().and_then(|cfg| cfg.search_timeout_secs))
+            .unwrap_or(15),
+    );
+    resolved.search.allow_private_searxng = env_bool("BRIDGE_ALLOW_PRIVATE_SEARXNG")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.allow_private_searxng))
+        .unwrap_or(false);
+    resolved.search.tavily_url = env_string("TAVILY_API_URL")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.tavily_url.clone()))
+        .unwrap_or_else(|| "https://api.tavily.com/search".to_string());
+    resolved.search.exa_url = env_string("EXA_API_URL")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.exa_url.clone()))
+        .unwrap_or_else(|| "https://api.exa.ai/search".to_string());
+    resolved.search.serper_url = env_string("SERPER_API_URL")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.serper_url.clone()))
+        .unwrap_or_else(|| "https://google.serper.dev/search".to_string());
+    resolved.search.duckduckgo_url = env_string("DUCKDUCKGO_SEARCH_URL")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.duckduckgo_url.clone()))
+        .unwrap_or_else(|| "https://html.duckduckgo.com/html/".to_string());
+
     resolved.retry.upstream_base_url = env_string("OPENCODE_UPSTREAM_BASE_URL")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.upstream_base_url.clone()))
         .unwrap_or_else(|| "https://opencode.ai/zen/v1".to_string())

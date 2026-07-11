@@ -12,7 +12,7 @@ mod types;
 pub use file::{StringList, TomlConfig};
 pub use types::{
     BridgeConfig, CliOverrides, EgressConfig, EgressMode, ManagementConfig, ObservabilityConfig,
-    ProtocolConfig, RetryConfig, RuntimeConfig, SecretString,
+    ProtocolConfig, RetryConfig, RuntimeConfig, SearchConfig, SecretString,
 };
 
 pub const DEFAULT_BRIDGE_PORT: u16 = 4000;
