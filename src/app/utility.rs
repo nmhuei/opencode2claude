@@ -1,48 +1,70 @@
 //! Standalone utility commands that do not own server lifecycle.
 
-use super::view::{cmd_print_env, shell_export_lines};
-use crate::cli::{self, CompletionArgs, InitArgs, UpdateArgs};
+use super::view::{
+    claude_code_base_url, cmd_print_env, print_brand_header, print_error, print_section,
+    print_success, print_tip, print_warning, shell_export_lines,
+};
+use crate::cli::{self, ApiKeyCommand, ApiKeyGenerateArgs, CompletionArgs, InitArgs, UpdateArgs};
 use crate::config;
 use crate::doctor;
 use crate::output::OutputFormat;
+use crate::presentation;
 use clap::CommandFactory;
 use clap_complete::generate;
+use std::io::Write;
 use yansi::Paint;
 
 pub(super) async fn cmd_doctor(fmt: OutputFormat) {
     let report = doctor::run_diagnostics().await;
     match fmt {
-        OutputFormat::Json => {
-            if let Ok(s) = serde_json::to_string_pretty(&report) {
-                println!("{s}");
-            }
-        }
+        OutputFormat::Json => match serde_json::to_string_pretty(&report) {
+            Ok(json) => println!("{json}"),
+            Err(error) => println!(
+                "{}",
+                serde_json::json!({"status":"error","message":error.to_string()})
+            ),
+        },
         OutputFormat::Quiet => {
-            let mut warnings = 0;
-            let mut failures = 0;
-            for c in &report.checks {
-                match c.status {
-                    doctor::CheckStatus::Warn => warnings += 1,
-                    doctor::CheckStatus::Fail => failures += 1,
-                    doctor::CheckStatus::Pass => {}
-                }
-            }
-            println!("warnings={} failures={}", warnings, failures);
+            let warnings = report
+                .checks
+                .iter()
+                .filter(|check| check.status == doctor::CheckStatus::Warn)
+                .count();
+            let failures = report
+                .checks
+                .iter()
+                .filter(|check| check.status == doctor::CheckStatus::Fail)
+                .count();
+            println!("warnings={warnings} failures={failures}");
         }
-        _ => {
-            println!("{}", report);
-        }
+        OutputFormat::Human => println!("{report}"),
     }
     std::process::exit(report.summary.exit_code());
 }
 
-pub(super) fn cmd_completion(args: CompletionArgs) {
-    let mut cmd = cli::Cli::command();
-    let name = cmd.get_name().to_string();
-    generate(args.shell, &mut cmd, name, &mut std::io::stdout());
+pub(super) fn cmd_completion(args: CompletionArgs, fmt: OutputFormat) {
+    let mut command = cli::Cli::command();
+    let name = command.get_name().to_string();
+    let mut buffer = Vec::new();
+    generate(args.shell, &mut command, name, &mut buffer);
+    let script = String::from_utf8_lossy(&buffer);
+
+    match fmt {
+        OutputFormat::Json => println!(
+            "{}",
+            serde_json::json!({
+                "shell": format!("{:?}", args.shell).to_ascii_lowercase(),
+                "script": script,
+            })
+        ),
+        OutputFormat::Human | OutputFormat::Quiet => {
+            print!("{script}");
+            let _ = std::io::stdout().flush();
+        }
+    }
 }
 
-pub(super) async fn cmd_update(args: UpdateArgs) {
+pub(super) async fn cmd_update(args: UpdateArgs, fmt: OutputFormat) {
     use crate::update::{self, fetch_latest_release, find_matching_asset, has_update};
 
     let client = reqwest::Client::builder()
@@ -50,92 +72,176 @@ pub(super) async fn cmd_update(args: UpdateArgs) {
         .build()
         .unwrap_or_default();
 
-    match fetch_latest_release(&client).await {
-        Ok(release) => {
-            let current = update::current_version();
-            let available = has_update(current, &release);
-
-            if args.check {
-                // Just check mode — don't download
-                if available {
-                    eprintln!(
-                        "{} Update available: {} → {}",
-                        "↑".green().bold(),
-                        current,
-                        release.version
-                    );
-                    if !release.body.is_empty() {
-                        eprintln!("\nRelease notes:\n{}", release.body);
-                    }
-                } else {
-                    eprintln!("{} You are up-to-date ({})", "✓".green().bold(), current);
-                }
-                return;
-            }
-
-            if !available && !args.force {
-                eprintln!(
-                    "{} You are up-to-date ({}) — use --force to reinstall",
-                    "✓".green().bold(),
-                    current
-                );
-                return;
-            }
-
-            // Find matching asset for this platform
-            let asset = match find_matching_asset(&release) {
-                Some(a) => a,
-                None => {
-                    eprintln!(
-                        "{} No binary available for {}/{}",
-                        "✗".red().bold(),
-                        std::env::consts::OS,
-                        std::env::consts::ARCH
-                    );
-                    eprintln!("   Supported platforms: linux (amd64, arm64), macOS (amd64, arm64)");
-                    std::process::exit(1);
-                }
-            };
-
-            eprintln!(
-                "{} Updating {} → {} (downloading {})...",
-                "↓".cyan().bold(),
-                current,
-                release.version,
-                asset.name
+    let release = match fetch_latest_release(&client).await {
+        Ok(release) => release,
+        Err(error) => {
+            emit_error(
+                fmt,
+                "update-check",
+                "Could not check for updates",
+                &error.to_string(),
+                &["Check your network connection and release repository configuration."],
             );
+            std::process::exit(1);
+        }
+    };
 
-            match update::apply_update(&client, asset).await {
-                Ok(path) => {
-                    eprintln!(
-                        "{} Updated to {} — binary replaced at {}",
-                        "✓".green().bold(),
-                        release.version,
-                        path.display()
-                    );
-                    eprintln!("   Restart the bridge if it was running.");
+    let current = update::current_version();
+    let available = has_update(current, &release);
+
+    if args.check {
+        match fmt {
+            OutputFormat::Json => println!(
+                "{}",
+                serde_json::json!({
+                    "status": "ok",
+                    "current_version": current,
+                    "latest_version": release.version,
+                    "update_available": available,
+                })
+            ),
+            OutputFormat::Quiet => println!("{}", release.version),
+            OutputFormat::Human => {
+                print_brand_header("Update check", "CLI release channel");
+                if available {
+                    print_warning(&format!(
+                        "Update available: {current} → {}",
+                        release.version
+                    ));
+                    print_tip("Run `opencode2api update` to install it.");
+                } else {
+                    print_success(&format!("Up to date ({current})"));
                 }
-                Err(e) => {
-                    eprintln!("{} Update failed: {}", "✗".red().bold(), e);
-                    std::process::exit(1);
-                }
+                println!();
             }
         }
-        Err(e) => {
-            eprintln!("{} Failed to check for updates: {}", "✗".red().bold(), e);
+        return;
+    }
+
+    if !available && !args.force {
+        match fmt {
+            OutputFormat::Json => println!(
+                "{}",
+                serde_json::json!({
+                    "status": "up-to-date",
+                    "version": current,
+                    "updated": false,
+                })
+            ),
+            OutputFormat::Quiet => println!("{current}"),
+            OutputFormat::Human => {
+                print_brand_header("CLI update", "Release installer");
+                print_success(&format!("Already up to date ({current})"));
+                print_tip("Use `--force` to reinstall the current release.");
+                println!();
+            }
+        }
+        return;
+    }
+
+    let asset = match find_matching_asset(&release) {
+        Some(asset) => asset,
+        None => {
+            let cause = format!(
+                "No release binary is available for {}/{}.",
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            );
+            emit_error(
+                fmt,
+                "update",
+                "Unsupported update platform",
+                &cause,
+                &["Supported release targets: Linux amd64 and Linux arm64."],
+            );
+            std::process::exit(1);
+        }
+    };
+
+    if fmt == OutputFormat::Human {
+        print_brand_header("CLI update", "Release installer");
+        print_tip(&format!(
+            "Installing {current} → {} from {}.",
+            release.version, asset.name
+        ));
+        println!();
+    }
+
+    match update::apply_update(&client, asset).await {
+        Ok(path) => match fmt {
+            OutputFormat::Json => println!(
+                "{}",
+                serde_json::json!({
+                    "status": "updated",
+                    "from_version": current,
+                    "to_version": release.version,
+                    "path": path,
+                    "restart_required": true,
+                })
+            ),
+            OutputFormat::Quiet => println!("{}", release.version),
+            OutputFormat::Human => {
+                print_success(&format!("Updated to {}", release.version));
+                println!(
+                    "{}",
+                    presentation::facts(&[("Binary", path.display().to_string())])
+                );
+                println!();
+                print_tip("Restart the gateway if it is currently running.");
+                println!();
+            }
+        },
+        Err(error) => {
+            emit_error(
+                fmt,
+                "update",
+                "Could not update the CLI",
+                &error.to_string(),
+                &[],
+            );
             std::process::exit(1);
         }
     }
 }
 
-pub(super) async fn cmd_init(args: InitArgs) {
+pub(super) async fn cmd_init(args: InitArgs, fmt: OutputFormat) {
     use crate::init::generate_config;
 
     let path = std::path::Path::new(&args.output);
     match generate_config(path, args.force).await {
-        Ok(()) => {}
-        Err(e) => {
-            eprintln!("{} Init failed: {}", "✗".red().bold(), e);
+        Ok(()) => match fmt {
+            OutputFormat::Json => println!(
+                "{}",
+                serde_json::json!({
+                    "status": "created",
+                    "path": path,
+                    "overwritten": args.force,
+                })
+            ),
+            OutputFormat::Quiet => println!("{}", path.display()),
+            OutputFormat::Human => {
+                print_brand_header("Configuration created", "Starter TOML template");
+                print_success("Configuration template written");
+                println!(
+                    "{}",
+                    presentation::facts(&[("Path", path.display().to_string())])
+                );
+                println!();
+                print_tip(&format!(
+                    "Edit the file, then run `opencode2api server start -c {}`.",
+                    path.display()
+                ));
+                println!();
+            }
+        },
+        Err(error) => {
+            emit_error(
+                fmt,
+                "init",
+                "Could not create the configuration",
+                &error.to_string(),
+                &["Use `--force` only when replacing the existing file is intended."],
+            );
             std::process::exit(1);
         }
     }
@@ -143,32 +249,137 @@ pub(super) async fn cmd_init(args: InitArgs) {
 
 pub(super) fn cmd_env(fmt: OutputFormat) {
     let resolved = config::BridgeConfig::from_env_and_cli(config::CliOverrides::default());
-    if fmt == OutputFormat::Quiet {
-        for line in shell_export_lines(&resolved) {
-            println!("{}", line);
+    match fmt {
+        OutputFormat::Quiet => {
+            for line in shell_export_lines(&resolved) {
+                println!("{line}");
+            }
         }
-        return;
+        OutputFormat::Json => {
+            let base_url = claude_code_base_url(&resolved);
+            println!(
+                "{}",
+                serde_json::json!({
+                    "anthropic_api_key": "<redacted>",
+                    "anthropic_base_url": base_url,
+                    "openai_api_key": "<redacted>",
+                    "openai_base_url": format!("{base_url}/v1"),
+                    "opencode_model": resolved.model,
+                    "auth_enabled": resolved.auth_enabled(),
+                })
+            );
+        }
+        OutputFormat::Human => cmd_print_env(&resolved),
+    }
+}
+
+pub(super) fn cmd_api_key(command: ApiKeyCommand, fmt: OutputFormat) {
+    match command {
+        ApiKeyCommand::Generate(args) => cmd_generate_api_key(args, fmt),
+    }
+}
+
+fn cmd_generate_api_key(args: ApiKeyGenerateArgs, fmt: OutputFormat) {
+    let keys = match crate::api_key::generate_api_keys(args.count, args.bytes, &args.prefix) {
+        Ok(keys) => keys,
+        Err(error) => {
+            emit_error(
+                fmt,
+                "api-key-generate",
+                "Could not generate API keys",
+                &error.to_string(),
+                &[],
+            );
+            std::process::exit(1);
+        }
+    };
+
+    let resolved = config::BridgeConfig::from_env_and_cli(config::CliOverrides {
+        config_path: args.config.clone(),
+        ..Default::default()
+    });
+    let config_path = args
+        .config
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| resolved.management.config_path.clone());
+
+    if args.save {
+        if let Err(error) = crate::api_key::save_auth_tokens(&config_path, &keys, args.replace) {
+            emit_error(
+                fmt,
+                "api-key-save",
+                "Could not save API keys",
+                &error.to_string(),
+                &[],
+            );
+            std::process::exit(1);
+        }
     }
 
-    if fmt == OutputFormat::Json {
-        #[derive(serde::Serialize)]
-        struct EnvInfo {
-            anthropic_api_key: String,
-            anthropic_base_url: String,
-            opencode_model: Option<String>,
+    match fmt {
+        OutputFormat::Json => println!(
+            "{}",
+            serde_json::json!({
+                "keys": keys,
+                "saved": args.save,
+                "config_path": args.save.then(|| config_path.display().to_string()),
+                "restart_required": args.save,
+                "authorization_header": "Authorization: Bearer <key>",
+            })
+        ),
+        OutputFormat::Quiet => {
+            for key in &keys {
+                println!("{key}");
+            }
         }
-        let port = resolved.bridge_port;
-        let model = resolved.model.clone();
-        let info = EnvInfo {
-            anthropic_api_key: "opencode-bridge".to_string(),
-            anthropic_base_url: format!("http://127.0.0.1:{}/v1", port),
-            opencode_model: model,
-        };
-        if let Ok(s) = serde_json::to_string_pretty(&info) {
-            println!("{s}");
-        }
-        return;
-    }
+        OutputFormat::Human => {
+            print_brand_header("API key created", "Bridge authentication credential");
+            print_success(&format!(
+                "Generated {} API key{}",
+                keys.len(),
+                if keys.len() == 1 { "" } else { "s" }
+            ));
+            print_section(if keys.len() == 1 {
+                "API key"
+            } else {
+                "API keys"
+            });
+            for key in &keys {
+                println!(
+                    "{}{}",
+                    " ".repeat(presentation::INDENT * 2),
+                    key.cyan().bold()
+                );
+            }
 
-    cmd_print_env(&resolved);
+            if args.save {
+                println!();
+                println!(
+                    "{}",
+                    presentation::facts(&[("Saved to", config_path.display().to_string())])
+                );
+                print_tip("Restart the gateway to activate the updated credentials.");
+            } else {
+                println!();
+                print_warning("Store these credentials now; generated values are not recoverable.");
+                print_tip("Use `--save` to append them to the active TOML configuration.");
+            }
+            println!();
+        }
+    }
+}
+
+fn emit_error(fmt: OutputFormat, operation: &str, title: &str, cause: &str, suggestions: &[&str]) {
+    match fmt {
+        OutputFormat::Json => println!(
+            "{}",
+            serde_json::json!({
+                "status": "error",
+                "operation": operation,
+                "message": cause,
+            })
+        ),
+        OutputFormat::Quiet => eprintln!("error"),
+        OutputFormat::Human => print_error(title, cause, suggestions),
+    }
 }

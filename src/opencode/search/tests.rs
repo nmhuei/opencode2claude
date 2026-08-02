@@ -218,6 +218,18 @@ mod provider_http_fixtures {
         )
     }
 
+    async fn duck_captcha(State(calls): State<Calls>) -> Html<&'static str> {
+        log(&calls, "duck-captcha").await;
+        Html(r#"<div class="anomaly-modal__title">Unfortunately, bots use DuckDuckGo too.</div>"#)
+    }
+
+    async fn yahoo_ok(State(calls): State<Calls>) -> Html<&'static str> {
+        log(&calls, "yahoo").await;
+        Html(
+            r#"<ol><li><div class="dd algo algo-sr"><div class="compTitle"><a data-matarget="algo" href="https://r.search.yahoo.com/x/RU=https%3a%2f%2fexample.com%2fyahoo/RK=2/RS=x"><h3><span>Yahoo fixture</span></h3></a></div><div class="compText aAbs"><p>yahoo content</p></div></div></li></ol>"#,
+        )
+    }
+
     async fn slow() -> &'static str {
         tokio::time::sleep(Duration::from_millis(200)).await;
         "<html>late</html>"
@@ -236,6 +248,8 @@ mod provider_http_fixtures {
             .route("/serper-ok", post(serper_ok))
             .route("/searx/search", get(searx_ok))
             .route("/duck-ok", get(duck_ok))
+            .route("/duck-captcha", get(duck_captcha))
+            .route("/yahoo-ok", get(yahoo_ok))
             .route("/slow", get(slow))
             .route("/oversized", get(oversized))
             .with_state(calls.clone());
@@ -253,6 +267,7 @@ mod provider_http_fixtures {
         config.search.exa_url = format!("{base}/exa-ok");
         config.search.serper_url = format!("{base}/serper-ok");
         config.search.duckduckgo_url = format!("{base}/duck-ok");
+        config.search.yahoo_url = format!("{base}/yahoo-ok");
         config.search.request_timeout = Duration::from_secs(1);
         config.search.max_response_bytes = 16 * 1024;
         config.search.allow_private_searxng = true;
@@ -304,6 +319,20 @@ mod provider_http_fixtures {
     }
 
     #[tokio::test]
+    async fn duckduckgo_captcha_falls_back_to_yahoo() {
+        let (base, calls) = spawn().await;
+        let mut config = base_config(&base);
+        config.search.duckduckgo_url = format!("{base}/duck-captcha");
+        let results = SearchClient::new(Client::new(), &config)
+            .search_results("claude security")
+            .await
+            .unwrap();
+        assert_eq!(results[0].title, "Yahoo fixture");
+        assert_eq!(results[0].url, "https://example.com/yahoo");
+        assert_eq!(*calls.lock().await, vec!["duck-captcha", "yahoo"]);
+    }
+
+    #[tokio::test]
     async fn fallback_order_moves_from_failed_tavily_to_exa() {
         let (base, calls) = spawn().await;
         let mut config = base_config(&base);
@@ -327,6 +356,7 @@ mod provider_http_fixtures {
         let (base, _calls) = spawn().await;
         let mut timeout = base_config(&base);
         timeout.search.duckduckgo_url = format!("{base}/slow");
+        timeout.search.yahoo_url = format!("{base}/slow");
         timeout.search.request_timeout = Duration::from_millis(20);
         let error = SearchClient::new(Client::new(), &timeout)
             .search_results("rust")
@@ -336,6 +366,7 @@ mod provider_http_fixtures {
 
         let mut oversized_config = base_config(&base);
         oversized_config.search.duckduckgo_url = format!("{base}/oversized");
+        oversized_config.search.yahoo_url = format!("{base}/oversized");
         oversized_config.search.max_response_bytes = 1024;
         let error = SearchClient::new(Client::new(), &oversized_config)
             .search_results("rust")

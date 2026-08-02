@@ -1,0 +1,82 @@
+[
+  {
+    "name": "canonical_read",
+    "input": "prefix [Requesting Tool execution: 'Read' with arguments: {\"file_path\":\"/tmp/a\"}] suffix",
+    "expected_cleaned": "prefix  suffix",
+    "expected_calls": [{"name":"Read","arguments":{"file_path":"/tmp/a"}}],
+    "expected_malformed": false
+  },
+  {
+    "name": "shorthand_read",
+    "input": "[Requesting Read with arguments: {\"file_path\":\"/tmp/a\"}]",
+    "expected_cleaned": "",
+    "expected_calls": [{"name":"Read","arguments":{"file_path":"/tmp/a"}}],
+    "expected_malformed": false
+  },
+  {
+    "name": "taskupdate_batch",
+    "input": "[Requesting TaskUpdate with arguments: {\"status\":\"completed\",\"taskId\":\"10\"},{\"status\":\"completed\",\"taskId\":\"12\"}]",
+    "expected_cleaned": "",
+    "expected_calls": [
+      {"name":"TaskUpdate","arguments":{"status":"completed","taskId":"10"}},
+      {"name":"TaskUpdate","arguments":{"status":"completed","taskId":"12"}}
+    ],
+    "expected_malformed": false
+  },
+  {
+    "name": "legitimate_array_input",
+    "input": "[Requesting BatchRead with arguments: [{\"path\":\"a\"},{\"path\":\"b\"}]]",
+    "expected_cleaned": "",
+    "expected_calls": [{"name":"BatchRead","arguments":[{"path":"a"},{"path":"b"}]}],
+    "expected_malformed": false
+  },
+  {
+    "name": "fenced_example",
+    "input": "Example:\n```text\n[Requesting Read with arguments: {\"file_path\":\"secret\"}]\n```",
+    "expected_cleaned": "Example:\n```text\n[Requesting Read with arguments: {\"file_path\":\"secret\"}]\n```",
+    "expected_calls": [],
+    "expected_malformed": false
+  },
+  {
+    "name": "inline_example",
+    "input": "Use `[Requesting Read with arguments: {\"file_path\":\"secret\"}]` as an example.",
+    "expected_cleaned": "Use `[Requesting Read with arguments: {\"file_path\":\"secret\"}]` as an example.",
+    "expected_calls": [],
+    "expected_malformed": false
+  },
+  {
+    "name": "blockquote_example",
+    "input": "> [Requesting Read with arguments: {\"file_path\":\"secret\"}]",
+    "expected_cleaned": "> [Requesting Read with arguments: {\"file_path\":\"secret\"}]",
+    "expected_calls": [],
+    "expected_malformed": false
+  },
+  {
+    "name": "escaped_example",
+    "input": "\\[Requesting Read with arguments: {\"file_path\":\"secret\"}]",
+    "expected_cleaned": "\\[Requesting Read with arguments: {\"file_path\":\"secret\"}]",
+    "expected_calls": [],
+    "expected_malformed": false
+  },
+  {
+    "name": "malformed_batch",
+    "input": "[Requesting TaskUpdate with arguments: {\"status\":\"completed\",\"taskId\":\"10\"},{\"status\":\"completed\",\"taskId\":}]",
+    "expected_cleaned": "[Requesting TaskUpdate with arguments: {\"status\":\"completed\",\"taskId\":\"10\"},{\"status\":\"completed\",\"taskId\":}]",
+    "expected_calls": [],
+    "expected_malformed": true
+  },
+  {
+    "name": "malformed_then_valid",
+    "input": "[Requesting Read with arguments: {\"file_path\":\"/tmp/bad\"\n[Requesting Read with arguments: {\"file_path\":\"/tmp/good\"}]",
+    "expected_cleaned": "[Requesting Read with arguments: {\"file_path\":\"/tmp/bad\"\n",
+    "expected_calls": [{"name":"Read","arguments":{"file_path":"/tmp/good"}}],
+    "expected_malformed": true
+  },
+  {
+    "name": "detached_field_recovery",
+    "input": "[Requesting Bash with arguments: {\"command\":\"echo ok\",\"description\":\"useful\"}, \"description\": null}]",
+    "expected_cleaned": "",
+    "expected_calls": [{"name":"Bash","arguments":{"command":"echo ok","description":"useful"}}],
+    "expected_malformed": false
+  }
+]

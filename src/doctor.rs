@@ -6,8 +6,8 @@
 
 use crate::config;
 use crate::docker;
+use crate::presentation;
 use crate::proxy_pool;
-use crate::tui;
 use serde::Serialize;
 use std::fmt;
 use yansi::Paint;
@@ -60,55 +60,53 @@ impl DoctorSummary {
 
 impl fmt::Display for DoctorReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(
-            f,
-            "{}",
-            "╭────────────────────────────────────────────────────────────╮"
-                .cyan()
-                .bold()
-        )?;
-        writeln!(
-            f,
-            "{} {} {}",
-            "│".cyan().bold(),
-            "Doctor".bold(),
-            "dependency and runtime diagnostics".dim()
-        )?;
-        writeln!(
-            f,
-            "{}",
-            "╰────────────────────────────────────────────────────────────╯"
-                .cyan()
-                .bold()
-        )?;
         writeln!(f)?;
-        for check in &self.checks {
-            writeln!(f, " {}", check)?;
-        }
+        writeln!(
+            f,
+            "{} {}",
+            presentation::BRAND_SYMBOL.cyan().bold(),
+            "OpenCode2API".bold()
+        )?;
+        writeln!(f, "  {}", "System diagnostics".dim())?;
         writeln!(f)?;
-        match self.summary {
-            DoctorSummary::AllPass => {
-                writeln!(f, " {} All checks passed.", "✓".green().bold())?;
-            }
-            DoctorSummary::Warnings(n) => {
-                writeln!(
-                    f,
-                    " {} {} warning{} — bridge should still operate",
-                    "⚠".yellow().bold(),
-                    n,
-                    if n == 1 { "" } else { "s" }
-                )?;
-            }
-            DoctorSummary::Failures(n) => {
-                writeln!(
-                    f,
-                    " {} {} failure{} — bridge may not operate correctly",
-                    "✗".red().bold(),
-                    n,
-                    if n == 1 { "" } else { "s" }
-                )?;
+
+        for (index, check) in self.checks.iter().enumerate() {
+            writeln!(f, "{check}")?;
+            if index + 1 < self.checks.len() {
+                writeln!(f)?;
             }
         }
+
+        let passed = self
+            .checks
+            .iter()
+            .filter(|check| check.status == CheckStatus::Pass)
+            .count();
+        let warnings = self
+            .checks
+            .iter()
+            .filter(|check| check.status == CheckStatus::Warn)
+            .count();
+        let failures = self
+            .checks
+            .iter()
+            .filter(|check| check.status == CheckStatus::Fail)
+            .count();
+
+        writeln!(f)?;
+        writeln!(f, "  {}", presentation::rule('─').dim())?;
+        write!(
+            f,
+            "  {} passed   {} warning{}   {} failed",
+            passed.to_string().green(),
+            warnings.to_string().yellow(),
+            if warnings == 1 { "" } else { "s" },
+            if failures > 0 {
+                failures.to_string().red().to_string()
+            } else {
+                failures.to_string().green().to_string()
+            }
+        )?;
         Ok(())
     }
 }
@@ -117,16 +115,21 @@ impl fmt::Display for CheckResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let icon = match self.status {
             CheckStatus::Pass => "✓".green().bold(),
-            CheckStatus::Warn => "⚠".yellow().bold(),
-            CheckStatus::Fail => "✗".red().bold(),
+            CheckStatus::Warn => "▲".yellow().bold(),
+            CheckStatus::Fail => "×".red().bold(),
         };
-        write!(
-            f,
-            "{} {} {}",
-            icon,
-            tui::pad_to_width(&self.label.cyan().bold().to_string(), 22),
-            self.message.dim()
-        )
+
+        writeln!(f, "  {} {}", icon, self.label.bold())?;
+        let message_width = presentation::content_width().saturating_sub(4).max(20);
+        let lines = presentation::wrap(&self.message, message_width);
+        for (index, line) in lines.iter().enumerate() {
+            if index + 1 == lines.len() {
+                write!(f, "    {}", line.dim())?;
+            } else {
+                writeln!(f, "    {}", line.dim())?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -217,18 +220,46 @@ async fn check_port(port: u16) -> CheckResult {
                 name,
                 label,
                 status: CheckStatus::Pass,
-                message: format!("Port {} is available", port),
+                message: format!("Port {port} is available"),
             }
         }
-        Err(_) => CheckResult {
-            name,
-            label,
-            status: CheckStatus::Warn,
-            message: format!(
-                "Port {} is already in use. Try: use -p <port> or stop the other process",
-                port
-            ),
-        },
+        Err(_) => {
+            let health_url = format!("http://127.0.0.1:{port}/health");
+            let bridge_is_healthy = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(2))
+                .build()
+                .ok()
+                .map(|client| async move { client.get(health_url).send().await })
+                .map(|future| async move {
+                    future
+                        .await
+                        .ok()
+                        .is_some_and(|response| response.status().is_success())
+                });
+
+            let bridge_is_healthy = match bridge_is_healthy {
+                Some(future) => future.await,
+                None => false,
+            };
+
+            if bridge_is_healthy {
+                CheckResult {
+                    name,
+                    label,
+                    status: CheckStatus::Pass,
+                    message: format!("Gateway is listening and healthy on port {port}"),
+                }
+            } else {
+                CheckResult {
+                    name,
+                    label,
+                    status: CheckStatus::Warn,
+                    message: format!(
+                        "Port {port} is occupied by another or unhealthy process. Try: opencode2api server status"
+                    ),
+                }
+            }
+        }
     }
 }
 
@@ -428,7 +459,7 @@ mod tests {
             message: "something degraded".into(),
         };
         let display = cr.to_string();
-        assert!(display.contains('⚠'));
+        assert!(display.contains('▲'));
     }
 
     #[test]
@@ -440,7 +471,7 @@ mod tests {
             message: "something broken".into(),
         };
         let display = cr.to_string();
-        assert!(display.contains('✗'));
+        assert!(display.contains('×'));
     }
 
     #[test]
@@ -454,28 +485,47 @@ mod tests {
             }],
             summary: DoctorSummary::AllPass,
         };
-        let display = report.to_string();
-        assert!(display.contains("All checks passed"));
+        let display = crate::tui::strip_ansi(&report.to_string());
+        assert!(display.contains("1 passed"));
+        assert!(display.contains("0 failed"));
     }
 
     #[test]
     fn test_doctor_report_warnings_display() {
         let report = DoctorReport {
-            checks: vec![],
+            checks: vec![CheckResult {
+                name: "warning".into(),
+                label: "Warning".into(),
+                status: CheckStatus::Warn,
+                message: "degraded".into(),
+            }],
             summary: DoctorSummary::Warnings(1),
         };
-        let display = report.to_string();
-        assert!(display.contains("warning"));
+        let display = crate::tui::strip_ansi(&report.to_string());
+        assert!(display.contains("1 warning"));
     }
 
     #[test]
     fn test_doctor_report_failures_display() {
         let report = DoctorReport {
-            checks: vec![],
+            checks: vec![
+                CheckResult {
+                    name: "failure-1".into(),
+                    label: "Failure 1".into(),
+                    status: CheckStatus::Fail,
+                    message: "broken".into(),
+                },
+                CheckResult {
+                    name: "failure-2".into(),
+                    label: "Failure 2".into(),
+                    status: CheckStatus::Fail,
+                    message: "broken".into(),
+                },
+            ],
             summary: DoctorSummary::Failures(2),
         };
-        let display = report.to_string();
-        assert!(display.contains("failure"));
+        let display = crate::tui::strip_ansi(&report.to_string());
+        assert!(display.contains("2 failed"));
     }
 
     #[test]

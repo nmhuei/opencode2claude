@@ -32,6 +32,12 @@ pub enum BridgeError {
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
 
+    #[error("Forbidden: {0}")]
+    Forbidden(String),
+
+    #[error("Rate limited: {0}")]
+    RateLimited(String),
+
     #[allow(dead_code)] // kept for health-check error paths
     #[error("OpenCode daemon unavailable on port {0}")]
     DaemonUnavailable(u16),
@@ -67,6 +73,14 @@ impl IntoResponse for BridgeError {
             BridgeError::Unauthorized(_) => (
                 StatusCode::UNAUTHORIZED,
                 "authentication_error",
+                self.to_string(),
+            ),
+            BridgeError::Forbidden(_) => {
+                (StatusCode::FORBIDDEN, "permission_error", self.to_string())
+            }
+            BridgeError::RateLimited(_) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limit_error",
                 self.to_string(),
             ),
             BridgeError::DaemonUnavailable(_) => (

@@ -2,6 +2,12 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Persistent repository worklog
+
+Before starting a substantial task, read `REPO_WORKLOG.md` for the current service snapshot, prior implementation decisions, verification history, known limitations, and working-tree safety notes.
+
+After completing a task, append a dated entry to `REPO_WORKLOG.md` and update its current snapshot when service state, model, endpoints, quality-gate results, or important repository status changes. Never store raw secrets, admin tokens, session cookies, or other credentials in the worklog.
+
 ## Build, Install & Development
 
 ```bash
@@ -47,7 +53,7 @@ cargo clippy -- -D warnings
 ```
 
 **CI** (`.github/workflows/ci.yml`): fmt → clippy → test → build-release + shellcheck.
-**Release** (`.github/workflows/release.yml`): 4-target binary build (linux amd64/arm64, macOS amd64/arm64) → GitHub Releases → crates.io publish → ghcr.io Docker image.
+**Release** (`.github/workflows/release.yml`): Linux binary build (amd64/arm64) → GitHub Releases → crates.io publish → ghcr.io Docker image.
 
 ## Project Overview
 

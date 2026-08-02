@@ -13,6 +13,7 @@ pub struct ServeArgsBridge {
     pub serper_api_key: Option<String>,
     pub searxng_url: Option<String>,
     pub searxng_api_key: Option<String>,
+    pub egress_mode: Option<String>,
 }
 
 impl From<ServeArgsBridge> for crate::config::CliOverrides {
@@ -29,6 +30,7 @@ impl From<ServeArgsBridge> for crate::config::CliOverrides {
             serper_api_key: args.serper_api_key,
             searxng_url: args.searxng_url,
             searxng_api_key: args.searxng_api_key,
+            egress_mode: args.egress_mode,
         }
     }
 }

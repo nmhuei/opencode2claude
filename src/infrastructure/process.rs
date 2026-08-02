@@ -1,4 +1,4 @@
-//! Cross-platform process lifecycle boundary.
+//! Linux process lifecycle boundary.
 
 use std::fmt;
 use std::fs::OpenOptions;
@@ -60,21 +60,10 @@ impl ProcessManager for SystemProcessManager {
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr));
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            // A distinct process group is sufficient for supervisor ownership;
-            // no unsafe pre_exec hook is required.
-            command.process_group(0);
-        }
-
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-            const DETACHED_PROCESS: u32 = 0x0000_0008;
-            command.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
-        }
+        use std::os::unix::process::CommandExt;
+        // A distinct process group is sufficient for supervisor ownership;
+        // no unsafe pre_exec hook is required.
+        command.process_group(0);
 
         let child = command.spawn()?;
         let pid = child.id();
@@ -102,10 +91,9 @@ impl ProcessManager for SystemProcessManager {
 }
 
 fn valid_pid(pid: u32) -> bool {
-    pid > 0 && (cfg!(windows) || pid <= i32::MAX as u32)
+    pid > 0 && pid <= i32::MAX as u32
 }
 
-#[cfg(target_os = "linux")]
 fn system_identity(pid: u32) -> io::Result<Option<ProcessIdentity>> {
     let root = PathBuf::from(format!("/proc/{pid}"));
     if !root.exists() {
@@ -122,52 +110,6 @@ fn system_identity(pid: u32) -> io::Result<Option<ProcessIdentity>> {
     }))
 }
 
-#[cfg(all(unix, not(target_os = "linux")))]
-fn system_identity(pid: u32) -> io::Result<Option<ProcessIdentity>> {
-    let output = Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "comm=", "-o", "lstart="])
-        .output()?;
-    if !output.status.success() || output.stdout.is_empty() {
-        return Ok(None);
-    }
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let executable = text
-        .split_whitespace()
-        .next()
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from);
-    Ok(Some(ProcessIdentity {
-        pid,
-        executable,
-        start_marker: Some(text),
-    }))
-}
-
-#[cfg(windows)]
-fn system_identity(pid: u32) -> io::Result<Option<ProcessIdentity>> {
-    let output = Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
-        .output()?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    let line = text
-        .lines()
-        .find(|line| line.contains(&format!("\"{pid}\"")));
-    Ok(line.map(|line| ProcessIdentity {
-        pid,
-        executable: line
-            .split(',')
-            .next()
-            .map(|name| PathBuf::from(name.trim_matches('"'))),
-        start_marker: None,
-    }))
-}
-
-#[cfg(not(any(unix, windows)))]
-fn system_identity(_pid: u32) -> io::Result<Option<ProcessIdentity>> {
-    Ok(None)
-}
-
-#[cfg(unix)]
 fn signal_process(pid: u32, force: bool) -> io::Result<()> {
     if !valid_pid(pid) {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid PID"));
@@ -183,30 +125,6 @@ fn signal_process(pid: u32, force: bool) -> io::Result<()> {
     }
 }
 
-#[cfg(windows)]
-fn signal_process(pid: u32, force: bool) -> io::Result<()> {
-    let mut command = Command::new("taskkill");
-    command.args(["/PID", &pid.to_string(), "/T"]);
-    if force {
-        command.arg("/F");
-    }
-    let status = command.status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!("taskkill {pid} failed")))
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-fn signal_process(_pid: u32, _force: bool) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "process signalling is unsupported on this platform",
-    ))
-}
-
-#[cfg(target_os = "linux")]
 fn parse_linux_start_ticks(stat: &str) -> Option<String> {
     // `/proc/<pid>/stat` field 2 can contain spaces inside parentheses. Split
     // only after the closing command-name parenthesis; starttime is field 22,
@@ -219,7 +137,22 @@ pub fn same_executable(actual: Option<&Path>, expected: &Path) -> bool {
     let Some(actual) = actual else {
         return false;
     };
-    actual
+
+    // Linux appends ` (deleted)` to /proc/<pid>/exe after an in-place rebuild
+    // replaces the binary while the old process is still running. The process
+    // start marker is checked separately, so stripping only this kernel suffix
+    // preserves ownership without accepting a reused PID.
+    let actual_text = actual.to_string_lossy();
+    let normalized_actual = actual_text
+        .strip_suffix(" (deleted)")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| actual.to_path_buf());
+
+    if normalized_actual == expected {
+        return true;
+    }
+
+    normalized_actual
         .canonicalize()
         .ok()
         .zip(expected.canonicalize().ok())
@@ -244,11 +177,24 @@ mod tests {
         assert!(SystemProcessManager.identity(u32::MAX).unwrap().is_none());
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn parses_start_ticks_after_parenthesized_command_name() {
         let stat =
             "123 (name with spaces) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 424242 21";
         assert_eq!(parse_linux_start_ticks(stat).as_deref(), Some("424242"));
+    }
+
+    #[test]
+    fn deleted_proc_executable_suffix_still_matches_original_path() {
+        let expected = PathBuf::from("/tmp/opencode2api-serve");
+        let actual = PathBuf::from("/tmp/opencode2api-serve (deleted)");
+        assert!(same_executable(Some(&actual), &expected));
+    }
+
+    #[test]
+    fn deleted_suffix_does_not_match_a_different_executable() {
+        let expected = PathBuf::from("/tmp/opencode2api-serve");
+        let actual = PathBuf::from("/tmp/other-service (deleted)");
+        assert!(!same_executable(Some(&actual), &expected));
     }
 }

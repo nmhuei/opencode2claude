@@ -11,6 +11,18 @@ fn five_node_pool() -> ProxyPool {
     ProxyPool::new(&make_test_urls(5))
 }
 
+fn identity(ip: &str) -> ExitIdentity {
+    ExitIdentity {
+        public_ip: ip.to_string(),
+        provider: Some("cloudflare-warp".to_string()),
+        colo: Some("HKG".to_string()),
+        verified_at_unix_secs: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    }
+}
+
 #[test]
 fn proxy_pool_mapping_is_sticky() {
     let mut pool = ProxyPool::new(&make_test_urls(3));
@@ -90,12 +102,27 @@ fn unavailable_sticky_primary_does_not_remap_other_healthy_sessions() {
 }
 
 #[test]
-fn standby_is_used_only_after_enabled_primaries_are_unavailable() {
+fn offline_unverified_standby_is_not_selected_after_primaries_are_unavailable() {
     let mut pool = five_node_pool();
     for index in 0..3 {
         pool.mark_rate_limited(index, Duration::from_secs(300));
     }
-    let selected = pool.get_client("failover").expect("standby route").2;
+    assert!(pool.get_client("failover").is_none());
+}
+
+#[test]
+fn verified_healthy_standby_is_used_only_after_primaries_are_unavailable() {
+    let mut pool = five_node_pool();
+    for index in 0..3 {
+        pool.mark_rate_limited(index, Duration::from_secs(300));
+    }
+    pool.proxies[3].exit_identity = Some(identity("1.1.1.1"));
+    pool.proxies[3].health = HealthState::Healthy;
+    let selected = pool
+        .get_client("failover")
+        .expect("verified standby route")
+        .2;
+    assert_eq!(selected, 3);
     assert_eq!(pool.proxies[selected].role, EgressRole::WarmStandby);
 }
 
@@ -120,6 +147,19 @@ fn duplicate_exit_is_excluded_from_routing() {
         .expect("alternate primary")
         .2;
     assert_ne!(assigned, selected);
+}
+
+#[test]
+fn rate_limit_recovery_is_never_used_as_half_open_probe() {
+    let mut pool = ProxyPool::new(&["socks5://127.0.0.1:40001".to_string()]);
+    pool.proxies[0].exit_identity = Some(identity("1.1.1.1"));
+    pool.mark_rate_limited(0, Duration::from_secs(3_600));
+    pool.drain_restart_queue();
+    pool.proxies[0].health = HealthState::Recovering;
+    pool.proxies[0].circuit = CircuitState::HalfOpen;
+    pool.proxies[0].restart_attempts = pool.max_restart_attempts;
+
+    assert!(pool.select_proxy_for_key("must-not-probe").is_none());
 }
 
 #[test]
@@ -166,6 +206,11 @@ fn mark_rate_limited_opens_circuit() {
     pool.mark_rate_limited(0, Duration::from_secs(60));
     assert_eq!(pool.proxies[0].health, HealthState::Degraded);
     assert!(matches!(pool.proxies[0].circuit, CircuitState::Open { .. }));
+    assert_eq!(
+        pool.proxies[0].recovery_cause,
+        Some(RecoveryCause::RateLimit)
+    );
+    assert_eq!(pool.restart_queue, vec![0]);
     assert!(pool.select_proxy_for_key("blocked").is_none());
 }
 
@@ -241,6 +286,13 @@ fn restart_queue_drain_is_atomic() {
     pool.restart_queue.extend([0, 1]);
     assert_eq!(pool.drain_restart_queue(), vec![0, 1]);
     assert!(pool.drain_restart_queue().is_empty());
+}
+
+#[test]
+fn pool_normalizes_socks5_urls_to_remote_dns() {
+    let pool = ProxyPool::new(&["socks5://127.0.0.1:40001".to_string()]);
+    assert_eq!(pool.proxies.len(), 1);
+    assert_eq!(pool.proxies[0].url, "socks5h://127.0.0.1:40001");
 }
 
 #[test]

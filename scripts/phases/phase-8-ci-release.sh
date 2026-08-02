@@ -32,7 +32,7 @@ GATES=(
   gate_binary_build
   gate_ci_workflow_exists
   gate_release_workflow_exists
-  gate_ci_calls_verify
+  gate_ci_calls_verification_entrypoint
   gate_release_build_locked
   gate_dockerfile_locked
   gate_dockerignore_exists
@@ -57,10 +57,10 @@ gate_release_workflow_exists() {
   pass "release.yml exists"
 }
 
-gate_ci_calls_verify() {
-  info "Gate 8.8: CI workflow calls verify.sh"
-  grep -qE '^\s+run:\s+\./scripts/verify\.sh' "$ROOT_DIR/.github/workflows/ci.yml" || return 1
-  pass "CI uses verify.sh"
+gate_ci_calls_verification_entrypoint() {
+  info "Gate 8.8: CI workflow calls a repository verification entrypoint"
+  grep -qE 'scripts/(verify\.sh|tier-a\.sh|tier-b\.sh)' "$ROOT_DIR/.github/workflows/ci.yml" || return 1
+  pass "CI uses a repository verification entrypoint"
 }
 
 gate_release_build_locked() {

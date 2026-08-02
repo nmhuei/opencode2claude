@@ -13,12 +13,8 @@ concurrency:
 
 jobs:
   tier-a:
-    name: Tier A (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+    name: Tier A (Linux)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
@@ -39,7 +35,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v5
         with:
-          name: tier-a-${{ matrix.os }}-${{ github.sha }}
+          name: tier-a-linux-${{ github.sha }}
           path: |
             verification/completion/
             target/debug/opencode2api
@@ -47,13 +43,9 @@ jobs:
           retention-days: 14
 
   tier-b:
-    name: Tier B (${{ matrix.os }})
+    name: Tier B (Linux)
     needs: tier-a
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
@@ -65,13 +57,8 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Install ShellCheck on Linux
-        if: runner.os == 'Linux'
+      - name: Install ShellCheck
         run: sudo apt-get update -qq && sudo apt-get install -y shellcheck
-
-      - name: Install ShellCheck on macOS
-        if: runner.os == 'macOS'
-        run: brew install shellcheck
 
       - name: Install supply-chain tools
         run: |
@@ -91,6 +78,6 @@ jobs:
       - name: Upload release smoke binary
         uses: actions/upload-artifact@v5
         with:
-          name: tier-b-${{ matrix.os }}-${{ github.sha }}
+          name: tier-b-linux-${{ github.sha }}
           path: target/release/opencode2api
           retention-days: 14

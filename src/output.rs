@@ -7,6 +7,9 @@
 use serde::Serialize;
 use std::fmt::Display;
 use std::io::IsTerminal;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static ANIMATIONS_ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Output format selection for CLI commands.
 ///
@@ -51,22 +54,26 @@ pub enum ColorChoice {
 ///
 /// Call this once at the start of `main()`, before any output is written.
 pub fn setup_color(choice: &ColorChoice) {
+    let no_color_set = std::env::var_os("NO_COLOR").is_some();
+    let stdout_is_terminal = std::io::stdout().is_terminal();
+    let stderr_is_terminal = std::io::stderr().is_terminal();
+
     match choice {
-        ColorChoice::Never => {
-            yansi::disable();
-        }
-        ColorChoice::Always => {
-            // yansi is enabled by default, but ensure it's on
-            yansi::enable();
-        }
-        ColorChoice::Auto => {
-            let no_color_set = std::env::var_os("NO_COLOR").is_some();
-            let is_terminal = std::io::stdout().is_terminal();
-            if no_color_set || !is_terminal {
-                yansi::disable();
-            }
-        }
+        ColorChoice::Never => yansi::disable(),
+        ColorChoice::Always => yansi::enable(),
+        ColorChoice::Auto if no_color_set || !stdout_is_terminal => yansi::disable(),
+        ColorChoice::Auto => yansi::enable(),
     }
+
+    ANIMATIONS_ENABLED.store(
+        !matches!(choice, ColorChoice::Never) && !no_color_set && stderr_is_terminal,
+        Ordering::Relaxed,
+    );
+}
+
+/// Whether transient spinners/progress updates are safe for the current stream.
+pub fn animations_enabled() -> bool {
+    ANIMATIONS_ENABLED.load(Ordering::Relaxed)
 }
 
 /// A simple key-value pair for rendering config/status output.

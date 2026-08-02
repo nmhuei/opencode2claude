@@ -22,6 +22,7 @@ pub struct SearchClient {
     exa_url: String,
     serper_url: String,
     duckduckgo_url: String,
+    yahoo_url: String,
     policy: SearchPolicy,
     metrics: Option<Arc<Metrics>>,
 }
@@ -55,6 +56,7 @@ impl SearchClient {
             exa_url: config.search.exa_url.clone(),
             serper_url: config.search.serper_url.clone(),
             duckduckgo_url: config.search.duckduckgo_url.clone(),
+            yahoo_url: config.search.yahoo_url.clone(),
             policy: SearchPolicy {
                 max_results: config.search.max_results,
                 max_snippet_chars: config.search.max_snippet_chars,
@@ -150,24 +152,48 @@ impl SearchClient {
         {
             Ok(results) if !results.is_empty() => {
                 self.record_search(SearchProviderKind::DuckDuckGo, SearchMetricOutcome::Success);
-                Ok(results)
+                return Ok(results);
             }
             Ok(_) => {
                 self.record_search(
                     SearchProviderKind::DuckDuckGo,
                     SearchMetricOutcome::NoResults,
                 );
+                no_results(SearchProviderKind::DuckDuckGo, &mut last_error);
+            }
+            Err(error) => {
+                self.record_search(SearchProviderKind::DuckDuckGo, SearchMetricOutcome::Failure);
+                record_failure(error, &mut last_error);
+            }
+        }
+
+        info!(provider = "Yahoo", "attempting web search");
+        match providers::yahoo(&self.client, &query, &self.yahoo_url, &self.policy).await {
+            Ok(results) if !results.is_empty() => {
+                self.record_search(SearchProviderKind::Yahoo, SearchMetricOutcome::Success);
+                Ok(results)
+            }
+            Ok(_) => {
+                self.record_search(SearchProviderKind::Yahoo, SearchMetricOutcome::NoResults);
+                no_results(SearchProviderKind::Yahoo, &mut last_error);
                 Err(last_error.unwrap_or_else(|| {
                     SearchError::new(
-                        SearchProviderKind::DuckDuckGo,
+                        SearchProviderKind::Yahoo,
                         SearchErrorKind::NoResults,
                         "all configured providers returned no results",
                     )
                 }))
             }
             Err(error) => {
-                self.record_search(SearchProviderKind::DuckDuckGo, SearchMetricOutcome::Failure);
-                Err(error)
+                self.record_search(SearchProviderKind::Yahoo, SearchMetricOutcome::Failure);
+                record_failure(error, &mut last_error);
+                Err(last_error.unwrap_or_else(|| {
+                    SearchError::new(
+                        SearchProviderKind::Yahoo,
+                        SearchErrorKind::NoResults,
+                        "all configured providers failed",
+                    )
+                }))
             }
         }
     }
@@ -181,7 +207,9 @@ impl SearchClient {
             SearchProviderKind::Exa => SearchMetricProvider::Exa,
             SearchProviderKind::Serper => SearchMetricProvider::Serper,
             SearchProviderKind::SearXng => SearchMetricProvider::SearXng,
-            SearchProviderKind::DuckDuckGo => SearchMetricProvider::DuckDuckGo,
+            SearchProviderKind::DuckDuckGo | SearchProviderKind::Yahoo => {
+                SearchMetricProvider::DuckDuckGo
+            }
         };
         metrics.record_search(provider, outcome);
     }

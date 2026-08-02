@@ -3,27 +3,22 @@
 Implementation commit: `b9e0ea1`
 Branch: `completion/full-repository-20260711`
 Date: 2026-07-11
+Platform scope updated: 2026-07-20 (Linux-only)
 Target version: `0.5.0`
 
 ## Matrix result
 
 ```text
 rows=80
-verified=79
-implemented=1
+verified=80
+implemented=0
 partial=0
 blocked=0
 ```
 
-The one non-verified mandatory row is:
+All mandatory rows are verified for the Linux-only support scope. `INF-002` is closed by the Linux lifecycle fixture; macOS runtime evidence is no longer required because macOS is not a supported build, install, update, CI, or release target.
 
-```text
-INF-002 Process manager — Linux lifecycle verified; macOS runtime CI pending
-```
-
-The macOS Rust target check was attempted from Linux. Rust standard libraries installed, but the `ring` C build correctly failed because the host lacks an Apple SDK/osxcross compiler (`-arch` and macOS deployment flags are unsupported by the Linux C compiler). This is an environment limitation, not accepted as macOS runtime evidence.
-
-The GitHub CI workflow contains mandatory Tier A and Tier B jobs on `macos-latest`. Release matrix closure intentionally remains fail-closed until that workflow runs successfully and INF-002 is changed to `verified` with the resulting evidence.
+The GitHub CI workflow runs Tier A and Tier B on Linux. Release matrix closure remains fail-closed through `REQUIRE_VERIFIED=1`, with official artifacts limited to Linux x86_64 and Linux ARM64.
 
 ## Completed implementation areas
 
@@ -81,12 +76,11 @@ Diff whitespace check: PASS
 
 ## Release state
 
-No GitHub release, crates.io package, provenance attestation, or container image was published by this completion run. Publishing is correctly gated on a real `v0.5.0` tag after macOS runtime verification and full matrix closure.
+No GitHub release, crates.io package, provenance attestation, or container image was published by this completion run. Publishing remains gated on a real `v0.5.0` tag after Linux CI passes and the fully verified feature matrix is confirmed.
 
 ## Required next external action
 
 1. Push `completion/full-repository-20260711` to GitHub.
-2. Let Linux/macOS Tier A and Tier B jobs run.
-3. Attach successful macOS process lifecycle evidence to INF-002 and mark it `verified`.
-4. Confirm `REQUIRE_VERIFIED=1 python3 scripts/check_feature_matrix.py` passes.
-5. Create tag `v0.5.0` to run mandatory Tier C, multi-platform artifacts, SBOM, provenance, clean install, crates publish, and signed container publication.
+2. Let Linux Tier A and Tier B jobs run.
+3. Confirm `REQUIRE_VERIFIED=1 python3 scripts/check_feature_matrix.py` passes.
+4. Create tag `v0.5.0` to run mandatory Tier C, Linux x86_64/ARM64 artifact builds, SBOM, provenance, clean install, crates publish, and signed container publication.

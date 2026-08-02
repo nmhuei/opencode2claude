@@ -14,10 +14,8 @@ A release tag is permitted only from a clean release-candidate commit with Tier 
 ## Test tiers
 
 - [ ] Tier A passes on Linux.
-- [ ] Tier A passes on macOS.
 - [ ] Tier B passes on Linux.
-- [ ] Tier B release build/install tests pass on macOS.
-- [ ] Tier C passes on the dedicated WARP runner for the same commit.
+- [ ] Tier C passes on the dedicated Linux WARP runner for the same commit.
 - [ ] Required long soak completed and evidence archived.
 - [ ] No blind flaky-test rerun was accepted as evidence.
 
@@ -42,8 +40,6 @@ A release tag is permitted only from a clean release-candidate commit with Tier 
 
 - [ ] Linux x86_64 binary built with `--locked`.
 - [ ] Linux ARM64 binary built with `--locked`.
-- [ ] macOS x86_64 binary built with `--locked`.
-- [ ] macOS ARM64 binary built with `--locked`.
 - [ ] Every binary has a companion `.sha256` file.
 - [ ] Aggregate `SHA256SUMS` exists.
 - [ ] SPDX JSON SBOM exists for each binary.

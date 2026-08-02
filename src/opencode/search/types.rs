@@ -72,6 +72,7 @@ pub enum SearchProviderKind {
     Serper,
     SearXng,
     DuckDuckGo,
+    Yahoo,
 }
 
 impl fmt::Display for SearchProviderKind {
@@ -82,6 +83,7 @@ impl fmt::Display for SearchProviderKind {
             Self::Serper => "Serper",
             Self::SearXng => "SearXNG",
             Self::DuckDuckGo => "DuckDuckGo",
+            Self::Yahoo => "Yahoo",
         })
     }
 }

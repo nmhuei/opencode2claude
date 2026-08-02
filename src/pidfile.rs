@@ -15,8 +15,7 @@ pub struct PidFile {
     /// backward-compatible reads of legacy PID files.
     #[serde(default)]
     pub executable: Option<PathBuf>,
-    /// Platform process-start marker (`/proc` start ticks on Linux, `ps` start
-    /// text on macOS). Prevents terminating a reused PID.
+    /// Linux `/proc` process-start ticks. Prevents terminating a reused PID.
     #[serde(default)]
     pub start_marker: Option<String>,
     /// Supervisor-generated instance identifier for diagnostics and migration.

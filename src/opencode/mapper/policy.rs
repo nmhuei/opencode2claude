@@ -2,12 +2,20 @@
 
 use super::helpers::extract_system_prompt;
 use crate::handlers::{ContentVal, MessagesRequest};
+use crate::opencode::types::OpenAiThinkingConfig;
+use serde_json::{json, Value};
 
 pub(super) const DEFAULT_MIN_REASONING_STREAM_TOKENS: u32 = 1024;
 
+pub fn is_deepseek_v4_model(model: &str) -> bool {
+    let name = model.to_ascii_lowercase();
+    name.contains("deepseek-v4-flash") || name.contains("deepseek-v4-pro")
+}
+
 pub(super) fn is_reasoning_heavy_model(model: &str) -> bool {
     let name = model.to_ascii_lowercase();
-    (name.contains("deepseek") && (name.contains("r1") || name.contains("reasoner")))
+    is_deepseek_v4_model(&name)
+        || (name.contains("deepseek") && (name.contains("r1") || name.contains("reasoner")))
         || name.contains("reasoning")
         || name.contains("-r1")
 }
@@ -44,18 +52,98 @@ pub fn is_compact_request(payload: &MessagesRequest) -> bool {
     false
 }
 
+pub(super) fn normalize_upstream_thinking(
+    payload: &MessagesRequest,
+    mapped_model: &str,
+) -> Option<OpenAiThinkingConfig> {
+    if !is_deepseek_v4_model(mapped_model) {
+        return None;
+    }
+
+    // Anthropic semantics: absence means no extended thinking. DeepSeek V4 defaults
+    // to thinking enabled, so an absent Claude field must be made explicit upstream.
+    let thinking_type = match payload.thinking_enabled() {
+        Some(true) => "enabled",
+        Some(false) | None => "disabled",
+    };
+    Some(OpenAiThinkingConfig {
+        thinking_type: thinking_type.to_string(),
+    })
+}
+
+pub(super) fn normalize_reasoning_effort(
+    payload: &MessagesRequest,
+    mapped_model: &str,
+    upstream_thinking: Option<&OpenAiThinkingConfig>,
+) -> Option<String> {
+    if upstream_thinking.is_some_and(|config| config.thinking_type == "disabled") {
+        return None;
+    }
+
+    let effort = payload.reasoning_effort()?.trim().to_ascii_lowercase();
+    if effort.is_empty() {
+        return None;
+    }
+
+    if is_deepseek_v4_model(mapped_model) {
+        return match effort.as_str() {
+            "low" | "medium" | "high" => Some("high".to_string()),
+            "xhigh" | "max" | "ultracode" => Some("max".to_string()),
+            _ => None,
+        };
+    }
+
+    Some(effort)
+}
+
 pub(super) fn include_reasoning_for_stream(
     stream: bool,
     mapped_model: &str,
     is_compact: bool,
+    explicit_thinking: Option<bool>,
 ) -> Option<bool> {
+    if explicit_thinking == Some(false) {
+        return Some(false);
+    }
     if is_compact {
         return None;
+    }
+    if explicit_thinking == Some(true) {
+        return Some(true);
     }
     if stream && is_reasoning_heavy_model(mapped_model) {
         Some(true)
     } else {
         None
+    }
+}
+
+pub(super) fn normalize_response_format(
+    payload: &MessagesRequest,
+    mapped_model: &str,
+) -> Option<Value> {
+    let format = payload.output_config.as_ref()?.format.as_ref()?;
+    let format_type = format.get("type").and_then(Value::as_str)?;
+
+    match format_type {
+        "json_object" => Some(json!({"type": "json_object"})),
+        "json_schema" if is_deepseek_v4_model(mapped_model) => {
+            // DeepSeek Chat Completions documents JSON object mode, while Claude's
+            // structured-output request carries a JSON schema.
+            Some(json!({"type": "json_object"}))
+        }
+        "json_schema" => {
+            let schema = format.get("schema")?.clone();
+            Some(json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "claude_code_output",
+                    "schema": schema,
+                    "strict": true
+                }
+            }))
+        }
+        _ => None,
     }
 }
 
@@ -74,5 +162,5 @@ pub(super) fn normalize_upstream_max_tokens(
     }
 
     let floor = minimum_reasoning_stream_tokens.max(1);
-    Some(requested.map(|v| v.max(floor)).unwrap_or(floor))
+    Some(requested.map(|value| value.max(floor)).unwrap_or(floor))
 }

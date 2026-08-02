@@ -17,10 +17,8 @@ use clap::{Args, Parser, Subcommand};
 #[command(
     name = "opencode2api",
     version,
-    about = "A blazing-fast API bridge connecting Claude Code to any LLM",
-    long_about = "OpenCode2API is a local HTTP proxy that translates Anthropic Messages API \n\
-                  requests into OpenAI-compatible API calls. Use Claude Code with any LLM \n\
-                  provider — DeepSeek, GPT-4o, Gemini, Llama, and more.",
+    about = "A local Anthropic and OpenAI-compatible model gateway",
+    long_about = "OpenCode2API accepts Anthropic Messages and OpenAI Chat Completions requests, then routes them to the configured OpenCode-compatible model provider.",
     styles = clap_styles()
 )]
 pub struct Cli {
@@ -44,10 +42,10 @@ pub struct Cli {
 fn clap_styles() -> clap::builder::Styles {
     use clap::builder::styling::AnsiColor;
     clap::builder::Styles::styled()
-        .header(AnsiColor::Green.on_default().bold())
-        .usage(AnsiColor::Green.on_default().bold())
+        .header(AnsiColor::White.on_default().bold())
+        .usage(AnsiColor::White.on_default().bold())
         .literal(AnsiColor::Cyan.on_default().bold())
-        .placeholder(AnsiColor::Blue.on_default().bold())
+        .placeholder(AnsiColor::BrightBlack.on_default())
         .error(AnsiColor::Red.on_default().bold())
         .valid(AnsiColor::Cyan.on_default().bold())
 }
@@ -70,6 +68,10 @@ pub enum Command {
 
     /// Display environment information for Claude Code
     Env,
+
+    /// Generate and optionally persist bridge API keys
+    #[command(name = "api-key", subcommand)]
+    ApiKey(ApiKeyCommand),
 
     /// Diagnose common issues with the bridge and its dependencies
     Doctor,
@@ -352,6 +354,41 @@ impl std::fmt::Display for CliShellPolicy {
         };
         write!(f, "{value}")
     }
+}
+
+/// API-key management subcommands.
+#[derive(Subcommand, Debug, Clone)]
+pub enum ApiKeyCommand {
+    /// Generate cryptographically secure bridge API keys
+    Generate(ApiKeyGenerateArgs),
+}
+
+/// Arguments for `api-key generate`.
+#[derive(Args, Debug, Clone)]
+pub struct ApiKeyGenerateArgs {
+    /// Number of keys to generate (1-20)
+    #[arg(long, default_value_t = 1)]
+    pub count: usize,
+
+    /// Random bytes per key (16-64; 32 = 256-bit)
+    #[arg(long, default_value_t = 32)]
+    pub bytes: usize,
+
+    /// Prefix placed before the random hexadecimal value
+    #[arg(long, default_value = "sk-oc2-")]
+    pub prefix: String,
+
+    /// Save generated keys into auth_tokens in the active TOML config
+    #[arg(long)]
+    pub save: bool,
+
+    /// Config file to update; defaults to the resolved active config
+    #[arg(short, long)]
+    pub config: Option<String>,
+
+    /// Replace existing auth_tokens instead of appending
+    #[arg(long, requires = "save")]
+    pub replace: bool,
 }
 
 /// Dashboard management subcommands.

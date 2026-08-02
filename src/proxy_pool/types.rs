@@ -43,6 +43,13 @@ pub enum HealthState {
     Recovering,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryCause {
+    Transport,
+    RateLimit,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CircuitState {
     Closed,
@@ -100,6 +107,11 @@ pub struct ProxyEntry {
     pub consecutive_successes: u32,
     pub restart_attempts: u32,
     pub cooldown_until: Option<Instant>,
+    /// Original upstream quota deadline, preserved across WARP restart attempts.
+    pub rate_limit_until: Option<Instant>,
+    /// Exit IP that received the rate limit and must not be reused before quota expiry.
+    pub quarantined_exit_ip: Option<String>,
+    pub recovery_cause: Option<RecoveryCause>,
     pub exit_identity: Option<ExitIdentity>,
     /// Node ID that already owns the same verified exit identity.
     pub duplicate_of: Option<String>,
@@ -166,13 +178,27 @@ impl Drop for EgressLease {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ProxyPool {
     pub proxies: Vec<ProxyEntry>,
     pub active_count: usize,
     pub restart_queue: Vec<usize>,
     pub require_verified_exit_ip: bool,
     pub identity_ttl: std::time::Duration,
+    pub max_restart_attempts: u32,
+}
+
+impl Default for ProxyPool {
+    fn default() -> Self {
+        Self {
+            proxies: Vec::new(),
+            active_count: 0,
+            restart_queue: Vec::new(),
+            require_verified_exit_ip: false,
+            identity_ttl: std::time::Duration::from_secs(300),
+            max_restart_attempts: 3,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -190,6 +216,8 @@ pub struct ProxyNodeStats {
     pub success_count: u32,
     pub restart_attempts: u32,
     pub cooldown_remaining_secs: Option<u64>,
+    pub recovery_cause: Option<RecoveryCause>,
+    pub quarantined_exit_ip: Option<String>,
     pub active_requests: usize,
     pub exit_identity: Option<ExitIdentity>,
     pub duplicate_of: Option<String>,

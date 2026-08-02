@@ -1,6 +1,7 @@
 //! Public resolved configuration data structures.
 
 use crate::shell::ShellPolicy;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -19,6 +20,7 @@ pub struct CliOverrides {
     pub serper_api_key: Option<String>,
     pub searxng_url: Option<String>,
     pub searxng_api_key: Option<String>,
+    pub egress_mode: Option<String>,
 }
 
 impl fmt::Debug for CliOverrides {
@@ -47,6 +49,7 @@ impl fmt::Debug for CliOverrides {
                 "searxng_api_key",
                 &self.searxng_api_key.as_ref().map(|_| "[REDACTED]"),
             )
+            .field("egress_mode", &self.egress_mode)
             .finish()
     }
 }
@@ -169,6 +172,66 @@ pub struct ObservabilityConfig {
     pub request_id_header: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryCaptureMode {
+    Off,
+    Metadata,
+    Redacted,
+    Full,
+}
+
+impl HistoryCaptureMode {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "off" | "disabled" => Some(Self::Off),
+            "metadata" => Some(Self::Metadata),
+            "redacted" => Some(Self::Redacted),
+            "full" => Some(Self::Full),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Metadata => "metadata",
+            Self::Redacted => "redacted",
+            Self::Full => "full",
+        }
+    }
+}
+
+impl fmt::Display for HistoryCaptureMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct HistoryConfig {
+    pub enabled: bool,
+    pub capture_mode: HistoryCaptureMode,
+    pub capture_inbound: bool,
+    pub capture_effective: bool,
+    pub capture_reasoning: bool,
+    pub capture_response: bool,
+    pub capture_tools: bool,
+    pub capture_search_queries: bool,
+    pub capture_search_results: bool,
+    pub capture_shell_commands: bool,
+    pub retention_days: u32,
+    pub max_records: usize,
+    pub max_database_bytes: u64,
+    pub max_request_bytes: usize,
+    pub max_reasoning_bytes: usize,
+    pub max_response_bytes: usize,
+    pub max_tool_payload_bytes: usize,
+    pub max_record_bytes: usize,
+    pub queue_capacity: usize,
+    pub path: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ProtocolConfig {
     pub min_reasoning_stream_tokens: u32,
@@ -187,6 +250,7 @@ pub struct SearchConfig {
     pub exa_url: String,
     pub serper_url: String,
     pub duckduckgo_url: String,
+    pub yahoo_url: String,
 }
 
 #[derive(Debug, Clone)]
@@ -215,6 +279,7 @@ pub struct BridgeConfig {
     pub egress: EgressConfig,
     pub runtime: RuntimeConfig,
     pub observability: ObservabilityConfig,
+    pub history: HistoryConfig,
     pub protocol: ProtocolConfig,
     pub search: SearchConfig,
 }
@@ -258,7 +323,7 @@ impl Default for BridgeConfig {
             egress: EgressConfig {
                 mode: EgressMode::Direct,
                 active_proxy_count: 3,
-                require_verified_exit_ip: false,
+                require_verified_exit_ip: true,
                 minimum_unique_exit_ips: 1,
                 identity_endpoints: vec![
                     "https://cloudflare.com/cdn-cgi/trace".to_string(),
@@ -283,6 +348,28 @@ impl Default for BridgeConfig {
                 metrics_enabled: true,
                 request_id_header: "x-request-id".to_string(),
             },
+            history: HistoryConfig {
+                enabled: false,
+                capture_mode: HistoryCaptureMode::Redacted,
+                capture_inbound: true,
+                capture_effective: true,
+                capture_reasoning: true,
+                capture_response: true,
+                capture_tools: true,
+                capture_search_queries: true,
+                capture_search_results: false,
+                capture_shell_commands: false,
+                retention_days: 30,
+                max_records: 10_000,
+                max_database_bytes: 1024 * 1024 * 1024,
+                max_request_bytes: 1024 * 1024,
+                max_reasoning_bytes: 2 * 1024 * 1024,
+                max_response_bytes: 2 * 1024 * 1024,
+                max_tool_payload_bytes: 256 * 1024,
+                max_record_bytes: 6 * 1024 * 1024,
+                queue_capacity: 512,
+                path: None,
+            },
             protocol: ProtocolConfig {
                 min_reasoning_stream_tokens: 1024,
                 max_sse_line_bytes: 256 * 1024,
@@ -298,6 +385,7 @@ impl Default for BridgeConfig {
                 exa_url: "https://api.exa.ai/search".to_string(),
                 serper_url: "https://google.serper.dev/search".to_string(),
                 duckduckgo_url: "https://html.duckduckgo.com/html/".to_string(),
+                yahoo_url: "https://search.yahoo.com/search".to_string(),
             },
         }
     }

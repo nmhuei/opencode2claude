@@ -57,6 +57,7 @@ pub struct TomlConfig {
     pub exa_url: Option<String>,
     pub serper_url: Option<String>,
     pub duckduckgo_url: Option<String>,
+    pub yahoo_url: Option<String>,
     pub proxies: Option<Vec<String>>,
     pub primary_proxies: Option<Vec<String>>,
     pub warm_standby_proxies: Option<Vec<String>>,
@@ -102,6 +103,28 @@ pub struct TomlConfig {
     // Observability.
     pub metrics_enabled: Option<bool>,
     pub request_id_header: Option<String>,
+
+    // Request history.
+    pub history_enabled: Option<bool>,
+    pub history_capture_mode: Option<String>,
+    pub history_capture_inbound: Option<bool>,
+    pub history_capture_effective: Option<bool>,
+    pub history_capture_reasoning: Option<bool>,
+    pub history_capture_response: Option<bool>,
+    pub history_capture_tools: Option<bool>,
+    pub history_capture_search_queries: Option<bool>,
+    pub history_capture_search_results: Option<bool>,
+    pub history_capture_shell_commands: Option<bool>,
+    pub history_retention_days: Option<u32>,
+    pub history_max_records: Option<usize>,
+    pub history_max_database_bytes: Option<u64>,
+    pub history_max_request_bytes: Option<usize>,
+    pub history_max_reasoning_bytes: Option<usize>,
+    pub history_max_response_bytes: Option<usize>,
+    pub history_max_tool_payload_bytes: Option<usize>,
+    pub history_max_record_bytes: Option<usize>,
+    pub history_queue_capacity: Option<usize>,
+    pub history_path: Option<String>,
 }
 
 impl TomlConfig {

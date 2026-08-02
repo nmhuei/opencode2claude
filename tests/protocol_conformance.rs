@@ -298,6 +298,40 @@ async fn fragmented_utf8_stream_preserves_reasoning_then_text_order() {
 }
 
 #[tokio::test]
+async fn reasoning_success_phrase_stays_before_final_text_with_tools_available() {
+    let wire = concat!(
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"The command executed successfully and returned RAW_BOUNDARY_BASH_OK.\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"RAW_BOUNDARY_BASH_DONE\"},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n"
+    )
+    .as_bytes()
+    .to_vec();
+    let (app, _state) = harness(vec![Fixture::Sse(vec![wire])]).await;
+    let mut request = anthropic_request(true);
+    request["tools"] = json!([{
+        "name":"Bash",
+        "description":"Run a harmless command",
+        "input_schema":{"type":"object","properties":{"command":{"type":"string"}}}
+    }]);
+
+    let (status, body) = call(app, request).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let reasoning_pos = body
+        .find("The command executed successfully")
+        .expect("reasoning delta missing");
+    let text_pos = body
+        .find("RAW_BOUNDARY_BASH_DONE")
+        .expect("final text delta missing");
+    assert!(
+        reasoning_pos < text_pos,
+        "reasoning reordered after text: {body}"
+    );
+    assert!(body.contains("\"stop_reason\":\"end_turn\""));
+    assert_eq!(body.matches("event: message_stop").count(), 1);
+}
+
+#[tokio::test]
 async fn streaming_native_tool_arguments_can_be_fragmented() {
     let chunks = vec![
         b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"Read\",\"arguments\":\"{\\\"pa\"}}]},\"finish_reason\":null}]}\n\n".to_vec(),
@@ -318,6 +352,11 @@ async fn streaming_native_tool_arguments_can_be_fragmented() {
     assert!(body.contains("input_json_delta"));
     assert!(body.contains("README.md"));
     assert!(body.contains("\"stop_reason\":\"tool_use\""));
+    assert_eq!(
+        body.matches("event: content_block_stop").count(),
+        1,
+        "a native tool_use block must be closed exactly once: {body}"
+    );
 }
 
 #[tokio::test]
@@ -392,6 +431,34 @@ async fn oversized_sse_line_emits_error_and_single_terminal_stop() {
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("event: error"));
     assert!(body.contains("exceeded configured byte limit"));
+    assert_eq!(body.matches("event: message_stop").count(), 1);
+}
+
+#[tokio::test]
+async fn aggregate_sse_chunk_can_exceed_limit_when_each_line_is_valid() {
+    let lines = [
+        b"data: {\"choices\":[{\"delta\":{\"content\":\"A\"},\"finish_reason\":null}]}\n"
+            .as_slice(),
+        b"data: {\"choices\":[{\"delta\":{\"content\":\"B\"},\"finish_reason\":null}]}\n"
+            .as_slice(),
+        b"data: {\"choices\":[{\"delta\":{\"content\":\"C\"},\"finish_reason\":\"stop\"}]}\n"
+            .as_slice(),
+        b"data: [DONE]\n\n".as_slice(),
+    ];
+    let max_line_bytes = 128;
+    assert!(lines.iter().all(|line| line.len() <= max_line_bytes));
+    let chunk = lines.concat();
+    assert!(chunk.len() > max_line_bytes);
+
+    let (app, _state) =
+        harness_with_limits(vec![Fixture::Sse(vec![chunk])], max_line_bytes, 4096).await;
+    let (status, body) = call(app, anthropic_request(true)).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(!body.contains("event: error"), "{body}");
+    assert!(body.contains("\"text\":\"A\""), "{body}");
+    assert!(body.contains("\"text\":\"B\""));
+    assert!(body.contains("\"text\":\"C\""));
     assert_eq!(body.matches("event: message_stop").count(), 1);
 }
 
@@ -546,4 +613,252 @@ async fn configured_model_fallback_is_counted_separately_from_retry() {
     let snapshot = metrics.snapshot();
     assert_eq!(snapshot.model_fallbacks, 1);
     assert_eq!(snapshot.retry_rate_limit, 0);
+}
+
+#[tokio::test]
+async fn sync_malformed_compat_marker_retries_then_emits_one_tool_use() {
+    let malformed = json!({
+        "id":"bad-compat",
+        "model":"upstream-model",
+        "choices":[{
+            "message":{
+                "content":"[Requesting Read with arguments: {\"path\":]",
+                "reasoning_content":null,
+                "tool_calls":null
+            },
+            "finish_reason":"stop"
+        }],
+        "usage":{"prompt_tokens":1,"completion_tokens":1}
+    });
+    let valid = json!({
+        "id":"good-compat",
+        "model":"upstream-model",
+        "choices":[{
+            "message":{
+                "content":"[Requesting Read with arguments: {\"path\":\"README.md\"}]",
+                "reasoning_content":null,
+                "tool_calls":null
+            },
+            "finish_reason":"stop"
+        }],
+        "usage":{"prompt_tokens":1,"completion_tokens":1}
+    });
+    let (app, state) = harness(vec![Fixture::Json(malformed), Fixture::Json(valid)]).await;
+    let mut request = anthropic_request(false);
+    request["tools"] = json!([{
+        "name":"Read",
+        "description":"Read a file",
+        "input_schema":{"type":"object","properties":{"path":{"type":"string"}}}
+    }]);
+
+    let (status, body) = call(app, request).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let response: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(response["content"].as_array().unwrap().len(), 1);
+    assert_eq!(response["content"][0]["type"], "tool_use");
+    assert_eq!(response["content"][0]["name"], "Read");
+    assert_eq!(response["content"][0]["input"]["path"], "README.md");
+    assert_eq!(state.requests.lock().await.len(), 2);
+    let retry_request = state.requests.lock().await[1].clone();
+    let retry_system = retry_request["messages"][0]["content"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(retry_system.contains("Read") || retry_request.to_string().contains("Read"));
+}
+
+#[tokio::test]
+async fn sync_fenced_compat_and_dsml_examples_remain_text() {
+    let example = concat!(
+        "```text\n",
+        "[Requesting Read with arguments: {\"path\":\"secret\"}]\n",
+        "<｜DSML｜tool_calls><｜DSML｜invoke name=\"Read\"><｜DSML｜parameter name=\"path\">secret</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>\n",
+        "```"
+    );
+    let fixture = json!({
+        "id":"code-example",
+        "model":"upstream-model",
+        "choices":[{
+            "message":{"content":example,"reasoning_content":null,"tool_calls":null},
+            "finish_reason":"stop"
+        }],
+        "usage":{"prompt_tokens":1,"completion_tokens":1}
+    });
+    let (app, state) = harness(vec![Fixture::Json(fixture)]).await;
+    let mut request = anthropic_request(false);
+    request["tools"] = json!([{
+        "name":"Read",
+        "description":"Read a file",
+        "input_schema":{"type":"object","properties":{"path":{"type":"string"}}}
+    }]);
+
+    let (status, body) = call(app, request).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let response: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(response["stop_reason"], "end_turn");
+    assert_eq!(response["content"].as_array().unwrap().len(), 1);
+    assert_eq!(response["content"][0]["type"], "text");
+    assert_eq!(response["content"][0]["text"], example);
+    assert_eq!(state.requests.lock().await.len(), 1);
+}
+
+#[tokio::test]
+async fn streaming_malformed_native_arguments_retry_without_partial_tool_use() {
+    let bad = vec![
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"bad\",\"function\":{\"name\":\"Read\",\"arguments\":\"{\\\"path\\\":\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n".to_vec(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+    let good = vec![
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"good\",\"function\":{\"name\":\"Read\",\"arguments\":\"{\\\"path\\\":\\\"README.md\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n".to_vec(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+    let (app, state) = harness(vec![Fixture::Sse(bad), Fixture::Sse(good)]).await;
+    let mut request = anthropic_request(true);
+    request["tools"] = json!([{
+        "name":"Read",
+        "description":"Read a file",
+        "input_schema":{"type":"object","properties":{"path":{"type":"string"}}}
+    }]);
+
+    let (status, body) = call(app, request).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body.matches("\"type\":\"tool_use\"").count(), 1, "{body}");
+    assert!(body.contains("README.md"), "{body}");
+    assert!(!body.contains("\"id\":\"bad\""), "{body}");
+    assert_eq!(state.requests.lock().await.len(), 2);
+}
+
+#[tokio::test]
+async fn streaming_native_tool_without_finish_reason_finalizes_at_done() {
+    let chunks = vec![
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"done-call\",\"function\":{\"name\":\"Read\",\"arguments\":\"{\\\"path\\\":\\\"README.md\\\"}\"}}]},\"finish_reason\":null}]}\n\n".to_vec(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+    let (app, state) = harness(vec![Fixture::Sse(chunks)]).await;
+    let mut request = anthropic_request(true);
+    request["tools"] = json!([{
+        "name":"Read",
+        "description":"Read a file",
+        "input_schema":{"type":"object","properties":{"path":{"type":"string"}}}
+    }]);
+
+    let (status, body) = call(app, request).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("\"type\":\"tool_use\""), "{body}");
+    assert!(body.contains("done-call"), "{body}");
+    assert!(body.contains("README.md"), "{body}");
+    assert!(body.contains("\"stop_reason\":\"tool_use\""), "{body}");
+    assert_eq!(state.requests.lock().await.len(), 1);
+}
+
+fn cron_tool_request(stream: bool) -> Value {
+    let mut request = anthropic_request(stream);
+    request["tools"] = json!([{
+        "name":"CronCreate",
+        "description":"Create a session cron",
+        "input_schema":{
+            "type":"object",
+            "properties":{
+                "cron":{"type":"string"},
+                "prompt":{"type":"string"},
+                "recurring":{"type":"boolean"}
+            },
+            "required":["cron","prompt"]
+        }
+    }]);
+    request
+}
+
+#[tokio::test]
+async fn streaming_direct_cron_marker_is_one_tool_block_without_leak() {
+    let marker = "[Requesting CronCreate: {\"cron\":\"*/30 * * * *\",\"prompt\":\"write CRON_PARSE_VERIFY_OK\",\"recurring\":true}]";
+    let wire = format!(
+        "data: {}\n\ndata: [DONE]\n\n",
+        json!({
+            "choices":[{
+                "delta":{"content":marker},
+                "finish_reason":"stop"
+            }]
+        })
+    )
+    .into_bytes();
+    let chunks = wire.chunks(3).map(<[u8]>::to_vec).collect::<Vec<_>>();
+    let (app, state) = harness(vec![Fixture::Sse(chunks)]).await;
+
+    let (status, body) = call(app, cron_tool_request(true)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body.matches("\"type\":\"tool_use\"").count(), 1, "{body}");
+    assert_eq!(body.matches("\"name\":\"CronCreate\"").count(), 1, "{body}");
+    assert_eq!(
+        body.matches("\"type\":\"content_block_start\"").count(),
+        1,
+        "{body}"
+    );
+    assert_eq!(
+        body.matches("\"type\":\"content_block_stop\"").count(),
+        1,
+        "{body}"
+    );
+    assert_eq!(body.matches("toolu_compat_").count(), 1, "{body}");
+    assert!(!body.contains("Requesting CronCreate"), "{body}");
+    assert!(body.contains("CRON_PARSE_VERIFY_OK"), "{body}");
+    assert_eq!(state.requests.lock().await.len(), 1);
+}
+
+#[tokio::test]
+async fn streaming_reasoning_and_text_duplicate_cron_executes_once() {
+    let marker = "[Requesting CronCreate: {\"cron\":\"*/30 * * * *\",\"prompt\":\"verify\",\"recurring\":true}]";
+    let events = [
+        json!({"choices":[{"delta":{"reasoning_content":marker},"finish_reason":null}]}),
+        json!({"choices":[{"delta":{"content":marker},"finish_reason":"stop"}]}),
+    ];
+    let wire = format!(
+        "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+        events[0], events[1]
+    )
+    .into_bytes();
+    let chunks = wire.chunks(7).map(<[u8]>::to_vec).collect::<Vec<_>>();
+    let (app, _state) = harness(vec![Fixture::Sse(chunks)]).await;
+
+    let (status, body) = call(app, cron_tool_request(true)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body.matches("\"type\":\"tool_use\"").count(), 1, "{body}");
+    assert_eq!(body.matches("\"name\":\"CronCreate\"").count(), 1, "{body}");
+    assert!(!body.contains("Requesting CronCreate"), "{body}");
+    assert_eq!(
+        body.matches("\"stop_reason\":\"tool_use\"").count(),
+        1,
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn sync_reasoning_marker_and_false_success_text_emit_only_tool_use() {
+    let marker = "[Requesting CronCreate: {\"cron\":\"*/30 * * * *\",\"prompt\":\"verify\",\"recurring\":true}]";
+    let fixture = json!({
+        "id":"sync-cron-reasoning",
+        "model":"upstream-model",
+        "choices":[{
+            "message":{
+                "content":format!("Cron đã được tạo thành công.\n{marker}"),
+                "reasoning_content":marker,
+                "tool_calls":null
+            },
+            "finish_reason":"stop"
+        }],
+        "usage":{"prompt_tokens":1,"completion_tokens":1}
+    });
+    let (app, state) = harness(vec![Fixture::Json(fixture)]).await;
+
+    let (status, body) = call(app, cron_tool_request(false)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let response: Value = serde_json::from_str(&body).unwrap();
+    let content = response["content"].as_array().unwrap();
+    assert_eq!(content.len(), 1, "{response}");
+    assert_eq!(content[0]["type"], "tool_use");
+    assert_eq!(content[0]["name"], "CronCreate");
+    assert_eq!(content[0]["input"]["cron"], "*/30 * * * *");
+    assert_eq!(response["stop_reason"], "tool_use");
+    assert!(!body.contains("Requesting CronCreate"), "{body}");
+    assert!(!body.contains("tạo thành công"), "{body}");
+    assert_eq!(state.requests.lock().await.len(), 1);
 }

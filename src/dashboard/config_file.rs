@@ -28,6 +28,46 @@ pub async fn handler_config_raw(
     Ok(Json(json!({"raw": raw})))
 }
 
+/// POST /api/dashboard/config/preview — validate and preview without writing.
+pub async fn handler_config_preview(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Option<Json<Value>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    check_admin_token(&state, &headers, None)?;
+    let content = body
+        .as_ref()
+        .and_then(|Json(payload)| payload.get("content"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "status":"error",
+                    "message":"Missing 'content' field in JSON body",
+                })),
+            )
+        })?;
+    match config_apply::preview_config(&state, content) {
+        Ok(plan) => Ok(Json(json!({
+            "status":"ok",
+            "valid":true,
+            "changed_keys":plan.changed_keys,
+            "restart_required":plan.restart_required,
+            "warnings":plan.warnings,
+        }))),
+        Err(error) => Err((
+            error.status,
+            Json(json!({
+                "status":"error",
+                "valid":false,
+                "code":error.code,
+                "message":error.message,
+            })),
+        )),
+    }
+}
+
 /// POST /api/dashboard/config/save — validate, preview internally, atomically
 /// apply, verify, and rollback on failure. Browser-cookie requests require CSRF.
 pub async fn handler_config_save(

@@ -1,6 +1,7 @@
 //! Egress-pool construction and health snapshots.
 
 use super::types::*;
+use crate::config::normalize_proxy_url;
 use reqwest::Client;
 use std::collections::HashSet;
 use std::sync::atomic::AtomicUsize;
@@ -72,7 +73,31 @@ impl ProxyPool {
             restart_queue: Vec::new(),
             require_verified_exit_ip,
             identity_ttl,
+            max_restart_attempts: 3,
         }
+    }
+
+    pub fn set_max_restart_attempts(&mut self, attempts: u32) {
+        self.max_restart_attempts = attempts.max(1);
+    }
+
+    pub fn recovery_in_progress(&self) -> bool {
+        !self.restart_queue.is_empty()
+            || self.proxies.iter().any(|node| {
+                node.lifecycle == LifecyclePolicy::Managed
+                    && node.routing_enabled
+                    && node.recovery_cause.is_some()
+                    && node.restart_attempts < self.max_restart_attempts.max(1)
+            })
+    }
+
+    pub fn minimum_rate_limit_remaining(&self) -> Option<Duration> {
+        let now = Instant::now();
+        self.proxies
+            .iter()
+            .filter_map(|node| node.rate_limit_until)
+            .filter_map(|until| until.checked_duration_since(now))
+            .min()
     }
 
     pub fn drain_restart_queue(&mut self) -> Vec<usize> {
@@ -126,7 +151,8 @@ impl ProxyPool {
 }
 
 fn build_entry(url: &String, require_verified_exit_ip: bool) -> Option<ProxyEntry> {
-    let proxy = match reqwest::Proxy::all(url) {
+    let normalized_url = normalize_proxy_url(url);
+    let proxy = match reqwest::Proxy::all(&normalized_url) {
         Ok(proxy) => proxy,
         Err(error) => {
             warn!(%url, %error, "invalid proxy URL");
@@ -155,7 +181,7 @@ fn build_entry(url: &String, require_verified_exit_ip: bool) -> Option<ProxyEntr
     };
     Some(ProxyEntry {
         id: name.clone(),
-        url: url.clone(),
+        url: normalized_url,
         client,
         port,
         container_name: name,
@@ -176,6 +202,9 @@ fn build_entry(url: &String, require_verified_exit_ip: bool) -> Option<ProxyEntr
         consecutive_successes: 0,
         restart_attempts: 0,
         cooldown_until: None,
+        rate_limit_until: None,
+        quarantined_exit_ip: None,
+        recovery_cause: None,
         exit_identity: None,
         duplicate_of: None,
         active_requests: Arc::new(AtomicUsize::new(0)),
@@ -201,6 +230,8 @@ fn node_stats(proxy: &ProxyEntry) -> ProxyNodeStats {
                 .checked_duration_since(now)
                 .map(|duration| duration.as_secs())
         }),
+        recovery_cause: proxy.recovery_cause,
+        quarantined_exit_ip: proxy.quarantined_exit_ip.clone(),
         active_requests: proxy.active_request_count(),
         exit_identity: proxy.exit_identity.clone(),
         duplicate_of: proxy.duplicate_of.clone(),

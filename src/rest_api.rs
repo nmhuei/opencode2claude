@@ -117,7 +117,7 @@ async fn status(
         bridge: dto::BridgeSummary {
             host: state.config.host.to_string(),
             port: state.config.bridge_port,
-            client_auth_enabled: state.config.auth_enabled(),
+            client_auth_enabled: state.api_keys.read().await.configured(),
         },
         egress: dto::EgressSummary {
             mode: egress_mode,
@@ -142,7 +142,7 @@ async fn config(
     headers: HeaderMap,
 ) -> Result<Json<dto::ConfigResponse>, ApiError> {
     authorize(&headers, &state)?;
-    Ok(Json(service::safe_config_snapshot(&state).into()))
+    Ok(Json(service::safe_config_snapshot(&state).await.into()))
 }
 
 async fn preview_config(

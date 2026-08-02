@@ -4,7 +4,12 @@
 //! This library is re-exported by the binary for integration testing.
 //! All public API items are exposed through their respective modules.
 
+#[cfg(not(target_os = "linux"))]
+compile_error!("opencode2api supports Linux only");
+
+pub mod api_key;
 pub mod app;
+pub mod application;
 pub mod audit;
 pub mod cli;
 pub mod config;
@@ -13,6 +18,7 @@ pub mod docker;
 pub mod doctor;
 pub mod error;
 pub mod handlers;
+pub mod history;
 pub mod infrastructure;
 pub mod init;
 pub mod management;
@@ -21,6 +27,7 @@ pub mod observability;
 pub mod opencode;
 pub mod output;
 pub mod pidfile;
+pub mod presentation;
 pub mod proxy_pool;
 pub mod rest_api;
 pub mod runtime;

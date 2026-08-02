@@ -431,7 +431,14 @@ mod tests {
     }
 
     impl FileStore for MemoryStore {
-        fn read(&self, _path: &Path) -> io::Result<Vec<u8>> {
+        fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+            if path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|name| name.ends_with(".api-keys.json"))
+            {
+                return Err(io::Error::new(io::ErrorKind::NotFound, "missing registry"));
+            }
             let current = {
                 let mut count = self.read_count.lock().unwrap();
                 *count += 1;

@@ -15,8 +15,7 @@ REQUIRED_SNIPPETS = {
     "Tier C gate": "scripts/tier-c.sh",
     "Linux AMD64 artifact": "opencode2api-linux-amd64",
     "Linux ARM64 artifact": "opencode2api-linux-arm64",
-    "macOS AMD64 artifact": "opencode2api-macos-amd64",
-    "macOS ARM64 artifact": "opencode2api-macos-arm64",
+    "native Linux version smoke": "if: matrix.target == 'x86_64-unknown-linux-gnu'",
     "per-file checksum": ".sha256",
     "aggregate checksums": "SHA256SUMS",
     "SPDX SBOM": "anchore/sbom-action@v0",
@@ -32,6 +31,9 @@ FORBIDDEN = {
     "personal access token for GHCR": "secrets.CR_PAT",
     "unlocked release build": "cargo build --release --target",
     "lockfile regeneration before publish": "cargo generate-lockfile",
+    "macOS runner": "macos-latest",
+    "macOS release target": "apple-darwin",
+    "macOS release artifact": "opencode2api-macos-",
 }
 
 

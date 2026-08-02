@@ -6,7 +6,7 @@ use futures_util::{future::join_all, StreamExt};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tracing::warn;
 
@@ -258,6 +258,7 @@ impl ProxyPool {
             node.duplicate_of = None;
         }
 
+        let identity_ttl = self.identity_ttl;
         for (index, node_id, result) in results {
             let Some(node) = self.proxies.get_mut(index) else {
                 continue;
@@ -267,25 +268,58 @@ impl ProxyPool {
             }
             match result {
                 Ok(identity) => {
+                    let now = Instant::now();
+                    let recovery_cause = node.recovery_cause;
                     node.exit_identity = Some(identity);
-                    if matches!(node.health, HealthState::Unknown | HealthState::Recovering)
-                        && !node.circuit.is_open(std::time::Instant::now())
+                    if recovery_cause == Some(RecoveryCause::RateLimit) {
+                        // Only the restart worker may approve a rate-limit recovery after
+                        // checking both the quarantined IP and every other pool identity.
+                        node.health = HealthState::Recovering;
+                        node.circuit = CircuitState::HalfOpen;
+                    } else if recovery_cause == Some(RecoveryCause::Transport) {
+                        // Identity verification is observational during transport recovery.
+                        // The TCP health monitor or restart worker owns the final transition.
+                    } else if matches!(node.health, HealthState::Unknown | HealthState::Recovering)
+                        && !node.circuit.is_open(now)
                     {
                         node.health = HealthState::Healthy;
                         node.circuit = CircuitState::Closed;
                     }
                 }
                 Err(error) => {
-                    node.exit_identity = None;
-                    if self.require_verified_exit_ip && node.health != HealthState::Unhealthy {
+                    let retained_last_known_good = node
+                        .exit_identity
+                        .as_ref()
+                        .is_some_and(|identity| identity.is_fresh(identity_ttl));
+                    let identity_required =
+                        self.require_verified_exit_ip || node.role == EgressRole::WarmStandby;
+                    if !retained_last_known_good {
+                        node.exit_identity = None;
+                    }
+                    if node.recovery_cause == Some(RecoveryCause::RateLimit) {
+                        node.health = HealthState::Recovering;
+                        node.circuit = CircuitState::HalfOpen;
+                    } else if node.recovery_cause == Some(RecoveryCause::Transport) {
+                        // Preserve transport recovery state until TCP or the restart worker
+                        // confirms that the managed proxy is usable again.
+                    } else if !retained_last_known_good
+                        && identity_required
+                        && node.health != HealthState::Unhealthy
+                    {
                         node.health = HealthState::Unknown;
                     }
-                    warn!(node_id = %node.id, %error, "exit identity verification failed");
+                    warn!(
+                        node_id = %node.id,
+                        %error,
+                        retained_last_known_good,
+                        "exit identity verification failed"
+                    );
                 }
             }
         }
 
         self.suppress_duplicate_exits();
+        self.finalize_identity_recovery();
     }
 
     pub fn suppress_duplicate_exits(&mut self) {
@@ -310,6 +344,7 @@ impl ProxyPool {
                         EgressRole::Primary => 0_u8,
                         EgressRole::WarmStandby => 1_u8,
                     },
+                    !(node.health == HealthState::Healthy && node.circuit == CircuitState::Closed),
                     !node.routing_enabled,
                     node.id.clone(),
                 )
@@ -319,6 +354,46 @@ impl ProxyPool {
                 for duplicate in duplicates {
                     self.proxies[*duplicate].duplicate_of = Some(owner_id.clone());
                 }
+            }
+        }
+    }
+
+    fn finalize_identity_recovery(&mut self) {
+        let now = Instant::now();
+        for node in &mut self.proxies {
+            match node.recovery_cause {
+                Some(RecoveryCause::RateLimit) => {
+                    if node.restart_attempts >= self.max_restart_attempts.max(1) {
+                        let until = node
+                            .rate_limit_until
+                            .unwrap_or_else(|| now + Duration::from_secs(120));
+                        node.health = HealthState::Degraded;
+                        node.circuit = CircuitState::Open { until };
+                        node.cooldown_until = Some(until);
+                        continue;
+                    }
+                    let quota_expired = node.rate_limit_until.is_some_and(|until| now >= until);
+                    let same_quarantined_exit = !quota_expired
+                        && node
+                            .exit_identity
+                            .as_ref()
+                            .zip(node.quarantined_exit_ip.as_deref())
+                            .is_some_and(|(identity, blocked)| identity.public_ip == blocked);
+                    // Identity monitoring is observational during rate-limit recovery.
+                    // It must never make the node routable; the restart worker owns the
+                    // final same-IP/duplicate-IP acceptance decision.
+                    node.health = HealthState::Recovering;
+                    node.circuit = CircuitState::HalfOpen;
+                    let _identity_still_rejected =
+                        same_quarantined_exit || node.duplicate_of.is_some();
+                    // The restart worker that owns the current attempt decides whether
+                    // to retry and enqueues exactly once on failure. The identity monitor
+                    // must not create a stale queue entry behind an in-flight restart.
+                }
+                Some(RecoveryCause::Transport) if node.health == HealthState::Healthy => {
+                    node.recovery_cause = None;
+                }
+                _ => {}
             }
         }
     }
@@ -428,6 +503,204 @@ mod tests {
             Some("opencode-warp-1")
         );
         assert_eq!(pool.verified_unique_exit_count(), 1);
+    }
+
+    #[test]
+    fn transient_probe_failure_preserves_fresh_last_known_good_identity() {
+        let mut pool = ProxyPool::new_with_egress_policy(
+            &["socks5h://127.0.0.1:40001".to_string()],
+            1,
+            true,
+            Duration::from_secs(300),
+        );
+        pool.proxies[0].exit_identity = Some(identity("1.1.1.1"));
+        pool.proxies[0].health = HealthState::Healthy;
+        pool.proxies[0].circuit = CircuitState::Closed;
+        pool.suppress_duplicate_exits();
+        let node_id = pool.proxies[0].id.clone();
+
+        pool.apply_identity_results(vec![(
+            0,
+            node_id,
+            Err("transient probe failure".to_string()),
+        )]);
+
+        assert_eq!(pool.proxies[0].health, HealthState::Healthy);
+        assert_eq!(pool.proxies[0].circuit, CircuitState::Closed);
+        assert_eq!(
+            pool.proxies[0]
+                .exit_identity
+                .as_ref()
+                .map(|identity| identity.public_ip.as_str()),
+            Some("1.1.1.1")
+        );
+        assert!(pool.egress_ready(1, Duration::from_secs(300)));
+        assert!(pool.select_proxy_for_key("transient-probe").is_some());
+    }
+
+    #[test]
+    fn failed_probe_discards_stale_last_known_good_identity() {
+        let mut pool = ProxyPool::new_with_egress_policy(
+            &["socks5h://127.0.0.1:40001".to_string()],
+            1,
+            true,
+            Duration::from_secs(30),
+        );
+        pool.proxies[0].exit_identity = Some(ExitIdentity {
+            public_ip: "1.1.1.1".to_string(),
+            provider: Some("cloudflare-warp".to_string()),
+            colo: Some("SIN".to_string()),
+            verified_at_unix_secs: 1,
+        });
+        pool.proxies[0].health = HealthState::Healthy;
+        pool.proxies[0].circuit = CircuitState::Closed;
+        pool.suppress_duplicate_exits();
+        let node_id = pool.proxies[0].id.clone();
+
+        pool.apply_identity_results(vec![(0, node_id, Err("probe offline".to_string()))]);
+
+        assert!(pool.proxies[0].exit_identity.is_none());
+        assert_eq!(pool.proxies[0].health, HealthState::Unknown);
+        assert!(!pool.egress_ready(1, Duration::from_secs(30)));
+        assert!(pool.select_proxy_for_key("stale-probe").is_none());
+    }
+
+    #[test]
+    fn transport_identity_monitor_preserves_recovery_until_tcp_or_restart_confirms() {
+        let mut pool = ProxyPool::new_with_egress_policy(
+            &["socks5://127.0.0.1:40001".to_string()],
+            1,
+            true,
+            Duration::from_secs(300),
+        );
+        pool.proxies[0].health = HealthState::Recovering;
+        pool.proxies[0].circuit = CircuitState::HalfOpen;
+        pool.proxies[0].recovery_cause = Some(RecoveryCause::Transport);
+        let node_id = pool.proxies[0].id.clone();
+
+        pool.apply_identity_results(vec![(0, node_id.clone(), Ok(identity("1.1.1.1")))]);
+        assert_eq!(pool.proxies[0].health, HealthState::Recovering);
+        assert_eq!(pool.proxies[0].circuit, CircuitState::HalfOpen);
+        assert_eq!(
+            pool.proxies[0].recovery_cause,
+            Some(RecoveryCause::Transport)
+        );
+        assert_eq!(
+            pool.proxies[0]
+                .exit_identity
+                .as_ref()
+                .map(|identity| identity.public_ip.as_str()),
+            Some("1.1.1.1")
+        );
+
+        pool.apply_identity_results(vec![(0, node_id, Err("offline".to_string()))]);
+        assert_eq!(pool.proxies[0].health, HealthState::Recovering);
+        assert_eq!(pool.proxies[0].circuit, CircuitState::HalfOpen);
+        assert_eq!(
+            pool.proxies[0].recovery_cause,
+            Some(RecoveryCause::Transport)
+        );
+    }
+
+    #[test]
+    fn rate_limit_identity_monitor_never_closes_recovery_even_for_new_ip() {
+        let mut pool = ProxyPool::new_with_egress_policy(
+            &[
+                "socks5://127.0.0.1:40002".to_string(),
+                "socks5://127.0.0.1:40001".to_string(),
+            ],
+            1,
+            true,
+            Duration::from_secs(300),
+        );
+        pool.proxies[0].exit_identity = Some(identity("1.1.1.1"));
+        pool.proxies[1].exit_identity = Some(identity("8.8.8.8"));
+        pool.mark_rate_limited(0, Duration::from_secs(3_600));
+        pool.drain_restart_queue();
+        pool.proxies[0].health = HealthState::Recovering;
+        pool.proxies[0].circuit = CircuitState::HalfOpen;
+        pool.proxies[0].restart_attempts = 1;
+        let node_id = pool.proxies[0].id.clone();
+
+        pool.apply_identity_results(vec![(0, node_id, Ok(identity("9.9.9.9")))]);
+
+        assert_eq!(pool.proxies[0].health, HealthState::Recovering);
+        assert_eq!(pool.proxies[0].circuit, CircuitState::HalfOpen);
+        assert_eq!(
+            pool.proxies[0].recovery_cause,
+            Some(RecoveryCause::RateLimit)
+        );
+        assert!(pool.proxies[0].rate_limit_until.is_some());
+        assert_eq!(
+            pool.proxies[0].quarantined_exit_ip.as_deref(),
+            Some("1.1.1.1")
+        );
+    }
+
+    #[test]
+    fn exhausted_rate_limit_recovery_stays_open_until_quota_deadline() {
+        let mut pool = ProxyPool::new_with_egress_policy(
+            &["socks5://127.0.0.1:40002".to_string()],
+            1,
+            true,
+            Duration::from_secs(300),
+        );
+        pool.set_max_restart_attempts(2);
+        pool.proxies[0].exit_identity = Some(identity("1.1.1.1"));
+        pool.mark_rate_limited(0, Duration::from_secs(3_600));
+        let deadline = pool.proxies[0].rate_limit_until.expect("deadline");
+        pool.drain_restart_queue();
+        pool.proxies[0].restart_attempts = 2;
+        pool.proxies[0].health = HealthState::Recovering;
+        pool.proxies[0].circuit = CircuitState::HalfOpen;
+        let node_id = pool.proxies[0].id.clone();
+
+        pool.apply_identity_results(vec![(0, node_id, Ok(identity("1.1.1.1")))]);
+
+        assert_eq!(pool.proxies[0].health, HealthState::Degraded);
+        assert!(matches!(
+            pool.proxies[0].circuit,
+            CircuitState::Open { until } if until == deadline
+        ));
+        assert_eq!(pool.proxies[0].cooldown_until, Some(deadline));
+        assert!(pool.restart_queue.is_empty());
+        assert!(pool.select_proxy_for_key("exhausted").is_none());
+    }
+
+    #[test]
+    fn recovering_rate_limited_node_cannot_own_duplicate_identity() {
+        let mut pool = ProxyPool::new_with_egress_policy(
+            &[
+                "socks5://127.0.0.1:40002".to_string(),
+                "socks5://127.0.0.1:40001".to_string(),
+            ],
+            1,
+            true,
+            Duration::from_secs(300),
+        );
+        pool.proxies[0].exit_identity = Some(identity("1.1.1.1"));
+        pool.proxies[1].exit_identity = Some(identity("8.8.8.8"));
+        pool.proxies[1].health = HealthState::Healthy;
+        pool.mark_rate_limited(0, Duration::from_secs(3_600));
+        pool.drain_restart_queue();
+        pool.proxies[0].health = HealthState::Recovering;
+        pool.proxies[0].circuit = CircuitState::HalfOpen;
+        pool.proxies[0].restart_attempts = 1;
+        let node_id = pool.proxies[0].id.clone();
+
+        pool.apply_identity_results(vec![(0, node_id, Ok(identity("8.8.8.8")))]);
+
+        assert_eq!(
+            pool.proxies[0].duplicate_of.as_deref(),
+            Some(pool.proxies[1].id.as_str())
+        );
+        assert_eq!(pool.proxies[0].health, HealthState::Recovering);
+        assert_eq!(pool.proxies[0].circuit, CircuitState::HalfOpen);
+        assert_eq!(
+            pool.proxies[0].recovery_cause,
+            Some(RecoveryCause::RateLimit)
+        );
+        assert!(pool.restart_queue.is_empty());
     }
 
     #[test]

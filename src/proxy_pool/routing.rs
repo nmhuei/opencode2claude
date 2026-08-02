@@ -178,10 +178,11 @@ fn is_normal_route(
     require_verified_exit_ip: bool,
     identity_ttl: std::time::Duration,
 ) -> bool {
+    let identity_required = require_verified_exit_ip || node.role == EgressRole::WarmStandby;
     node.health == HealthState::Healthy
         && node.circuit == CircuitState::Closed
         && !node.is_duplicate()
-        && (!require_verified_exit_ip
+        && (!identity_required
             || node
                 .exit_identity
                 .as_ref()
@@ -195,9 +196,11 @@ fn is_probe_route(
     require_verified_exit_ip: bool,
     identity_ttl: std::time::Duration,
 ) -> bool {
-    if node.is_duplicate()
+    let identity_required = require_verified_exit_ip || node.role == EgressRole::WarmStandby;
+    if node.recovery_cause == Some(RecoveryCause::RateLimit)
+        || node.is_duplicate()
         || node.active_request_count() > 0
-        || (require_verified_exit_ip
+        || (identity_required
             && !node
                 .exit_identity
                 .as_ref()

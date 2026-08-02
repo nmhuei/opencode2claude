@@ -68,3 +68,6 @@ qa_test_specification.md
 *.tmp
 *.bak
 *.orig
+
+# ── Generated verification evidence / local captures ───────────
+/artifacts/

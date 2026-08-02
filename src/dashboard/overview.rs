@@ -21,15 +21,17 @@ pub async fn handler_rest_status(
     check_admin_token(&state, &headers, None)?;
     let snapshot = service::proxy_snapshot(&state).await;
     let uptime_secs = service::uptime_secs(&state);
+    let auth_enabled = state.api_keys.read().await.configured();
 
     Ok(Json(json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
+        "pid": std::process::id(),
         "uptime": uptime_string(uptime_secs),
         "uptime_secs": uptime_secs,
         "model": state.config.model,
         "bridge_port": state.config.bridge_port,
-        "auth_enabled": state.config.auth_enabled(),
+        "auth_enabled": auth_enabled,
         "admin_token_configured": auth::dashboard_token(&state.config).is_some(),
         "shell_policy": state.config.shell_policy.kind(),
         "primary_proxies": {
@@ -67,7 +69,7 @@ pub async fn handler_config(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, (StatusCode, Json<Value>)> {
     check_admin_token(&state, &headers, None)?;
-    let cfg = service::safe_config_snapshot(&state);
+    let cfg = service::safe_config_snapshot(&state).await;
     Ok(Json(json!({
         "host": cfg.host,
         "bridge_port": cfg.bridge_port,
@@ -142,6 +144,7 @@ pub async fn handler_dashboard_diagnostics(
     let daemon_ok =
         crate::opencode::check_daemon(&state.http_client, state.config.opencode_port).await;
     let proxy_pool_stats = service::proxy_snapshot(&state).await;
+    let auth_enabled = state.api_keys.read().await.configured();
 
     Ok(Json(json!({
         "status": "healthy",
@@ -153,7 +156,7 @@ pub async fn handler_dashboard_diagnostics(
         "config": {
             "model": state.config.model.as_deref().unwrap_or("(default)"),
             "shell_policy": state.config.shell_policy.kind(),
-            "auth_enabled": state.config.auth_enabled(),
+            "auth_enabled": auth_enabled,
             "bridge_port": state.config.bridge_port
         },
         "proxy_pool": proxy_pool_stats

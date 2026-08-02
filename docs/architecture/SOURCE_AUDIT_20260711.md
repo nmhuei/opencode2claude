@@ -309,7 +309,7 @@ Regression tests cover `Tiếng Việt` decoding and 300-character truncation wi
 
 **Confirmed defect fixed**
 
-The supervisor used `/proc/<pid>` to detect process existence. That works on Linux but not macOS, even though macOS binaries are released. Process probing now uses platform-specific commands and validates the Unix signed `pid_t` range so very large unsigned values cannot be interpreted as process-group selectors.
+The supervisor uses `/proc/<pid>` to detect process existence and validates the signed Linux `pid_t` range so very large unsigned values cannot be interpreted as process-group selectors. This matches the repository's Linux-only support scope.
 
 Regression tests cover the current PID and an impossible PID.
 

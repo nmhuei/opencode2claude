@@ -14,6 +14,10 @@ pub const PID_FILE_NAME: &str = "opencode2api.pid.json";
 
 /// Log file name.
 pub const LOG_FILE_NAME: &str = "opencode2api.log";
+/// Request-history directory name.
+pub const HISTORY_DIR_NAME: &str = "history";
+/// Request-history SQLite database name.
+pub const HISTORY_DATABASE_NAME: &str = "request-history.sqlite3";
 
 /// Manages paths for runtime artifacts under `~/.opencode2api/`.
 #[derive(Debug, Clone)]
@@ -77,6 +81,16 @@ impl RuntimePaths {
     /// Path to the bridge log file: `~/.opencode2api/opencode2api.log`.
     pub fn bridge_log(&self) -> PathBuf {
         self.runtime_dir().join(LOG_FILE_NAME)
+    }
+
+    /// Path to the request-history directory.
+    pub fn history_dir(&self) -> PathBuf {
+        self.runtime_dir().join(HISTORY_DIR_NAME)
+    }
+
+    /// Path to the request-history SQLite database.
+    pub fn history_database(&self) -> PathBuf {
+        self.history_dir().join(HISTORY_DATABASE_NAME)
     }
 
     /// Ensure `~/.opencode2api/` directory and all subdirectories exist.

@@ -43,7 +43,7 @@ Every public command, HTTP route, dashboard action, retry path, proxy transition
 - Zero unexplained `#[ignore]` tests.
 - Network-dependent tests are replaced with deterministic local fixtures where possible.
 - Real Docker/WARP tests remain separately tagged but run in mandatory protected CI or scheduled CI.
-- Linux and macOS release behavior is exercised.
+- Linux x86_64 and ARM64 release behavior is exercised.
 - Windows behavior is either fully supported and tested or explicitly removed from advertised support.
 
 ### 2.3 Security completeness
@@ -82,7 +82,7 @@ The current branch already provides:
 - bounded SSE channel sends and disconnect cancellation;
 - UTF-8-safe search parsing;
 - restart-attempt preservation;
-- Linux/macOS-compatible process existence probing;
+- Linux `/proc`-based process existence probing;
 - clean format, check, Clippy, unit/fast tests, binary build, and process smoke tests.
 
 Current unresolved inventory found directly in source:
@@ -673,7 +673,7 @@ Turn the existing test inventory into reliable release evidence.
 - real local SOCKS fixture;
 - release build;
 - install/uninstall tests;
-- Linux/macOS supervisor tests;
+- Linux supervisor lifecycle tests;
 - OpenAPI validation;
 - security scans.
 
@@ -863,7 +863,7 @@ Mandatory evidence for:
 ## Gate E — Cross-platform
 
 - Linux supported matrix passes.
-- macOS supported matrix passes.
+- Linux x86_64 and ARM64 supported matrix passes.
 - Windows passes if still advertised; otherwise documentation and release targets remove Windows claims.
 
 ## Gate F — Release artifact

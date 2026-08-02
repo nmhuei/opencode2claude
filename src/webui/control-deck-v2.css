@@ -1,0 +1,1200 @@
+/* OpenCode2API Control Deck V2
+   Final visual layer for the approved dark sci-fi control-plane direction.
+   Loaded after style.css and mecha.css; all rules are scoped to the Mecha theme. */
+
+html[data-theme="mecha"] {
+  color-scheme: dark;
+  --v2-canvas: #030816;
+  --v2-canvas-2: #061026;
+  --v2-sidebar: rgba(4, 10, 25, .96);
+  --v2-header: rgba(4, 10, 24, .88);
+  --v2-panel: rgba(7, 17, 39, .88);
+  --v2-panel-strong: rgba(9, 21, 47, .96);
+  --v2-panel-soft: rgba(10, 23, 50, .68);
+  --v2-panel-hover: rgba(16, 34, 70, .82);
+  --v2-line: rgba(71, 122, 200, .28);
+  --v2-line-strong: rgba(83, 151, 235, .5);
+  --v2-line-violet: rgba(141, 99, 255, .5);
+  --v2-cyan: #37c7ff;
+  --v2-cyan-soft: rgba(55, 199, 255, .13);
+  --v2-violet: #8d63ff;
+  --v2-violet-bright: #ae83ff;
+  --v2-violet-soft: rgba(141, 99, 255, .14);
+  --v2-green: #48efaa;
+  --v2-green-soft: rgba(72, 239, 170, .12);
+  --v2-amber: #ffc857;
+  --v2-amber-soft: rgba(255, 200, 87, .12);
+  --v2-red: #ff6f91;
+  --v2-red-soft: rgba(255, 111, 145, .12);
+  --v2-text: #f4f7ff;
+  --v2-muted: #a9b5ce;
+  --v2-faint: #7484a5;
+  --v2-shadow: 0 18px 55px rgba(0, 3, 14, .42);
+  --v2-panel-shadow: 0 16px 34px rgba(0, 4, 18, .26), inset 0 1px rgba(193, 223, 255, .025);
+  --v2-radius: 12px;
+  --v2-radius-sm: 7px;
+  --v2-cut: 12px;
+  --v2-control: 40px;
+  --sidebar-width: clamp(228px, 14.2vw, 250px);
+  --topbar-height: 76px;
+  --bg: var(--v2-canvas);
+  --surface-0: var(--v2-sidebar);
+  --surface-1: var(--v2-panel);
+  --surface-2: var(--v2-panel-soft);
+  --surface-3: var(--v2-panel-hover);
+  --border: var(--v2-line);
+  --border-strong: var(--v2-line-strong);
+  --text: var(--v2-text);
+  --muted: var(--v2-muted);
+  --faint: var(--v2-faint);
+  --primary: var(--v2-violet);
+  --primary-soft: var(--v2-violet-soft);
+  --success: var(--v2-green);
+  --success-soft: var(--v2-green-soft);
+  --warning: var(--v2-amber);
+  --warning-soft: var(--v2-amber-soft);
+  --danger: var(--v2-red);
+  --danger-soft: var(--v2-red-soft);
+  --control-height: var(--v2-control);
+  --radius-sm: var(--v2-radius-sm);
+  --radius-md: var(--v2-radius);
+  --radius-lg: 16px;
+  --body-font: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --tech-display: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --pixel-display: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+  --technical-font: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+}
+
+html[data-theme="mecha"],
+html[data-theme="mecha"] body {
+  background: var(--v2-canvas);
+  color: var(--v2-text);
+}
+
+html[data-theme="mecha"] body {
+  position: relative;
+  background-image:
+    radial-gradient(circle at 72% 8%, rgba(37, 104, 214, .11), transparent 28%),
+    radial-gradient(circle at 15% 88%, rgba(141, 99, 255, .08), transparent 24%),
+    linear-gradient(140deg, var(--v2-canvas), var(--v2-canvas-2) 54%, #030714);
+  background-size: auto;
+  font-family: var(--body-font);
+  font-size: clamp(13px, calc(12.3px + .08vw), 14.5px);
+  line-height: 1.48;
+}
+
+html[data-theme="mecha"] body::before {
+  z-index: 9999;
+  opacity: .22;
+  background-image:
+    linear-gradient(rgba(75, 121, 190, .055) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(75, 121, 190, .045) 1px, transparent 1px),
+    radial-gradient(circle at 50% 50%, rgba(55,199,255,.09) 0 1px, transparent 1.5px);
+  background-size: 52px 52px, 52px 52px, 96px 96px;
+  mix-blend-mode: screen;
+  animation: v2-grid-drift 34s linear infinite;
+}
+
+html[data-theme="mecha"] body::after {
+  z-index: 9998;
+  opacity: .045;
+  background: repeating-linear-gradient(180deg, transparent 0 4px, rgba(176, 205, 255, .28) 5px, transparent 6px);
+}
+
+html[data-theme="mecha"] h1,
+html[data-theme="mecha"] h2,
+html[data-theme="mecha"] h3,
+html[data-theme="mecha"] .metric-card strong,
+html[data-theme="mecha"] .brand-copy strong {
+  font-family: var(--tech-display);
+  letter-spacing: -.015em;
+}
+
+html[data-theme="mecha"] h1 { font-size: clamp(23px, calc(19px + .42vw), 30px); font-weight: 730; line-height: 1.15; }
+html[data-theme="mecha"] h2 { font-size: clamp(15px, calc(14px + .18vw), 18px); font-weight: 720; line-height: 1.25; }
+html[data-theme="mecha"] h3 { font-size: 13px; font-weight: 700; }
+html[data-theme="mecha"] p { color: var(--v2-muted); }
+html[data-theme="mecha"] code,
+html[data-theme="mecha"] pre,
+html[data-theme="mecha"] .mono,
+html[data-theme="mecha"] .key-meta,
+html[data-theme="mecha"] .history-resource-id,
+html[data-theme="mecha"] .sidebar-version { font-family: var(--technical-font); }
+
+html[data-theme="mecha"] ::selection { background: rgba(141, 99, 255, .36); color: #fff; }
+html[data-theme="mecha"] * { scrollbar-color: rgba(67, 151, 241, .55) rgba(5, 12, 28, .7); scrollbar-width: thin; }
+html[data-theme="mecha"] *::-webkit-scrollbar { width: 8px; height: 8px; }
+html[data-theme="mecha"] *::-webkit-scrollbar-track { background: rgba(4, 10, 24, .72); }
+html[data-theme="mecha"] *::-webkit-scrollbar-thumb { border: 2px solid rgba(4,10,24,.72); border-radius: 999px; background: linear-gradient(var(--v2-cyan), var(--v2-violet)); }
+
+/* Shell */
+html[data-theme="mecha"] .app-shell { background: transparent; }
+html[data-theme="mecha"] .main-shell {
+  background:
+    radial-gradient(circle at 96% 18%, rgba(55, 199, 255, .035), transparent 24%),
+    transparent;
+}
+
+html[data-theme="mecha"] .sidebar {
+  padding: 14px 12px 12px;
+  border-right: 1px solid rgba(55, 199, 255, .24);
+  background:
+    linear-gradient(180deg, rgba(5,12,29,.985), rgba(3,9,23,.97)),
+    url('/dashboard/assets/mecha/backgrounds/bg-sidebar.webp') center/cover;
+  box-shadow: 18px 0 48px rgba(0, 3, 15, .32), inset -1px 0 rgba(141,99,255,.12);
+}
+
+html[data-theme="mecha"] .sidebar::before,
+html[data-theme="mecha"] .sidebar::after {
+  width: 24px;
+  height: 24px;
+  opacity: .65;
+}
+
+html[data-theme="mecha"] .brand-row {
+  min-height: 68px;
+  padding: 4px 8px 14px;
+  border-bottom: 1px solid rgba(71,122,200,.24);
+}
+html[data-theme="mecha"] .brand-mark {
+  width: 50px;
+  height: 50px;
+  flex-basis: 50px;
+  filter: drop-shadow(0 0 12px rgba(141,99,255,.24));
+}
+html[data-theme="mecha"] .brand-copy strong { color: var(--v2-text); font-size: 15px; font-weight: 740; }
+html[data-theme="mecha"] .brand-copy span {
+  color: #67c9f5;
+  font-family: var(--technical-font);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: .18em;
+  opacity: .82;
+  text-transform: uppercase;
+}
+
+html[data-theme="mecha"] .nav-list { gap: 7px; margin-top: 22px; }
+html[data-theme="mecha"] .nav-item {
+  min-height: 48px;
+  padding: 10px 13px;
+  border: 1px solid rgba(71,122,200,.23);
+  border-radius: 7px;
+  background: linear-gradient(180deg, rgba(8,18,39,.58), rgba(4,10,25,.5));
+  color: #b8c4dc;
+  clip-path: polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 8px 100%, 0 calc(100% - 8px));
+  font-size: 13px;
+  font-weight: 580;
+  transition: transform .16s ease, border-color .18s ease, background .18s ease, box-shadow .18s ease, color .18s ease;
+}
+html[data-theme="mecha"] .nav-item::before { width: 23px; height: 23px; flex-basis: 23px; background-size: 20px; opacity: .82; }
+html[data-theme="mecha"] .nav-item:hover {
+  transform: translateX(3px);
+  border-color: rgba(55,199,255,.47);
+  background: linear-gradient(90deg, rgba(55,199,255,.1), rgba(12,27,56,.72));
+  color: #fff;
+  box-shadow: 0 0 20px rgba(55,199,255,.07);
+}
+html[data-theme="mecha"] .nav-item.active {
+  border-color: rgba(83, 196, 255, .75);
+  background:
+    linear-gradient(90deg, rgba(141,99,255,.26), rgba(25,44,91,.62)),
+    rgba(8,17,42,.9);
+  color: #fff;
+  box-shadow: inset 4px 0 var(--v2-violet-bright), inset -3px 0 var(--v2-cyan), 0 0 22px rgba(72,143,255,.14);
+}
+html[data-theme="mecha"] .nav-item.active::after {
+  top: 7px;
+  right: 5px;
+  width: 3px;
+  height: calc(100% - 14px);
+  opacity: .9;
+  background: linear-gradient(transparent, var(--v2-cyan), transparent);
+  box-shadow: 0 0 13px rgba(55,199,255,.75);
+  animation: v2-nav-scan 2.6s ease-in-out infinite;
+}
+
+html[data-theme="mecha"] .sidebar-footer {
+  gap: 8px;
+  padding: 18px 10px 6px;
+  border-top: 1px solid rgba(71,122,200,.25);
+  background: linear-gradient(180deg, transparent, rgba(9,22,46,.4));
+}
+html[data-theme="mecha"] .sidebar-status-row { color: var(--v2-green); font-family: var(--technical-font); font-size: 10.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+html[data-theme="mecha"] .sidebar-model { color: #c5cee1; font-size: 11px; }
+html[data-theme="mecha"] .sidebar-version { color: var(--v2-faint); font-size: 9.5px; }
+html[data-theme="mecha"] .mecha-sidebar-drone { right: 10px; bottom: 58px; width: 50px; height: 50px; opacity: .58; }
+
+html[data-theme="mecha"] .topbar {
+  min-height: var(--topbar-height);
+  padding: 10px clamp(20px, 2.4vw, 34px);
+  border-bottom: 1px solid rgba(71, 122, 200, .26);
+  background: linear-gradient(90deg, rgba(4,10,24,.96), rgba(5,12,29,.86));
+  box-shadow: 0 12px 34px rgba(0,4,18,.22), inset 0 -1px rgba(141,99,255,.1);
+  backdrop-filter: blur(18px) saturate(1.15);
+}
+html[data-theme="mecha"] .topbar::before { height: 1px; opacity: .62; background: linear-gradient(90deg, transparent 3%, var(--v2-violet) 32%, var(--v2-cyan) 67%, transparent 98%); }
+html[data-theme="mecha"] .topbar-title h1 { color: #fff; letter-spacing: -.02em; text-shadow: 0 0 18px rgba(141,99,255,.17); }
+html[data-theme="mecha"] .topbar-title p { margin-top: 5px; color: #a8b6d0; font-size: 12px; }
+html[data-theme="mecha"] .topbar-actions { gap: 9px; }
+
+html[data-theme="mecha"] .content {
+  width: min(calc(100% - 34px), 1320px);
+  padding: 20px 0 32px;
+}
+html[data-theme="mecha"] .content::before { right: 20px; bottom: 10px; width: min(29vw, 430px); opacity: .025; }
+html[data-theme="mecha"] .view.active { animation: v2-view-enter .32s cubic-bezier(.2,.8,.2,1); }
+
+/* Shared panels */
+html[data-theme="mecha"] .section-card,
+html[data-theme="mecha"] .metric-card,
+html[data-theme="mecha"] .current-model-card,
+html[data-theme="mecha"] .menu-popover,
+html[data-theme="mecha"] .notice,
+html[data-theme="mecha"] .inline-note,
+html[data-theme="mecha"] .login-panel {
+  border: 1px solid var(--v2-line);
+  border-radius: var(--v2-radius);
+  background:
+    linear-gradient(145deg, rgba(10,23,50,.91), rgba(5,13,31,.94)),
+    linear-gradient(90deg, rgba(55,199,255,.018), rgba(141,99,255,.018));
+  box-shadow: var(--v2-panel-shadow);
+  clip-path: polygon(0 0, calc(100% - var(--v2-cut)) 0, 100% var(--v2-cut), 100% 100%, var(--v2-cut) 100%, 0 calc(100% - var(--v2-cut)));
+}
+html[data-theme="mecha"] .section-card::before,
+html[data-theme="mecha"] .metric-card::before,
+html[data-theme="mecha"] .login-panel::before {
+  inset: 0;
+  border: 0;
+  background:
+    linear-gradient(90deg, var(--v2-cyan), transparent 12%) top left/130px 1px no-repeat,
+    linear-gradient(180deg, var(--v2-cyan), transparent 18%) top left/1px 100px no-repeat,
+    linear-gradient(270deg, var(--v2-violet), transparent 14%) top right/150px 1px no-repeat,
+    linear-gradient(0deg, var(--v2-violet), transparent 16%) bottom right/1px 110px no-repeat;
+  content: "";
+  opacity: .58;
+}
+html[data-theme="mecha"] .section-card::after,
+html[data-theme="mecha"] .metric-card::after {
+  position: absolute;
+  inset: -1px;
+  z-index: 0;
+  pointer-events: none;
+  background: linear-gradient(105deg, transparent 36%, rgba(55,199,255,.1) 49%, rgba(141,99,255,.1) 52%, transparent 64%);
+  background-size: 250% 100%;
+  content: "";
+  opacity: 0;
+  transition: opacity .2s ease;
+}
+html[data-theme="mecha"] .section-card:hover::after,
+html[data-theme="mecha"] .metric-card:hover::after { opacity: .62; animation: v2-edge-sweep 1.3s ease; }
+html[data-theme="mecha"] .section-card:hover,
+html[data-theme="mecha"] .metric-card:hover { border-color: rgba(66,169,246,.42); box-shadow: var(--v2-panel-shadow), 0 0 24px rgba(55,199,255,.045); }
+
+html[data-theme="mecha"] .section-card { padding: 17px 18px; }
+html[data-theme="mecha"] .section-header { margin-bottom: 14px; gap: 16px; }
+html[data-theme="mecha"] .section-header h2,
+html[data-theme="mecha"] .section-header h3 { color: #f4f7ff; text-transform: uppercase; letter-spacing: .015em; }
+html[data-theme="mecha"] .section-header h2::before,
+html[data-theme="mecha"] .section-header h3::before {
+  width: 8px;
+  height: 8px;
+  margin-right: 10px;
+  border-radius: 2px;
+  background: linear-gradient(135deg, var(--v2-cyan), var(--v2-violet));
+  box-shadow: 0 0 12px rgba(55,199,255,.48);
+  transform: rotate(45deg);
+}
+html[data-theme="mecha"] .section-header p { margin-top: 5px; color: #8f9ebc; font-size: 11.5px; }
+html[data-theme="mecha"] .eyebrow,
+html[data-theme="mecha"] .metric-label,
+html[data-theme="mecha"] .response-label {
+  color: #6bd5ff;
+  font-family: var(--technical-font);
+  font-size: 9px;
+  font-weight: 760;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+/* Controls */
+html[data-theme="mecha"] .button,
+html[data-theme="mecha"] .compact-button,
+html[data-theme="mecha"] .icon-button,
+html[data-theme="mecha"] .text-button,
+html[data-theme="mecha"] .drawer-tabs button,
+html[data-theme="mecha"] .menu-popover button {
+  border-radius: 7px;
+  font-family: var(--body-font);
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0;
+}
+html[data-theme="mecha"] .button,
+html[data-theme="mecha"] .compact-button,
+html[data-theme="mecha"] .icon-button {
+  border: 1px solid rgba(76,117,183,.38);
+  background: linear-gradient(180deg, rgba(15,29,60,.9), rgba(7,15,36,.92));
+  color: #cbd5e9;
+  clip-path: polygon(5px 0, calc(100% - 5px) 0, 100% 5px, 100% calc(100% - 5px), calc(100% - 5px) 100%, 5px 100%, 0 calc(100% - 5px), 0 5px);
+  box-shadow: inset 0 1px rgba(188,215,255,.035);
+}
+html[data-theme="mecha"] .button:hover,
+html[data-theme="mecha"] .compact-button:hover,
+html[data-theme="mecha"] .icon-button:hover {
+  transform: translateY(-1px);
+  border-color: rgba(55,199,255,.58);
+  background: linear-gradient(180deg, rgba(24,45,87,.96), rgba(10,22,50,.96));
+  color: #fff;
+  box-shadow: 0 0 18px rgba(55,199,255,.09), inset 0 1px rgba(188,215,255,.06);
+}
+html[data-theme="mecha"] .button.primary {
+  border-color: rgba(174,131,255,.82);
+  background: linear-gradient(180deg, #7650e8, #4d2ca7);
+  color: #fff;
+  box-shadow: 0 0 20px rgba(141,99,255,.18), inset 0 1px rgba(255,255,255,.15);
+}
+html[data-theme="mecha"] .button.primary:hover { background: linear-gradient(180deg, #936df6, #5d36c1); box-shadow: 0 0 28px rgba(141,99,255,.3); }
+html[data-theme="mecha"] .button.danger { border-color: rgba(255,111,145,.5); background: linear-gradient(180deg, rgba(106,31,58,.92), rgba(55,18,38,.95)); color: #ffd4df; }
+html[data-theme="mecha"] .text-button { color: #51cfff; }
+html[data-theme="mecha"] .text-button:hover { color: #b08aff; text-shadow: 0 0 10px rgba(141,99,255,.46); }
+
+html[data-theme="mecha"] input,
+html[data-theme="mecha"] select,
+html[data-theme="mecha"] textarea {
+  border: 1px solid rgba(75,115,179,.42);
+  border-radius: 6px;
+  background: rgba(3,9,23,.84);
+  color: #eef3ff;
+  box-shadow: inset 0 0 18px rgba(55,199,255,.018);
+}
+html[data-theme="mecha"] input:hover,
+html[data-theme="mecha"] select:hover,
+html[data-theme="mecha"] textarea:hover { border-color: rgba(55,199,255,.42); }
+html[data-theme="mecha"] input:focus,
+html[data-theme="mecha"] select:focus,
+html[data-theme="mecha"] textarea:focus { border-color: var(--v2-cyan); box-shadow: 0 0 0 3px rgba(55,199,255,.08), inset 0 0 20px rgba(55,199,255,.025); }
+html[data-theme="mecha"] label { color: #aeb9cf; font-size: 11px; font-weight: 650; }
+
+html[data-theme="mecha"] .connection-pill,
+html[data-theme="mecha"] .status-tag,
+html[data-theme="mecha"] .count-badge,
+html[data-theme="mecha"] .inline-note,
+html[data-theme="mecha"] .environment-badge {
+  border-radius: 6px;
+  clip-path: polygon(4px 0, 100% 0, 100% calc(100% - 4px), calc(100% - 4px) 100%, 0 100%, 0 4px);
+}
+html[data-theme="mecha"] .connection-pill { min-height: 40px; padding: 0 14px; border-color: rgba(72,239,170,.3); background: rgba(4,28,28,.55); color: var(--v2-green); }
+html[data-theme="mecha"] .status-tag.ok,
+html[data-theme="mecha"] .status-tag.healthy,
+html[data-theme="mecha"] .status-tag.completed,
+html[data-theme="mecha"] .connection-pill.ok { border-color: rgba(72,239,170,.34); background: rgba(29,85,70,.34); color: #5cf4b4; }
+html[data-theme="mecha"] .status-tag.warn,
+html[data-theme="mecha"] .status-tag.warning { border-color: rgba(255,200,87,.4); background: var(--v2-amber-soft); color: var(--v2-amber); }
+html[data-theme="mecha"] .status-tag.error,
+html[data-theme="mecha"] .status-tag.failed { border-color: rgba(255,111,145,.42); background: var(--v2-red-soft); color: #ff8fab; }
+html[data-theme="mecha"] .status-dot.ok,
+html[data-theme="mecha"] .status-dot.healthy,
+html[data-theme="mecha"] .status-dot.completed { background: var(--v2-green); box-shadow: 0 0 12px rgba(72,239,170,.76); animation: v2-status-pulse 2.2s ease-in-out infinite; }
+
+/* Dashboard */
+html[data-theme="mecha"] .metric-grid { gap: 11px; grid-template-columns: repeat(4, minmax(0,1fr)); }
+html[data-theme="mecha"] .metric-card {
+  min-height: 110px;
+  grid-template-columns: 48px minmax(0,1fr);
+  gap: 14px;
+  padding: 15px 16px;
+  border-color: rgba(77,120,193,.32);
+}
+html[data-theme="mecha"] .metric-card:nth-child(2),
+html[data-theme="mecha"] .metric-card:nth-child(4) { border-color: rgba(141,99,255,.33); }
+html[data-theme="mecha"] .metric-card::after { right: auto; bottom: auto; width: auto; height: auto; background: linear-gradient(105deg, transparent 36%, rgba(55,199,255,.1) 49%, rgba(141,99,255,.1) 52%, transparent 64%); }
+html[data-theme="mecha"] .metric-icon {
+  width: 46px;
+  height: 46px;
+  border: 1px solid rgba(141,99,255,.52);
+  border-radius: 8px;
+  background-color: rgba(141,99,255,.1);
+  background-size: 34px;
+  box-shadow: inset 0 0 20px rgba(141,99,255,.08), 0 0 14px rgba(141,99,255,.055);
+}
+html[data-theme="mecha"] .metric-label { margin-bottom: 6px; }
+html[data-theme="mecha"] .metric-card strong { color: #fff; font-size: clamp(18px, calc(15px + .34vw), 23px); font-weight: 730; line-height: 1.2; text-shadow: 0 0 14px rgba(141,99,255,.1); }
+html[data-theme="mecha"] .metric-card small { margin-top: 5px; color: #8493b0; font-size: 10.5px; }
+html[data-theme="mecha"] .dashboard-grid { grid-template-columns: minmax(0, .92fr) minmax(0, 1.08fr); gap: 11px; margin-top: 11px; }
+html[data-theme="mecha"] .dashboard-grid > .section-card { min-height: 0; }
+html[data-theme="mecha"] .status-list button,
+html[data-theme="mecha"] .status-list.static-list > div {
+  min-height: 48px;
+  padding: 8px 10px;
+  border-bottom-color: rgba(71,122,200,.24);
+  background: rgba(3,9,23,.24);
+}
+html[data-theme="mecha"] .status-list button:hover { background: linear-gradient(90deg, rgba(55,199,255,.055), rgba(141,99,255,.035)); }
+html[data-theme="mecha"] .status-list button > span:first-child,
+html[data-theme="mecha"] .status-list.static-list > div > span:first-child { color: #c7d0e3; font-size: 12px; }
+html[data-theme="mecha"] .event-list { max-height: none; border: 1px solid rgba(71,122,200,.19); border-radius: 7px; background: rgba(2,7,19,.56); }
+html[data-theme="mecha"] .event-item { min-height: 47px; grid-template-columns: 82px minmax(0,1fr); align-items: center; padding: 8px 11px; border-bottom-color: rgba(71,122,200,.19); }
+html[data-theme="mecha"] .event-time { color: #8b9ab6; font-size: 10px; }
+html[data-theme="mecha"] .event-message { color: #b5bfd4; font-size: 11px; }
+
+html[data-theme="mecha"] .quick-actions {
+  display: grid;
+  min-height: 142px;
+  height: auto;
+  grid-template-columns: 170px minmax(0,1fr);
+  align-items: stretch;
+  gap: 16px;
+  margin-top: 11px;
+  padding: 15px 148px 15px 17px;
+  overflow: hidden;
+  border-color: rgba(141,99,255,.36);
+  background:
+    linear-gradient(90deg, rgba(8,19,43,.98), rgba(10,21,48,.84)),
+    url('/dashboard/assets/mecha/backgrounds/bg-control-room.webp') right center/cover;
+}
+html[data-theme="mecha"] .quick-actions::after { z-index: 0; background: linear-gradient(90deg, rgba(7,17,39,.99) 0 67%, rgba(7,17,39,.58) 84%, transparent 100%); opacity: 1; animation: none; }
+html[data-theme="mecha"] .quick-actions-header { position: relative; z-index: 2; display: grid; align-content: center; gap: 7px; }
+html[data-theme="mecha"] .quick-actions-header h2 { margin: 0; font-size: 15px; text-transform: uppercase; }
+html[data-theme="mecha"] .quick-actions-header p { color: #8492ad; font-size: 10.5px; line-height: 1.4; }
+html[data-theme="mecha"] .quick-action-grid { position: relative; z-index: 2; display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 10px; }
+html[data-theme="mecha"] .quick-action-card {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 43px minmax(0,1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 13px;
+  border: 1px solid rgba(85,118,190,.38);
+  border-radius: 8px;
+  background: linear-gradient(150deg, rgba(15,31,66,.78), rgba(5,13,32,.9));
+  color: #dce4f4;
+  text-align: left;
+  clip-path: polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 8px 100%, 0 calc(100% - 8px));
+  transition: transform .18s ease, border-color .18s ease, background .18s ease, box-shadow .18s ease;
+}
+html[data-theme="mecha"] .quick-action-card:hover { transform: translateY(-2px); border-color: rgba(141,99,255,.72); background: linear-gradient(150deg, rgba(37,45,98,.9), rgba(10,21,51,.94)); box-shadow: 0 0 24px rgba(141,99,255,.12); }
+html[data-theme="mecha"] .quick-action-icon { display: grid; width: 42px; height: 42px; place-items: center; border: 1px solid rgba(141,99,255,.44); border-radius: 7px; background: rgba(141,99,255,.095); color: var(--v2-violet-bright); }
+html[data-theme="mecha"] .quick-action-icon .icon { width: 22px; height: 22px; }
+html[data-theme="mecha"] .quick-action-copy { display: grid; min-width: 0; gap: 3px; }
+html[data-theme="mecha"] .quick-action-copy strong { overflow: hidden; color: #fff; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+html[data-theme="mecha"] .quick-action-copy small { overflow: hidden; color: #8997b3; font-size: 9.5px; text-overflow: ellipsis; white-space: nowrap; }
+html[data-theme="mecha"] .quick-action-arrow { color: #7d91ff; font-size: 18px; transition: transform .18s ease; }
+html[data-theme="mecha"] .quick-action-card:hover .quick-action-arrow { transform: translateX(3px); }
+html[data-theme="mecha"] .mecha-operator-figure { right: 23px; bottom: -5px; width: 122px; opacity: .78; filter: drop-shadow(0 0 17px rgba(141,99,255,.17)); animation: v2-float 4.4s ease-in-out infinite; }
+html[data-theme="mecha"] .mecha-unit-silhouette { opacity: .025; }
+
+/* API / Models / History / System workspaces */
+html[data-theme="mecha"] .page-actions { margin-bottom: 10px; }
+html[data-theme="mecha"] .inline-note { min-height: 38px; border-color: rgba(55,199,255,.22); background: rgba(6,22,43,.65); color: #9fb0cb; }
+html[data-theme="mecha"] .split-workspace { gap: 11px; }
+html[data-theme="mecha"] .table-card { padding: 0; border-color: rgba(71,122,200,.3); }
+html[data-theme="mecha"] .table-card > .section-header { padding: 16px 17px 0; }
+html[data-theme="mecha"] .table-toolbar { gap: 10px; padding: 11px 16px; border-color: rgba(71,122,200,.22); background: rgba(3,9,23,.46); }
+html[data-theme="mecha"] .resource-list { background: rgba(2,7,19,.32); }
+html[data-theme="mecha"] .resource-list-item { min-height: 68px; padding: 10px 13px; border-bottom-color: rgba(71,122,200,.2); }
+html[data-theme="mecha"] .resource-list-item:hover { background: linear-gradient(90deg, rgba(55,199,255,.055), rgba(141,99,255,.03)); }
+html[data-theme="mecha"] .resource-list-item.active { background: linear-gradient(90deg, rgba(141,99,255,.16), rgba(55,199,255,.045)); box-shadow: inset 3px 0 var(--v2-violet), 0 0 18px rgba(141,99,255,.05); }
+html[data-theme="mecha"] .resource-item-main > strong { color: #edf2ff; font-size: 12.5px; }
+html[data-theme="mecha"] .resource-item-main > small,
+html[data-theme="mecha"] .resource-item-time { color: #7787a5; }
+html[data-theme="mecha"] .resource-item-meta { color: #a1adc4; }
+html[data-theme="mecha"] .api-key-resource-item { min-height: 76px; }
+html[data-theme="mecha"] .api-overview-header { padding: 15px 16px 12px; border-color: rgba(71,122,200,.22); }
+html[data-theme="mecha"] .api-overview-content { padding: 13px 15px; }
+html[data-theme="mecha"] .api-overview-facts > div,
+html[data-theme="mecha"] .usage-grid > div,
+html[data-theme="mecha"] .history-overview-item,
+html[data-theme="mecha"] .history-storage-card { border-color: rgba(71,122,200,.25); background: rgba(3,9,23,.45); }
+html[data-theme="mecha"] .permission-chip-list span { border-color: rgba(141,99,255,.27); background: rgba(141,99,255,.065); color: #b8c3da; }
+
+html[data-theme="mecha"] .current-model-card { border-color: rgba(141,99,255,.38); background: radial-gradient(circle at 6% 50%, rgba(141,99,255,.11), transparent 22%), linear-gradient(145deg, rgba(10,23,50,.94), rgba(5,13,31,.96)); }
+html[data-theme="mecha"] .model-catalog-card .model-row { min-height: 60px; padding: 9px 13px; border-bottom-color: rgba(71,122,200,.2); }
+html[data-theme="mecha"] .model-row:hover { background: linear-gradient(90deg, rgba(55,199,255,.05), rgba(141,99,255,.03)); }
+html[data-theme="mecha"] .model-row h3 { color: #eef3ff; font-size: 13px; }
+html[data-theme="mecha"] .model-row code { color: #7989a8; }
+html[data-theme="mecha"] #modelTesterPanel { border-color: rgba(141,99,255,.34); background: linear-gradient(150deg, rgba(9,21,47,.97), rgba(4,11,28,.98)); }
+html[data-theme="mecha"] .mecha-simulation-drone { top: 12px; right: 80px; opacity: .5; animation: v2-float 4s ease-in-out infinite; }
+html[data-theme="mecha"] .response-grid pre,
+html[data-theme="mecha"] .history-content-pane,
+html[data-theme="mecha"] .log-output,
+html[data-theme="mecha"] .code-block,
+html[data-theme="mecha"] .config-editor { border-color: rgba(71,122,200,.3); background: rgba(1,6,17,.8); color: #d6e5ff; }
+html[data-theme="mecha"] #testerReasoning { border-color: rgba(141,99,255,.38); }
+html[data-theme="mecha"] #testerOutput { border-color: rgba(55,199,255,.35); }
+
+html[data-theme="mecha"] .history-metric-grid .metric-card { min-height: 82px; }
+html[data-theme="mecha"] .history-metric-grid .metric-icon { width: 36px; height: 36px; background-size: 27px; }
+html[data-theme="mecha"] .history-toolbar { gap: 8px; }
+html[data-theme="mecha"] .history-detail-tabs { border-color: rgba(71,122,200,.22); background: rgba(3,9,23,.5); }
+html[data-theme="mecha"] .drawer-tabs button { color: #8998b5; font-size: 10.5px; text-transform: uppercase; }
+html[data-theme="mecha"] .drawer-tabs button.active { color: #71d6ff; box-shadow: inset 0 -2px var(--v2-cyan), 0 0 13px rgba(55,199,255,.06); }
+html[data-theme="mecha"] .history-event,
+html[data-theme="mecha"] .history-attempt { border-color: rgba(71,122,200,.24); background: rgba(3,9,23,.48); }
+
+html[data-theme="mecha"] .system-grid { gap: 10px; }
+html[data-theme="mecha"] .definition-list > div { min-height: 44px; padding: 7px 3px; border-bottom-color: rgba(71,122,200,.2); }
+html[data-theme="mecha"] .definition-list dt { color: #a9b5cc; font-size: 11.5px; }
+html[data-theme="mecha"] .definition-list dd { color: #e3ebfa; font-size: 11px; }
+html[data-theme="mecha"] .maintenance-card { gap: 16px; }
+html[data-theme="mecha"] .maintenance-button { min-height: 74px; padding: 10px; border-color: rgba(71,122,200,.28); background: rgba(3,9,23,.44); }
+html[data-theme="mecha"] .maintenance-button:hover { border-color: rgba(55,199,255,.48); background: rgba(12,30,62,.66); }
+html[data-theme="mecha"] .maintenance-button > .icon { width: 32px; height: 32px; padding: 7px; border-color: rgba(141,99,255,.32); background: rgba(141,99,255,.08); color: #a981ff; }
+html[data-theme="mecha"] .maintenance-button strong { font-size: 12px; }
+html[data-theme="mecha"] .maintenance-button small { font-size: 9.5px; }
+html[data-theme="mecha"] .data-table th { height: 40px; background: rgba(5,14,32,.96); color: #70cfff; font-size: 9px; }
+html[data-theme="mecha"] .data-table td { height: 56px; padding: 10px 14px; border-bottom-color: rgba(71,122,200,.2); color: #aeb9cf; }
+html[data-theme="mecha"] .data-table tbody tr:hover { background: linear-gradient(90deg, rgba(55,199,255,.045), rgba(141,99,255,.025)); }
+
+/* Menus, toasts and windows */
+html[data-theme="mecha"] .menu-popover { border-color: rgba(55,199,255,.3); background: rgba(6,15,35,.98); box-shadow: 0 22px 55px rgba(0,3,15,.6), 0 0 26px rgba(55,199,255,.055); animation: v2-popover-enter .18s ease-out; }
+html[data-theme="mecha"] .menu-popover button:hover { background: linear-gradient(90deg, rgba(55,199,255,.08), rgba(141,99,255,.05)); }
+html[data-theme="mecha"] .toast { border-color: rgba(55,199,255,.34); background: rgba(6,15,35,.97); box-shadow: 0 18px 48px rgba(0,3,15,.56), 0 0 18px rgba(55,199,255,.07); animation: v2-toast-enter .3s cubic-bezier(.2,.8,.2,1); }
+
+html[data-theme="mecha"] dialog,
+html[data-theme="mecha"] .modal,
+html[data-theme="mecha"] .drawer,
+html[data-theme="mecha"] .confirm-dialog { background: transparent; border: 0; box-shadow: none; overflow: visible; }
+html[data-theme="mecha"] dialog::backdrop,
+html[data-theme="mecha"] .modal::backdrop,
+html[data-theme="mecha"] .drawer::backdrop,
+html[data-theme="mecha"] .confirm-dialog::backdrop { background: rgba(0,4,16,.76); backdrop-filter: blur(9px) saturate(.8); animation: v2-backdrop-enter .24s ease-out; }
+
+html[data-theme="mecha"] .modal-shell,
+html[data-theme="mecha"] .drawer-shell,
+html[data-theme="mecha"] .confirm-dialog form {
+  position: relative;
+  border: 1px solid rgba(81,145,226,.62);
+  border-radius: 12px;
+  background:
+    linear-gradient(150deg, rgba(9,22,49,.985), rgba(3,10,26,.995)),
+    url('/dashboard/assets/mecha/backgrounds/bg-panel-noise.png');
+  box-shadow: 0 34px 110px rgba(0,2,12,.72), 0 0 42px rgba(141,99,255,.1), inset 0 1px rgba(208,229,255,.045);
+  clip-path: polygon(0 0, calc(100% - 13px) 0, 100% 13px, 100% 100%, 13px 100%, 0 calc(100% - 13px));
+  animation: v2-modal-enter .32s cubic-bezier(.16,.84,.2,1);
+}
+html[data-theme="mecha"] .modal-shell::before,
+html[data-theme="mecha"] .drawer-shell::before,
+html[data-theme="mecha"] .confirm-dialog form::before {
+  position: absolute;
+  inset: -1px;
+  z-index: 0;
+  border: 0;
+  background:
+    linear-gradient(90deg, var(--v2-cyan), transparent 18%) top left/42% 1px no-repeat,
+    linear-gradient(180deg, var(--v2-cyan), transparent 24%) top left/1px 42% no-repeat,
+    linear-gradient(270deg, var(--v2-violet-bright), transparent 18%) bottom right/42% 1px no-repeat,
+    linear-gradient(0deg, var(--v2-violet-bright), transparent 24%) bottom right/1px 42% no-repeat;
+  content: "";
+  opacity: .95;
+  pointer-events: none;
+  filter: drop-shadow(0 0 5px rgba(55,199,255,.22));
+  animation: v2-window-energy 3.4s ease-in-out infinite;
+}
+html[data-theme="mecha"] .modal-shell::after,
+html[data-theme="mecha"] .drawer-shell::after,
+html[data-theme="mecha"] .confirm-dialog form::after {
+  position: absolute;
+  inset: 4px;
+  z-index: 0;
+  border: 1px solid rgba(141,99,255,.12);
+  border-radius: 8px;
+  content: "";
+  pointer-events: none;
+}
+html[data-theme="mecha"] .modal-shell > *,
+html[data-theme="mecha"] .drawer-shell > *,
+html[data-theme="mecha"] .confirm-dialog form > * { position: relative; z-index: 1; }
+html[data-theme="mecha"] .drawer-shell { border-radius: 0; animation-name: v2-drawer-enter; }
+
+html[data-theme="mecha"] .modal-header,
+html[data-theme="mecha"] .drawer-header { padding: 15px 17px 13px; border-bottom-color: rgba(71,122,200,.28); background: linear-gradient(90deg, rgba(11,27,59,.8), rgba(7,17,39,.38)); }
+html[data-theme="mecha"] .modal-header h2,
+html[data-theme="mecha"] .drawer-header h2 { margin-bottom: 3px; color: #fff; font-size: 18px; }
+html[data-theme="mecha"] .modal-header p { color: #91a0bd; font-size: 10.5px; }
+html[data-theme="mecha"] .modal-body,
+html[data-theme="mecha"] .drawer-body { padding: 14px 17px; }
+html[data-theme="mecha"] .modal-footer,
+html[data-theme="mecha"] .drawer-footer,
+html[data-theme="mecha"] .split-detail-footer { border-top-color: rgba(71,122,200,.26); background: rgba(3,9,23,.48); }
+html[data-theme="mecha"] .advanced-section { border-color: rgba(71,122,200,.3); background: rgba(3,9,23,.38); }
+html[data-theme="mecha"] .advanced-section > summary { color: #e8eefb; }
+html[data-theme="mecha"] .advanced-content { border-top-color: rgba(71,122,200,.24); }
+html[data-theme="mecha"] .permission-grid .check,
+html[data-theme="mecha"] .model-checkboxes .check,
+html[data-theme="mecha"] .card-check { border-color: rgba(71,122,200,.3); background: rgba(8,18,42,.72); transition: border-color .16s ease, background .16s ease, transform .16s ease; }
+html[data-theme="mecha"] .permission-grid .check:hover,
+html[data-theme="mecha"] .model-checkboxes .check:hover { transform: translateY(-1px); border-color: rgba(141,99,255,.5); background: rgba(21,29,69,.72); }
+html[data-theme="mecha"] .switch-track { border-color: rgba(75,115,179,.55); background: rgba(3,9,23,.9); }
+html[data-theme="mecha"] .switch-control input:checked + .switch-track { border-color: rgba(141,99,255,.78); background: rgba(141,99,255,.25); box-shadow: 0 0 12px rgba(141,99,255,.12); }
+html[data-theme="mecha"] .switch-control input:checked + .switch-track::after { background: #b08aff; box-shadow: 0 0 9px rgba(141,99,255,.58); }
+
+html[data-theme="mecha"] .api-key-create-modal { width: min(1060px, calc(100vw - 24px)); }
+html[data-theme="mecha"] .api-key-create-modal .modal-header { padding-block: 12px; }
+html[data-theme="mecha"] .api-key-create-modal .modal-body { padding: 11px 15px 12px; }
+html[data-theme="mecha"] .api-key-create-modal .modal-footer { padding: 10px 15px; }
+html[data-theme="mecha"] .create-key-description textarea { height: 40px; min-height: 40px; }
+html[data-theme="mecha"] .create-key-advanced { margin-top: 9px; }
+html[data-theme="mecha"] .create-key-advanced > summary { padding: 8px 11px; }
+html[data-theme="mecha"] .create-key-advanced-content { padding: 9px 11px 11px; }
+html[data-theme="mecha"] .create-key-permissions { margin-top: 9px; }
+html[data-theme="mecha"] .create-key-permission-grid .check { min-height: 42px; }
+
+html[data-theme="mecha"] .empty-state { border-color: rgba(71,122,200,.32); background: linear-gradient(90deg, rgba(3,9,23,.82), rgba(10,23,50,.52)); color: #8492ad; }
+html[data-theme="mecha"] .empty-state::before { opacity: .74; }
+
+/* Desktop single-viewport density */
+@media (min-width: 921px) and (min-height: 680px) {
+  html[data-theme="mecha"] .main-shell { overflow: hidden; }
+  html[data-theme="mecha"] .content { height: calc(100vh - var(--topbar-height)); min-height: 0; padding-top: 14px; padding-bottom: 14px; }
+  html[data-theme="mecha"] .view.active { height: 100%; min-height: 0; }
+  html[data-theme="mecha"] [data-view-panel="dashboard"].active { display: grid; grid-template-rows: auto minmax(0,1fr) auto; }
+  html[data-theme="mecha"] [data-view-panel="dashboard"] .dashboard-grid { min-height: 0; }
+  html[data-theme="mecha"] [data-view-panel="dashboard"] .dashboard-grid > .section-card { display: flex; min-height: 0; flex-direction: column; overflow: hidden; }
+  html[data-theme="mecha"] [data-view-panel="dashboard"] .status-list,
+  html[data-theme="mecha"] [data-view-panel="dashboard"] .event-list { min-height: 0; flex: 1 1 auto; overflow: auto; }
+  html[data-theme="mecha"] .metric-card { min-height: 86px; height: 86px; padding: 10px 13px; }
+  html[data-theme="mecha"] .metric-icon { width: 38px; height: 38px; background-size: 29px; }
+  html[data-theme="mecha"] .quick-actions { min-height: 108px; padding-block: 11px; }
+  html[data-theme="mecha"] .quick-action-icon { width: 36px; height: 36px; }
+  html[data-theme="mecha"] .quick-action-icon .icon { width: 19px; height: 19px; }
+  html[data-theme="mecha"] .mecha-operator-figure { height: 104px; width: auto; }
+
+  html[data-theme="mecha"] [data-view-panel="api"].active,
+  html[data-theme="mecha"] [data-view-panel="models"].active,
+  html[data-theme="mecha"] [data-view-panel="history"].active,
+  html[data-theme="mecha"] [data-view-panel="system"].active {
+    display: flex;
+    min-height: 0;
+    flex-direction: column;
+    gap: 10px;
+    overflow: hidden;
+  }
+  html[data-theme="mecha"] [data-view-panel="api"].active > .page-actions,
+  html[data-theme="mecha"] [data-view-panel="history"].active > .metric-grid,
+  html[data-theme="mecha"] [data-view-panel="history"].active > .page-actions { flex: 0 0 auto; }
+  html[data-theme="mecha"] .api-workspace,
+  html[data-theme="mecha"] .models-workspace,
+  html[data-theme="mecha"] .history-workspace,
+  html[data-theme="mecha"] .system-workspace {
+    min-height: 0;
+    height: auto;
+    flex: 1 1 auto;
+  }
+  html[data-theme="mecha"] .history-metric-grid .metric-card { min-height: 74px; height: 74px; }
+}
+
+@media (max-width: 1180px) {
+  html[data-theme="mecha"] .content { width: min(calc(100% - 26px), 1320px); }
+  html[data-theme="mecha"] .quick-actions { grid-template-columns: 145px minmax(0,1fr); padding-right: 112px; }
+  html[data-theme="mecha"] .mecha-operator-figure { right: 8px; width: 104px; }
+  html[data-theme="mecha"] .quick-action-card { grid-template-columns: 36px minmax(0,1fr); }
+  html[data-theme="mecha"] .quick-action-arrow { display: none; }
+}
+
+@media (max-width: 920px), (max-height: 679px) {
+  html[data-theme="mecha"] .main-shell { overflow-y: auto; }
+  html[data-theme="mecha"] .content { height: auto; min-height: calc(100vh - var(--topbar-height)); padding-top: 16px; padding-bottom: 32px; }
+  html[data-theme="mecha"] .metric-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  html[data-theme="mecha"] .dashboard-grid { grid-template-columns: 1fr; }
+  html[data-theme="mecha"] .quick-actions { grid-template-columns: 1fr; padding-right: 116px; }
+  html[data-theme="mecha"] .quick-actions-header { display: flex; align-items: end; justify-content: space-between; gap: 12px; }
+  html[data-theme="mecha"] .quick-action-grid { grid-template-columns: repeat(3,minmax(0,1fr)); }
+  html[data-theme="mecha"] .quick-action-card { grid-template-columns: 34px minmax(0,1fr); padding: 10px; }
+  html[data-theme="mecha"] .quick-action-icon { width: 34px; height: 34px; }
+  html[data-theme="mecha"] .quick-action-copy small { display: none; }
+  html[data-theme="mecha"] .api-workspace,
+  html[data-theme="mecha"] .models-workspace,
+  html[data-theme="mecha"] .history-workspace,
+  html[data-theme="mecha"] .system-workspace { height: auto; }
+}
+
+@media (max-width: 760px) {
+  html[data-theme="mecha"] { --topbar-height: 64px; }
+  html[data-theme="mecha"] .sidebar { width: min(84vw, 274px); }
+  html[data-theme="mecha"] .topbar { min-height: var(--topbar-height); padding-inline: 11px; gap: 8px; }
+  html[data-theme="mecha"] .topbar-title h1 { font-size: 19px; }
+  html[data-theme="mecha"] .theme-toggle { min-width: 40px; }
+  html[data-theme="mecha"] .content { width: min(calc(100% - 20px), 1320px); }
+  html[data-theme="mecha"] .section-card { padding: 15px; }
+  html[data-theme="mecha"] .metric-card { min-height: 86px; height: auto; grid-template-columns: 34px minmax(0,1fr); padding: 11px; }
+  html[data-theme="mecha"] .metric-icon { width: 34px; height: 34px; background-size: 26px; }
+  html[data-theme="mecha"] .metric-card strong { font-size: 16px; }
+  html[data-theme="mecha"] .quick-actions { padding: 14px; }
+  html[data-theme="mecha"] .quick-actions::after,
+  html[data-theme="mecha"] .mecha-operator-figure { display: none; }
+  html[data-theme="mecha"] .quick-action-grid { grid-template-columns: 1fr; }
+  html[data-theme="mecha"] .quick-action-card { min-height: 56px; }
+  html[data-theme="mecha"] .quick-action-copy small { display: block; }
+  html[data-theme="mecha"] .modal-shell,
+  html[data-theme="mecha"] .drawer-shell { clip-path: polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 8px 100%, 0 calc(100% - 8px)); }
+  html[data-theme="mecha"] .modal-body,
+  html[data-theme="mecha"] .drawer-body { padding: 13px 14px; }
+  html[data-theme="mecha"] .modal-header,
+  html[data-theme="mecha"] .drawer-header { padding: 13px 14px 11px; }
+  html[data-theme="mecha"] .modal-footer,
+  html[data-theme="mecha"] .drawer-footer { padding: 10px 14px; }
+  html[data-theme="mecha"] .modal-header h2,
+  html[data-theme="mecha"] .drawer-header h2 { font-size: 16px; }
+  html[data-theme="mecha"] .api-key-create-modal .modal-body { overflow: auto; }
+}
+
+@media (max-width: 470px) {
+  html[data-theme="mecha"] .metric-grid { grid-template-columns: 1fr 1fr; gap: 8px; }
+  html[data-theme="mecha"] .metric-card { min-height: 92px; grid-template-columns: 1fr; align-content: center; gap: 7px; }
+  html[data-theme="mecha"] .metric-icon { display: none; }
+  html[data-theme="mecha"] .metric-card strong { font-size: 15px; white-space: normal; }
+  html[data-theme="mecha"] .metric-card small { font-size: 9px; }
+  html[data-theme="mecha"] .section-header { gap: 10px; }
+  html[data-theme="mecha"] .status-list button,
+  html[data-theme="mecha"] .status-list.static-list > div { grid-template-columns: minmax(0,1fr) 122px; gap: 8px; padding-inline: 6px; }
+  html[data-theme="mecha"] .status-list button > span:last-child,
+  html[data-theme="mecha"] .status-list.static-list > div > span:last-child { width: 122px; }
+  html[data-theme="mecha"] .quick-actions-header { display: grid; }
+  html[data-theme="mecha"] .topbar-actions { gap: 5px; }
+  html[data-theme="mecha"] .mecha-mobile-avatar { width: 24px; height: 24px; flex-basis: 24px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-theme="mecha"] *,
+  html[data-theme="mecha"] *::before,
+  html[data-theme="mecha"] *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}
+
+@keyframes v2-grid-drift { to { background-position: 52px 52px, 52px 52px, 96px 96px; } }
+@keyframes v2-view-enter { from { opacity: 0; transform: translateY(7px) scale(.997); } to { opacity: 1; transform: none; } }
+@keyframes v2-nav-scan { 0%,100% { opacity: .45; transform: translateY(-5px); } 50% { opacity: 1; transform: translateY(5px); } }
+@keyframes v2-edge-sweep { from { background-position: 150% 0; } to { background-position: -60% 0; } }
+@keyframes v2-status-pulse { 0%,100% { opacity: .72; transform: scale(.92); } 50% { opacity: 1; transform: scale(1.08); } }
+@keyframes v2-float { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-5px); } }
+@keyframes v2-popover-enter { from { opacity: 0; transform: translateY(-6px) scale(.98); } to { opacity: 1; transform: none; } }
+@keyframes v2-toast-enter { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: none; } }
+@keyframes v2-backdrop-enter { from { opacity: 0; } to { opacity: 1; } }
+@keyframes v2-modal-enter { from { opacity: 0; transform: translateY(14px) scale(.975); } to { opacity: 1; transform: none; } }
+@keyframes v2-drawer-enter { from { opacity: 0; transform: translateX(26px); } to { opacity: 1; transform: none; } }
+@keyframes v2-window-energy { 0%,100% { opacity: .68; filter: drop-shadow(0 0 4px rgba(55,199,255,.18)); } 50% { opacity: 1; filter: drop-shadow(0 0 9px rgba(141,99,255,.28)); } }
+
+/* Motion-controller hooks */
+html[data-theme="mecha"] .v2-ambient-field {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+  opacity: .34;
+}
+html[data-theme="mecha"] .v2-ambient-field span {
+  position: absolute;
+  left: var(--v2-particle-x);
+  top: var(--v2-particle-y);
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: var(--v2-cyan);
+  box-shadow: 0 0 9px rgba(55,199,255,.8);
+  opacity: .16;
+  animation: v2-particle-rise var(--v2-particle-duration) linear var(--v2-particle-delay) infinite;
+}
+html[data-theme="mecha"] .app-shell,
+html[data-theme="mecha"] .login-shell { position: relative; z-index: 1; }
+html[data-theme="mecha"] .control-deck-v2-ready .metric-card,
+html[data-theme="mecha"] .control-deck-v2-ready .section-card {
+  opacity: 0;
+  transform: translateY(5px);
+}
+html[data-theme="mecha"] .control-deck-v2-ready .v2-revealed {
+  opacity: 1;
+  transform: none;
+  transition: opacity .34s ease var(--v2-reveal-delay, 0ms), transform .34s ease var(--v2-reveal-delay, 0ms), border-color .18s ease, box-shadow .18s ease;
+}
+html[data-theme="mecha"] .v2-value-updated { animation: v2-value-settle .42s cubic-bezier(.2,.8,.2,1); }
+html[data-theme="mecha"] .v2-pointer-active::after {
+  opacity: .72;
+  background:
+    radial-gradient(180px circle at var(--v2-pointer-x) var(--v2-pointer-y), rgba(55,199,255,.09), transparent 58%),
+    linear-gradient(105deg, transparent 36%, rgba(55,199,255,.06) 49%, rgba(141,99,255,.06) 52%, transparent 64%);
+  animation: none;
+}
+@keyframes v2-particle-rise {
+  0% { transform: translate3d(0, 20px, 0); opacity: 0; }
+  18% { opacity: .24; }
+  75% { opacity: .12; }
+  100% { transform: translate3d(18px, -110px, 0); opacity: 0; }
+}
+@keyframes v2-value-settle {
+  0% { opacity: .4; transform: translateY(4px); filter: blur(1px); }
+  55% { opacity: 1; transform: translateY(-1px); filter: none; text-shadow: 0 0 16px rgba(141,99,255,.32); }
+  100% { transform: none; text-shadow: inherit; }
+}
+
+
+/* Visual-review polish — live screenshots, 2026-07-24.
+   Improve content contrast, right-size windows, and remove responsive dead space. */
+html[data-theme="mecha"] {
+  --v2-canvas: #040a18;
+  --v2-canvas-2: #07142b;
+  --v2-sidebar: rgba(5, 12, 29, .97);
+  --v2-header: rgba(5, 12, 28, .92);
+  --v2-panel: rgba(8, 20, 44, .94);
+  --v2-panel-strong: rgba(10, 25, 52, .98);
+  --v2-panel-soft: rgba(12, 27, 55, .78);
+  --v2-panel-hover: rgba(19, 39, 78, .88);
+  --v2-line: rgba(86, 137, 209, .36);
+  --v2-line-strong: rgba(91, 163, 244, .58);
+  --v2-muted: #bac6dc;
+  --v2-faint: #8d9dbc;
+}
+
+html[data-theme="mecha"] body::before { opacity: .12; }
+html[data-theme="mecha"] body::after { opacity: .025; }
+
+html[data-theme="mecha"] .topbar-title p,
+html[data-theme="mecha"] .section-header p,
+html[data-theme="mecha"] .modal-header p,
+html[data-theme="mecha"] .resource-item-main > small,
+html[data-theme="mecha"] .resource-item-time,
+html[data-theme="mecha"] .metric-card small,
+html[data-theme="mecha"] .quick-action-copy small,
+html[data-theme="mecha"] .event-time,
+html[data-theme="mecha"] .event-message,
+html[data-theme="mecha"] .model-row code { color: #9cabc5; }
+
+html[data-theme="mecha"] .eyebrow,
+html[data-theme="mecha"] .metric-label,
+html[data-theme="mecha"] .response-label {
+  font-size: 9.5px;
+  letter-spacing: .085em;
+}
+
+html[data-theme="mecha"] .section-card,
+html[data-theme="mecha"] .metric-card,
+html[data-theme="mecha"] .current-model-card {
+  box-shadow: 0 14px 32px rgba(0, 4, 18, .22), inset 0 1px rgba(193, 223, 255, .04);
+}
+
+html[data-theme="mecha"] .empty-state {
+  min-height: 84px;
+  padding: 18px;
+  color: #99a9c5;
+}
+
+html[data-theme="mecha"] .button.danger {
+  background: linear-gradient(180deg, rgba(80, 27, 48, .78), rgba(42, 16, 31, .92));
+  box-shadow: none;
+}
+
+/* Window widths follow their information density instead of sharing one large size. */
+html[data-theme="mecha"] .api-key-create-modal { width: min(940px, calc(100vw - 24px)); }
+html[data-theme="mecha"] #apiKeySecretDialog { width: min(560px, calc(100vw - 20px)); }
+html[data-theme="mecha"] #apiKeyVerifyDialog { width: min(860px, calc(100vw - 20px)); }
+html[data-theme="mecha"] #historySettingsDialog { width: min(820px, calc(100vw - 20px)); }
+html[data-theme="mecha"] #historySettingsDialog .modal-shell {
+  height: auto;
+  max-height: calc(100vh - 20px);
+}
+html[data-theme="mecha"] #diagnosticsDialog { width: min(720px, calc(100vw - 20px)); }
+html[data-theme="mecha"] #logsDialog,
+html[data-theme="mecha"] #configDialog { width: min(920px, calc(100vw - 20px)); }
+
+html[data-theme="mecha"] #diagnosticsDialog .empty-state { min-height: 150px; }
+html[data-theme="mecha"] .history-settings-body { gap: 13px; }
+html[data-theme="mecha"] .history-storage-card { min-height: 68px; padding: 10px 11px; }
+
+@media (max-width: 920px), (max-height: 679px) {
+  html[data-theme="mecha"] .api-overview-pane { min-height: 360px; }
+  html[data-theme="mecha"] .tester-panel.split-detail-pane { min-height: 600px; }
+  html[data-theme="mecha"] .history-inline-detail { min-height: 480px; }
+  html[data-theme="mecha"] .history-inline-detail .history-detail-body { min-height: 300px; }
+  html[data-theme="mecha"] .proxy-pool-pane { min-height: 360px; }
+}
+
+@media (max-width: 760px) {
+  html[data-theme="mecha"] #logsDialog,
+  html[data-theme="mecha"] #configDialog { width: calc(100vw - 20px); }
+  html[data-theme="mecha"] #logsDialog .modal-shell { height: min(720px, calc(100vh - 20px)); }
+  html[data-theme="mecha"] #configDialog .modal-shell { height: min(760px, calc(100vh - 20px)); }
+  html[data-theme="mecha"] .modal-footer,
+  html[data-theme="mecha"] .drawer-footer { flex-wrap: wrap; }
+  html[data-theme="mecha"] .log-output {
+    font-size: 11.5px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+}
+
+@media (max-width: 470px) {
+  html[data-theme="mecha"] .quick-action-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 7px;
+  }
+  html[data-theme="mecha"] .quick-action-card {
+    min-height: 76px;
+    grid-template-columns: 1fr;
+    justify-items: center;
+    gap: 6px;
+    padding: 8px 5px;
+    text-align: center;
+  }
+  html[data-theme="mecha"] .quick-action-icon { width: 30px; height: 30px; }
+  html[data-theme="mecha"] .quick-action-icon .icon { width: 17px; height: 17px; }
+  html[data-theme="mecha"] .quick-action-copy strong {
+    font-size: 10.5px;
+    line-height: 1.2;
+    white-space: normal;
+  }
+  html[data-theme="mecha"] .quick-action-copy small,
+  html[data-theme="mecha"] .quick-action-arrow { display: none; }
+  html[data-theme="mecha"] .api-overview-pane { min-height: 320px; }
+  html[data-theme="mecha"] .tester-panel.split-detail-pane { min-height: 560px; }
+  html[data-theme="mecha"] .history-inline-detail { min-height: 430px; }
+  html[data-theme="mecha"] .history-inline-detail .history-detail-body { min-height: 270px; }
+  html[data-theme="mecha"] .proxy-pool-pane { min-height: 320px; }
+}
+
+
+/* Keep the mobile drawer above its backdrop. The sidebar's z-index must
+   participate in the root stacking context, not be trapped inside app-shell. */
+html[data-theme="mecha"] .app-shell { z-index: auto; }
+html[data-theme="mecha"] .main-shell { position: relative; z-index: 1; }
+
+
+/* Animate the top-layer window itself, not its scroll container. This keeps
+   scroll geometry stable from the first frame while preserving modal motion. */
+html[data-theme="mecha"] .modal-shell,
+html[data-theme="mecha"] .drawer-shell,
+html[data-theme="mecha"] .confirm-dialog form { animation: none; }
+html[data-theme="mecha"] .modal[open],
+html[data-theme="mecha"] .confirm-dialog[open] {
+  animation: v2-modal-enter .32s cubic-bezier(.16, .84, .2, 1);
+}
+html[data-theme="mecha"] .drawer[open] {
+  animation: v2-drawer-enter .32s cubic-bezier(.16, .84, .2, 1);
+}
+
+
+/* Lock outer window scrolling while allowing the animated glow to render
+   beyond the dialog edge through the overflow clip margin. */
+html[data-theme="mecha"] dialog,
+html[data-theme="mecha"] .modal,
+html[data-theme="mecha"] .drawer,
+html[data-theme="mecha"] .confirm-dialog {
+  overflow: clip;
+  overflow-clip-margin: 48px;
+}
+
+
+/* Visual-review pass 3 — screenshot-driven density and window polish.
+   Keeps touch targets and internal scrolling while reducing dead space. */
+html[data-theme="mecha"] {
+  --topbar-height: 70px;
+  --v2-panel-shadow: 0 12px 28px rgba(0, 4, 18, .2), inset 0 1px rgba(193, 223, 255, .035);
+}
+
+html[data-theme="mecha"] body::before { opacity: .095; }
+html[data-theme="mecha"] body::after { opacity: .018; }
+html[data-theme="mecha"] .v2-ambient-field { opacity: .22; }
+
+html[data-theme="mecha"] .topbar {
+  padding-block: 8px;
+  box-shadow: 0 9px 24px rgba(0, 4, 18, .18), inset 0 -1px rgba(141, 99, 255, .075);
+}
+html[data-theme="mecha"] .topbar-title p { margin-top: 3px; }
+html[data-theme="mecha"] .content {
+  width: min(calc(100% - 28px), 1320px);
+  padding-top: 14px;
+  padding-bottom: 20px;
+}
+html[data-theme="mecha"] .section-card { padding: 14px 15px; }
+html[data-theme="mecha"] .section-header { margin-bottom: 10px; }
+html[data-theme="mecha"] .section-header p { margin-top: 3px; }
+html[data-theme="mecha"] .section-card::before,
+html[data-theme="mecha"] .metric-card::before,
+html[data-theme="mecha"] .login-panel::before { opacity: .4; }
+
+html[data-theme="mecha"] .metric-grid { gap: 9px; }
+html[data-theme="mecha"] .dashboard-grid { gap: 9px; margin-top: 9px; }
+html[data-theme="mecha"] .metric-card {
+  min-height: 94px;
+  grid-template-columns: 40px minmax(0, 1fr);
+  gap: 11px;
+  padding: 12px 13px;
+}
+html[data-theme="mecha"] .metric-icon {
+  width: 40px;
+  height: 40px;
+  background-size: 29px;
+  box-shadow: inset 0 0 14px rgba(141, 99, 255, .055);
+}
+html[data-theme="mecha"] .status-list button,
+html[data-theme="mecha"] .status-list.static-list > div { min-height: 44px; }
+html[data-theme="mecha"] .event-item { min-height: 43px; }
+
+html[data-theme="mecha"] .quick-actions {
+  min-height: 100px;
+  grid-template-columns: 150px minmax(0, 1fr);
+  gap: 12px;
+  margin-top: 9px;
+  padding: 10px 112px 10px 14px;
+}
+html[data-theme="mecha"] .quick-action-grid { gap: 8px; }
+html[data-theme="mecha"] .quick-action-card {
+  min-height: 64px;
+  grid-template-columns: 35px minmax(0, 1fr) auto;
+  gap: 8px;
+  padding: 9px 10px;
+}
+html[data-theme="mecha"] .quick-action-icon { width: 34px; height: 34px; }
+html[data-theme="mecha"] .quick-action-icon .icon { width: 18px; height: 18px; }
+html[data-theme="mecha"] .mecha-operator-figure {
+  right: 14px;
+  width: 92px;
+  opacity: .58;
+}
+
+html[data-theme="mecha"] .table-card > .section-header { padding: 13px 14px 0; }
+html[data-theme="mecha"] .table-toolbar { padding: 9px 13px; }
+html[data-theme="mecha"] .resource-list-item { min-height: 62px; padding: 8px 11px; }
+html[data-theme="mecha"] .api-key-resource-item { min-height: 68px; }
+html[data-theme="mecha"] .model-catalog-card .model-row { min-height: 54px; padding: 7px 11px; }
+html[data-theme="mecha"] .definition-list > div { min-height: 40px; padding-block: 6px; }
+html[data-theme="mecha"] .maintenance-button { min-height: 66px; }
+html[data-theme="mecha"] .data-table th { height: 36px; }
+html[data-theme="mecha"] .data-table td { height: 50px; padding: 8px 12px; }
+
+html[data-theme="mecha"] .modal-shell,
+html[data-theme="mecha"] .drawer-shell,
+html[data-theme="mecha"] .confirm-dialog form {
+  box-shadow: 0 28px 84px rgba(0, 2, 12, .68), 0 0 28px rgba(141, 99, 255, .075), inset 0 1px rgba(208, 229, 255, .04);
+}
+html[data-theme="mecha"] .modal-shell::before,
+html[data-theme="mecha"] .drawer-shell::before,
+html[data-theme="mecha"] .confirm-dialog form::before {
+  opacity: .72;
+  filter: drop-shadow(0 0 3px rgba(55, 199, 255, .16));
+}
+html[data-theme="mecha"] .modal-shell::after,
+html[data-theme="mecha"] .drawer-shell::after,
+html[data-theme="mecha"] .confirm-dialog form::after { opacity: .65; }
+html[data-theme="mecha"] .modal-header,
+html[data-theme="mecha"] .drawer-header { padding: 13px 15px 11px; }
+html[data-theme="mecha"] .modal-body,
+html[data-theme="mecha"] .drawer-body { padding: 12px 15px; }
+
+html[data-theme="mecha"] #logsDialog,
+html[data-theme="mecha"] #configDialog { width: min(880px, calc(100vw - 32px)); }
+html[data-theme="mecha"] .api-key-create-modal { width: min(900px, calc(100vw - 32px)); }
+html[data-theme="mecha"] #apiKeyVerifyDialog { width: min(820px, calc(100vw - 32px)); }
+html[data-theme="mecha"] #historySettingsDialog { width: min(780px, calc(100vw - 32px)); }
+html[data-theme="mecha"] #diagnosticsDialog { width: min(700px, calc(100vw - 32px)); }
+html[data-theme="mecha"] #logsDialog .modal-shell,
+html[data-theme="mecha"] #configDialog .modal-shell,
+html[data-theme="mecha"] #historySettingsDialog .modal-shell,
+html[data-theme="mecha"] #apiKeyVerifyDialog .modal-shell {
+  max-height: calc(100dvh - 32px);
+}
+
+@media (min-width: 921px) and (min-height: 680px) {
+  html[data-theme="mecha"] .content { padding-top: 11px; padding-bottom: 11px; }
+  html[data-theme="mecha"] .metric-card { min-height: 80px; height: 80px; padding: 9px 11px; }
+  html[data-theme="mecha"] .metric-icon { width: 35px; height: 35px; background-size: 26px; }
+  html[data-theme="mecha"] .quick-actions { min-height: 92px; padding-block: 8px; }
+  html[data-theme="mecha"] .quick-action-card { min-height: 58px; }
+  html[data-theme="mecha"] .mecha-operator-figure { height: 88px; width: auto; }
+  html[data-theme="mecha"] .history-metric-grid .metric-card { min-height: 68px; height: 68px; }
+}
+
+@media (max-width: 920px), (max-height: 679px) {
+  html[data-theme="mecha"] .content { padding-top: 13px; padding-bottom: 24px; }
+  html[data-theme="mecha"] .api-overview-pane { min-height: 300px; }
+  html[data-theme="mecha"] .tester-panel.split-detail-pane { min-height: 510px; }
+  html[data-theme="mecha"] .history-inline-detail { min-height: 400px; }
+  html[data-theme="mecha"] .history-inline-detail .history-detail-body { min-height: 250px; }
+  html[data-theme="mecha"] .proxy-pool-pane { min-height: 300px; }
+}
+
+@media (max-width: 760px) {
+  html[data-theme="mecha"] { --topbar-height: 60px; }
+  html[data-theme="mecha"] .topbar { padding-block: 6px; }
+  html[data-theme="mecha"] .topbar-title h1 { font-size: 18px; }
+  html[data-theme="mecha"] .topbar-title p { display: none; }
+  html[data-theme="mecha"] .content { width: calc(100% - 16px); }
+  html[data-theme="mecha"] .section-card { padding: 12px; }
+  html[data-theme="mecha"] .section-header { margin-bottom: 9px; }
+  html[data-theme="mecha"] .metric-card { min-height: 80px; padding: 9px; }
+  html[data-theme="mecha"] .quick-actions { padding: 11px; }
+  html[data-theme="mecha"] .modal-header,
+  html[data-theme="mecha"] .drawer-header { padding: 11px 12px 10px; }
+  html[data-theme="mecha"] .modal-body,
+  html[data-theme="mecha"] .drawer-body { padding: 11px 12px; }
+  html[data-theme="mecha"] #logsDialog,
+  html[data-theme="mecha"] #configDialog,
+  html[data-theme="mecha"] .api-key-create-modal,
+  html[data-theme="mecha"] #apiKeyVerifyDialog,
+  html[data-theme="mecha"] #historySettingsDialog,
+  html[data-theme="mecha"] #diagnosticsDialog { width: calc(100vw - 32px); }
+  html[data-theme="mecha"] #logsDialog .modal-shell,
+  html[data-theme="mecha"] #configDialog .modal-shell { height: min(700px, calc(100dvh - 32px)); }
+}
+
+@media (max-width: 470px) {
+  html[data-theme="mecha"] .metric-card { min-height: 78px; gap: 5px; }
+  html[data-theme="mecha"] .quick-action-card { min-height: 66px; }
+  html[data-theme="mecha"] .api-overview-pane { min-height: 250px; }
+  html[data-theme="mecha"] .tester-panel.split-detail-pane { min-height: 470px; }
+  html[data-theme="mecha"] .history-inline-detail { min-height: 350px; }
+  html[data-theme="mecha"] .history-inline-detail .history-detail-body { min-height: 210px; }
+  html[data-theme="mecha"] .proxy-pool-pane { min-height: 260px; }
+}
+
+
+/* Regression pass 4 — preserve verified touch targets and localized badges. */
+html[data-theme="mecha"] dialog input,
+html[data-theme="mecha"] dialog select,
+html[data-theme="mecha"] dialog textarea,
+html[data-theme="mecha"] dialog button,
+html[data-theme="mecha"] .modal input,
+html[data-theme="mecha"] .modal select,
+html[data-theme="mecha"] .modal textarea,
+html[data-theme="mecha"] .modal button,
+html[data-theme="mecha"] .drawer input,
+html[data-theme="mecha"] .drawer select,
+html[data-theme="mecha"] .drawer textarea,
+html[data-theme="mecha"] .drawer button,
+html[data-theme="mecha"] .confirm-dialog input,
+html[data-theme="mecha"] .confirm-dialog select,
+html[data-theme="mecha"] .confirm-dialog textarea,
+html[data-theme="mecha"] .confirm-dialog button {
+  min-height: 40px;
+}
+html[data-theme="mecha"] dialog .icon-button,
+html[data-theme="mecha"] .modal .icon-button,
+html[data-theme="mecha"] .drawer .icon-button,
+html[data-theme="mecha"] .confirm-dialog .icon-button {
+  width: 40px;
+  min-width: 40px;
+  height: 40px;
+}
+
+@media (max-width: 470px) {
+  html[data-theme="mecha"] .status-list button,
+  html[data-theme="mecha"] .status-list.static-list > div {
+    grid-template-columns: minmax(0, 1fr) 142px;
+  }
+  html[data-theme="mecha"] .status-list button > span:last-child,
+  html[data-theme="mecha"] .status-list.static-list > div > span:last-child {
+    width: 142px;
+    font-size: 12px;
+  }
+}
+
+
+/* Regression pass 5 — animate position/opacity without shrinking hit targets. */
+html[data-theme="mecha"] .modal[open],
+html[data-theme="mecha"] .confirm-dialog[open] {
+  animation: v2-modal-enter-stable .28s cubic-bezier(.16, .84, .2, 1);
+}
+@keyframes v2-modal-enter-stable {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}

@@ -64,11 +64,10 @@ detect_platform() {
     arch="$(uname -m)"
 
     case "$os" in
-        Linux)  os_alias="linux"  ;;
-        Darwin) os_alias="macos"  ;;
+        Linux) os_alias="linux" ;;
         *)
             err "Unsupported OS: ${os}"
-            err "${PROJECT} currently supports Linux and macOS only."
+            err "${PROJECT} supports Linux only."
             exit 1
             ;;
     esac
@@ -85,15 +84,13 @@ detect_platform() {
 
     # Validate that a pre-built binary exists for this combination
     case "${os_alias}-${arch_alias}" in
-        linux-amd64|macos-amd64|macos-arm64) ;;
+        linux-amd64|linux-arm64) ;;
         *)
             err "No pre-built binary for ${os_alias}-${arch_alias}"
             echo ""
             err "Available platforms:"
-            err "  Linux    x86_64"
-            err "  macOS    x86_64, arm64"
+            err "  Linux    x86_64, arm64"
             echo ""
-            err "For other platforms try: cargo install ${PROJECT}"
             exit 1
             ;;
     esac

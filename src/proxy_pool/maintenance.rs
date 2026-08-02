@@ -1,5 +1,6 @@
 //! Egress health, circuit transitions, and managed-primary restart queue.
 
+use super::identity::probe_exit_identity;
 use super::types::*;
 use crate::docker::{ContainerRuntime, ProxySpec};
 use crate::observability::Metrics;
@@ -7,9 +8,7 @@ use crate::workers::WorkerContext;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock as TokioRwLock;
-use tracing::{error, info, warn};
-
-const MAX_RESTART_ATTEMPTS: u32 = 3;
+use tracing::{debug, error, info, warn};
 
 impl ProxyPool {
     pub fn record_success(&mut self, index: usize) {
@@ -34,6 +33,11 @@ impl ProxyPool {
         };
         node.consecutive_successes = 0;
         node.consecutive_failures = node.consecutive_failures.saturating_add(1);
+        if node.recovery_cause != Some(RecoveryCause::RateLimit) {
+            node.recovery_cause = Some(RecoveryCause::Transport);
+            node.rate_limit_until = None;
+            node.quarantined_exit_ip = None;
+        }
 
         if node.consecutive_failures < FAILURE_THRESHOLD {
             node.health = HealthState::Degraded;
@@ -67,12 +71,36 @@ impl ProxyPool {
         let Some(node) = self.proxies.get_mut(index) else {
             return;
         };
-        let until = Instant::now() + duration;
+        let requested_until = Instant::now() + duration;
+        let until = node
+            .rate_limit_until
+            .filter(|existing| *existing > requested_until)
+            .unwrap_or(requested_until);
+        let recovery_already_running = node.recovery_cause == Some(RecoveryCause::RateLimit)
+            && node.health == HealthState::Recovering
+            && node.restart_attempts > 0;
         node.health = HealthState::Degraded;
         node.circuit = CircuitState::Open { until };
         node.cooldown_until = Some(until);
+        node.rate_limit_until = Some(until);
+        if let Some(identity) = &node.exit_identity {
+            node.quarantined_exit_ip = Some(identity.public_ip.clone());
+        }
+        node.recovery_cause = Some(RecoveryCause::RateLimit);
         node.consecutive_successes = 0;
-        warn!(node_id = %node.id, cooldown_secs = duration.as_secs(), "egress circuit opened for rate limit");
+        node.consecutive_failures = 0;
+        if node.lifecycle == LifecyclePolicy::Managed
+            && !recovery_already_running
+            && !self.restart_queue.contains(&index)
+        {
+            self.restart_queue.push(index);
+        }
+        warn!(
+            node_id = %node.id,
+            cooldown_secs = duration.as_secs(),
+            quarantined_exit_ip = ?node.quarantined_exit_ip,
+            "egress circuit opened for rate limit and WARP rotation was queued"
+        );
     }
 
     pub fn mark_rate_limited_adaptive(&mut self, index: usize, retry_count: u32) {
@@ -89,6 +117,49 @@ impl ProxyPool {
         );
     }
 
+    /// Reserve a managed node for an explicit dashboard restart. This removes
+    /// the node from normal routing before Docker is touched, clears stale
+    /// cooldown/identity state, and prevents the automatic restart worker from
+    /// racing the manual operation.
+    pub fn begin_manual_restart(&mut self, index: usize) -> Result<(), String> {
+        self.can_modify_node(index)?;
+        self.restart_queue.retain(|queued| *queued != index);
+        let node = self
+            .proxies
+            .get_mut(index)
+            .ok_or_else(|| format!("unknown proxy index {index}"))?;
+        node.health = HealthState::Recovering;
+        node.circuit = CircuitState::HalfOpen;
+        node.cooldown_until = None;
+        node.consecutive_failures = 0;
+        node.consecutive_successes = 0;
+        node.restart_attempts = node.restart_attempts.saturating_add(1);
+        node.recovery_cause.get_or_insert(RecoveryCause::Transport);
+        node.exit_identity = None;
+        node.duplicate_of = None;
+        Ok(())
+    }
+
+    /// Record a failed explicit restart and hand the node back to the bounded
+    /// automatic recovery queue when retry budget remains.
+    pub fn mark_manual_restart_failed(&mut self, index: usize) {
+        let retry = {
+            let Some(node) = self.proxies.get_mut(index) else {
+                return;
+            };
+            let until = Instant::now() + Duration::from_secs(COOLDOWN_SECS);
+            node.health = HealthState::Unhealthy;
+            node.circuit = CircuitState::Open { until };
+            node.cooldown_until = Some(until);
+            node.consecutive_successes = 0;
+            node.lifecycle == LifecyclePolicy::Managed
+                && node.restart_attempts < self.max_restart_attempts
+        };
+        if retry && !self.restart_queue.contains(&index) {
+            self.restart_queue.push(index);
+        }
+    }
+
     pub fn mark_healthy(&mut self, index: usize) {
         if let Some(node) = self.proxies.get_mut(index) {
             mark_node_healthy(node);
@@ -102,6 +173,13 @@ impl ProxyPool {
         let mut transitioned = 0usize;
         for node in &mut self.proxies {
             if matches!(node.circuit, CircuitState::Open { until } if now >= until) {
+                if node.rate_limit_until.is_some_and(|until| now >= until) {
+                    node.rate_limit_until = None;
+                    node.quarantined_exit_ip = None;
+                    if node.recovery_cause == Some(RecoveryCause::RateLimit) {
+                        node.recovery_cause = None;
+                    }
+                }
                 node.circuit = CircuitState::HalfOpen;
                 node.health = HealthState::Recovering;
                 node.cooldown_until = None;
@@ -118,6 +196,9 @@ fn mark_node_healthy(node: &mut ProxyEntry) {
     node.health = HealthState::Healthy;
     node.circuit = CircuitState::Closed;
     node.cooldown_until = None;
+    node.rate_limit_until = None;
+    node.quarantined_exit_ip = None;
+    node.recovery_cause = None;
     node.consecutive_failures = 0;
     node.consecutive_successes = 0;
     node.restart_attempts = 0;
@@ -127,6 +208,7 @@ pub async fn process_restart_queue(
     pool: Arc<TokioRwLock<ProxyPool>>,
     runtime: Arc<dyn ContainerRuntime>,
     warp_image: String,
+    identity_endpoints: Vec<String>,
     cadence: Duration,
     metrics: Arc<Metrics>,
     context: WorkerContext,
@@ -144,12 +226,79 @@ pub async fn process_restart_queue(
                         pool.clone(),
                         runtime.clone(),
                         warp_image.clone(),
+                        identity_endpoints.clone(),
                         metrics.clone(),
                     )
                     .await;
                 }
             }
         }
+    }
+}
+
+fn health_probe_targets(pool: &ProxyPool) -> Vec<(usize, u16)> {
+    let max_restart_attempts = pool.max_restart_attempts.max(1);
+    pool.proxies
+        .iter()
+        .enumerate()
+        .filter(|(index, node)| {
+            node.role == EgressRole::Primary
+                && node.lifecycle == LifecyclePolicy::Managed
+                && node.port != 0
+                && node.recovery_cause != Some(RecoveryCause::RateLimit)
+                && node.restart_attempts < max_restart_attempts
+                && !pool.restart_queue.contains(index)
+                && !(node.health == HealthState::Recovering && node.restart_attempts > 0)
+        })
+        .map(|(index, node)| (index, node.port))
+        .collect()
+}
+
+fn apply_health_probe_result(pool: &mut ProxyPool, index: usize, reachable: bool) {
+    let max_restart_attempts = pool.max_restart_attempts.max(1);
+    let identity_required = pool.require_verified_exit_ip;
+    let identity_ttl = pool.identity_ttl;
+    let Some(node) = pool.proxies.get(index) else {
+        return;
+    };
+    if node.role != EgressRole::Primary
+        || node.lifecycle != LifecyclePolicy::Managed
+        || node.recovery_cause == Some(RecoveryCause::RateLimit)
+        || node.restart_attempts >= max_restart_attempts
+    {
+        return;
+    }
+
+    if !reachable {
+        pool.record_failure(index);
+        return;
+    }
+
+    let should_recover = {
+        let node = &pool.proxies[index];
+        let identity_ready = !identity_required
+            || node
+                .exit_identity
+                .as_ref()
+                .is_some_and(|identity| identity.is_fresh(identity_ttl));
+        identity_ready
+            && (node.recovery_cause == Some(RecoveryCause::Transport)
+                || matches!(
+                    node.health,
+                    HealthState::Unknown
+                        | HealthState::Degraded
+                        | HealthState::Recovering
+                        | HealthState::Unhealthy
+                ))
+    };
+
+    if should_recover {
+        let node_id = pool.proxies[index].id.clone();
+        mark_node_healthy(&mut pool.proxies[index]);
+        pool.restart_queue.retain(|queued| *queued != index);
+        info!(node_id = %node_id, "egress node recovered via TCP probe");
+    } else if pool.proxies[index].health == HealthState::Healthy {
+        pool.proxies[index].consecutive_failures = 0;
     }
 }
 
@@ -166,44 +315,28 @@ pub async fn health_monitor(
                 context.heartbeat();
                 pool.write().await.recover_expired_cooldowns();
 
-                let targets: Vec<(usize, u16)> = {
+                let targets = {
                     let pool = pool.read().await;
-                    pool.proxies
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, node)| {
-                            matches!(
-                                node.health,
-                                HealthState::Recovering | HealthState::Unhealthy
-                            ) && !node.circuit.is_open(Instant::now())
-                        })
-                        .map(|(index, node)| (index, node.port))
-                        .collect()
+                    health_probe_targets(&pool)
                 };
 
                 for (index, port) in targets {
-                    if port == 0 {
-                        continue;
-                    }
-                    if tokio::net::TcpStream::connect(("127.0.0.1", port))
+                    let reachable = tokio::net::TcpStream::connect(("127.0.0.1", port))
                         .await
-                        .is_ok()
-                    {
-                        let mut pool = pool.write().await;
-                        if let Some(node) = pool.proxies.get_mut(index) {
-                            if matches!(
-                                node.health,
-                                HealthState::Recovering | HealthState::Unhealthy
-                            ) {
-                                mark_node_healthy(node);
-                                info!(node_id = %node.id, "egress node recovered via TCP probe");
-                            }
-                        }
-                    }
+                        .is_ok();
+                    let mut pool = pool.write().await;
+                    apply_health_probe_result(&mut pool, index, reachable);
                 }
             }
         }
     }
+}
+
+fn node_requires_automatic_restart(node: &ProxyEntry) -> bool {
+    node.lifecycle == LifecyclePolicy::Managed
+        && (node.recovery_cause.is_some()
+            || node.health == HealthState::Unhealthy
+            || matches!(node.circuit, CircuitState::Open { .. }))
 }
 
 async fn restart_container(
@@ -211,13 +344,13 @@ async fn restart_container(
     pool: Arc<TokioRwLock<ProxyPool>>,
     runtime: Arc<dyn ContainerRuntime>,
     warp_image: String,
+    identity_endpoints: Vec<String>,
     metrics: Arc<Metrics>,
 ) {
-    let (port, container_name, restart_attempt) = {
+    let (port, container_name, restart_attempt, max_restart_attempts) = {
         let guard = pool.read().await;
         if let Err(reason) = guard.can_modify_node(index) {
             warn!(%reason, "skipping destructive egress lifecycle action");
-            // A leased node is retried later; protected nodes are never requeued.
             drop(guard);
             let mut writable = pool.write().await;
             if writable.proxies.get(index).is_some_and(|node| {
@@ -228,15 +361,22 @@ async fn restart_container(
             }
             return;
         }
-        let node = &guard.proxies[index];
+        let Some(node) = guard.proxies.get(index) else {
+            return;
+        };
+        if !node_requires_automatic_restart(node) {
+            debug!(node_id = %node.id, "discarding stale automatic restart queue entry");
+            return;
+        }
         (
             node.port,
             node.container_name.clone(),
             node.restart_attempts.saturating_add(1),
+            guard.max_restart_attempts.max(1),
         )
     };
 
-    if port == 0 || ensure_not_protected(port).is_err() {
+    if port == 0 || ensure_not_protected(port).is_err() || restart_attempt > max_restart_attempts {
         return;
     }
 
@@ -262,23 +402,113 @@ async fn restart_container(
         }
     };
 
-    if let Err(error) = runtime.recreate_managed(&spec).await {
-        metrics.record_proxy_restart_failure();
-        error!(%error, %container_name, "container runtime failed to recreate managed proxy");
-        apply_restart_failure_shared(&pool, index, restart_attempt).await;
-        return;
+    if let Err(restart_error) = runtime.restart_managed(&spec).await {
+        warn!(
+            %restart_error,
+            %container_name,
+            "managed WARP restart failed; attempting bounded recreate fallback"
+        );
+        if let Err(recreate_error) = runtime.recreate_managed(&spec).await {
+            metrics.record_proxy_restart_failure();
+            error!(
+                %restart_error,
+                %recreate_error,
+                %container_name,
+                "container runtime failed to recover managed proxy"
+            );
+            apply_restart_failure_shared(&pool, index, restart_attempt).await;
+            return;
+        }
     }
 
-    if verify_proxy_socks(port).await {
-        metrics.record_proxy_restart_success();
-        let mut pool = pool.write().await;
-        if let Some(node) = pool.proxies.get_mut(index) {
-            mark_node_healthy(node);
+    match verify_proxy_identity(port, &identity_endpoints).await {
+        Ok(identity) => {
+            let accepted = {
+                let mut pool = pool.write().await;
+                accept_recovered_identity(&mut pool, index, identity)
+            };
+            match accepted {
+                Ok(()) => {
+                    metrics.record_proxy_restart_success();
+                    info!(
+                        index,
+                        restart_attempt, "managed proxy recovered with a unique exit identity"
+                    );
+                }
+                Err(reason) => {
+                    metrics.record_proxy_restart_failure();
+                    warn!(index, restart_attempt, %reason, "managed proxy recovery identity was rejected");
+                    apply_restart_failure_shared(&pool, index, restart_attempt).await;
+                }
+            }
         }
-    } else {
-        metrics.record_proxy_restart_failure();
-        apply_restart_failure_shared(&pool, index, restart_attempt).await;
+        Err(error) => {
+            metrics.record_proxy_restart_failure();
+            warn!(index, restart_attempt, %error, "managed proxy identity verification failed");
+            apply_restart_failure_shared(&pool, index, restart_attempt).await;
+        }
     }
+}
+
+fn accept_recovered_identity(
+    pool: &mut ProxyPool,
+    index: usize,
+    identity: ExitIdentity,
+) -> Result<(), String> {
+    let now = Instant::now();
+    let node = pool
+        .proxies
+        .get(index)
+        .ok_or_else(|| format!("unknown proxy index {index}"))?;
+    let quota_active = node.rate_limit_until.is_some_and(|until| now < until);
+    if quota_active
+        && node
+            .quarantined_exit_ip
+            .as_deref()
+            .is_some_and(|blocked| blocked == identity.public_ip)
+    {
+        return Err(format!(
+            "WARP restart reused rate-limited exit IP {}",
+            identity.public_ip
+        ));
+    }
+    if let Some(owner) = pool
+        .proxies
+        .iter()
+        .enumerate()
+        .find_map(|(other_index, other)| {
+            // Only another actively routed primary may block a recovered
+            // primary. A disabled spare or protected warm standby must yield
+            // duplicate ownership to the recovered primary; the deterministic
+            // primary-first reconciliation below will mark that node as the
+            // duplicate instead of exhausting the recovery budget.
+            let actively_routed_primary =
+                other.role == EgressRole::Primary && other.routing_enabled;
+            (other_index != index
+                && actively_routed_primary
+                && other
+                    .exit_identity
+                    .as_ref()
+                    .is_some_and(|existing| existing.public_ip == identity.public_ip))
+            .then(|| other.id.clone())
+        })
+    {
+        return Err(format!(
+            "WARP restart produced duplicate exit IP {} already owned by {owner}",
+            identity.public_ip
+        ));
+    }
+
+    let node = &mut pool.proxies[index];
+    node.exit_identity = Some(identity);
+    node.duplicate_of = None;
+    mark_node_healthy(node);
+    pool.restart_queue.retain(|queued| *queued != index);
+    pool.suppress_duplicate_exits();
+    if pool.proxies[index].duplicate_of.is_some() {
+        return Err("recovered exit identity became a duplicate after reconciliation".to_string());
+    }
+    Ok(())
 }
 
 async fn apply_restart_failure_shared(
@@ -295,6 +525,7 @@ async fn apply_restart_failure_shared(
 }
 
 fn apply_restart_failure(pool: &mut ProxyPool, index: usize, attempt: u32) -> bool {
+    let max_restart_attempts = pool.max_restart_attempts.max(1);
     let Some(node) = pool.proxies.get_mut(index) else {
         return false;
     };
@@ -303,13 +534,17 @@ fn apply_restart_failure(pool: &mut ProxyPool, index: usize, attempt: u32) -> bo
         return false;
     }
 
-    node.restart_attempts = attempt.min(MAX_RESTART_ATTEMPTS);
+    node.restart_attempts = attempt.min(max_restart_attempts);
     node.health = HealthState::Unhealthy;
-    let until = Instant::now() + Duration::from_secs(COOLDOWN_SECS);
+    let transport_until = Instant::now() + Duration::from_secs(COOLDOWN_SECS);
+    let until = node
+        .rate_limit_until
+        .filter(|rate_limit_until| *rate_limit_until > transport_until)
+        .unwrap_or(transport_until);
     node.circuit = CircuitState::Open { until };
     node.cooldown_until = Some(until);
 
-    if node.restart_attempts < MAX_RESTART_ATTEMPTS {
+    if node.restart_attempts < max_restart_attempts {
         if !pool.restart_queue.contains(&index) {
             pool.restart_queue.push(index);
         }
@@ -320,33 +555,36 @@ fn apply_restart_failure(pool: &mut ProxyPool, index: usize, attempt: u32) -> bo
     }
 }
 
-async fn verify_proxy_socks(port: u16) -> bool {
+async fn verify_proxy_identity(
+    port: u16,
+    identity_endpoints: &[String],
+) -> Result<ExitIdentity, String> {
     let proxy_url = format!("socks5h://127.0.0.1:{port}");
-    let Ok(proxy) = reqwest::Proxy::all(&proxy_url) else {
-        return false;
-    };
-    let Ok(client) = reqwest::Client::builder()
+    let proxy =
+        reqwest::Proxy::all(&proxy_url).map_err(|error| format!("invalid proxy URL: {error}"))?;
+    let client = reqwest::Client::builder()
         .proxy(proxy)
         .timeout(Duration::from_secs(5))
         .build()
-    else {
-        return false;
+        .map_err(|error| format!("failed to build verification client: {error}"))?;
+    let fallback_endpoint = ["https://cloudflare.com/cdn-cgi/trace".to_string()];
+    let endpoints = if identity_endpoints.is_empty() {
+        fallback_endpoint.as_slice()
+    } else {
+        identity_endpoints
     };
 
+    let mut last_error = "identity probe did not run".to_string();
     for attempt in 1..=12 {
-        if client
-            .get("https://cloudflare.com/cdn-cgi/trace")
-            .send()
-            .await
-            .is_ok()
-        {
-            return true;
+        match probe_exit_identity(&client, endpoints).await {
+            Ok(identity) => return Ok(identity),
+            Err(error) => last_error = error,
         }
         if attempt < 12 {
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
     }
-    false
+    Err(last_error)
 }
 
 #[cfg(test)]
@@ -360,6 +598,18 @@ mod tests {
             "socks5://127.0.0.1:40003".to_string(),
             "socks5://127.0.0.1:40004".to_string(),
         ])
+    }
+
+    fn identity(ip: &str) -> ExitIdentity {
+        ExitIdentity {
+            public_ip: ip.to_string(),
+            provider: Some("cloudflare-warp".to_string()),
+            colo: Some("HKG".to_string()),
+            verified_at_unix_secs: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        }
     }
 
     #[test]
@@ -390,6 +640,251 @@ mod tests {
         assert!(!apply_restart_failure(&mut pool, standby, 1));
         assert!(pool.restart_queue.is_empty());
         assert_eq!(pool.proxies[standby].lifecycle, LifecyclePolicy::Protected);
+    }
+
+    #[test]
+    fn manual_restart_clears_stale_circuit_and_automatic_queue() {
+        let mut pool = pool();
+        let until = Instant::now() + Duration::from_secs(COOLDOWN_SECS);
+        pool.proxies[0].health = HealthState::Degraded;
+        pool.proxies[0].circuit = CircuitState::Open { until };
+        pool.proxies[0].cooldown_until = Some(until);
+        pool.proxies[0].consecutive_failures = FAILURE_THRESHOLD;
+        pool.restart_queue.push(0);
+
+        pool.begin_manual_restart(0).expect("manual restart");
+
+        assert_eq!(pool.proxies[0].health, HealthState::Recovering);
+        assert_eq!(pool.proxies[0].circuit, CircuitState::HalfOpen);
+        assert!(pool.proxies[0].cooldown_until.is_none());
+        assert_eq!(pool.proxies[0].consecutive_failures, 0);
+        assert_eq!(pool.proxies[0].restart_attempts, 1);
+        assert!(pool.restart_queue.is_empty());
+    }
+
+    #[test]
+    fn manual_restart_failure_requeues_managed_node() {
+        let mut pool = pool();
+        pool.begin_manual_restart(0).expect("manual restart");
+        pool.mark_manual_restart_failed(0);
+
+        assert_eq!(pool.proxies[0].health, HealthState::Unhealthy);
+        assert!(matches!(pool.proxies[0].circuit, CircuitState::Open { .. }));
+        assert_eq!(pool.restart_queue, vec![0]);
+    }
+
+    #[test]
+    fn stale_queue_entry_is_not_actionable_after_recovery() {
+        let mut pool = pool();
+        let node = &mut pool.proxies[0];
+        node.health = HealthState::Healthy;
+        node.circuit = CircuitState::Closed;
+        node.recovery_cause = None;
+        assert!(!node_requires_automatic_restart(node));
+
+        node.health = HealthState::Unhealthy;
+        node.recovery_cause = Some(RecoveryCause::Transport);
+        assert!(node_requires_automatic_restart(node));
+    }
+
+    #[test]
+    fn health_monitor_probes_healthy_managed_primaries_but_not_protected_standby() {
+        let pool = pool();
+        let targets = health_probe_targets(&pool);
+        let ports: Vec<u16> = targets.into_iter().map(|(_, port)| port).collect();
+
+        assert!(ports.contains(&40001));
+        assert!(ports.contains(&40002));
+        assert!(ports.contains(&40003));
+        assert!(!ports.contains(&40004));
+    }
+
+    #[test]
+    fn two_failed_health_probes_queue_managed_primary_restart() {
+        let mut pool = pool();
+
+        apply_health_probe_result(&mut pool, 0, false);
+        assert_eq!(pool.proxies[0].health, HealthState::Degraded);
+        assert_eq!(
+            pool.proxies[0].recovery_cause,
+            Some(RecoveryCause::Transport)
+        );
+        assert!(pool.restart_queue.is_empty());
+
+        apply_health_probe_result(&mut pool, 0, false);
+        assert_eq!(pool.proxies[0].health, HealthState::Unhealthy);
+        assert!(matches!(pool.proxies[0].circuit, CircuitState::Open { .. }));
+        assert_eq!(pool.restart_queue, vec![0]);
+    }
+
+    #[test]
+    fn successful_health_probe_clears_transport_failure_without_fake_request_success() {
+        let mut pool = pool();
+        pool.proxies[0].exit_identity = Some(identity("1.1.1.1"));
+
+        apply_health_probe_result(&mut pool, 0, false);
+        apply_health_probe_result(&mut pool, 0, true);
+
+        assert_eq!(pool.proxies[0].health, HealthState::Healthy);
+        assert_eq!(pool.proxies[0].circuit, CircuitState::Closed);
+        assert!(pool.proxies[0].recovery_cause.is_none());
+        assert_eq!(pool.proxies[0].consecutive_successes, 0);
+        assert!(pool.restart_queue.is_empty());
+    }
+
+    #[test]
+    fn health_monitor_does_not_interfere_with_rate_limit_or_inflight_restart() {
+        let mut pool = pool();
+        pool.proxies[0].recovery_cause = Some(RecoveryCause::RateLimit);
+        pool.proxies[1].health = HealthState::Recovering;
+        pool.proxies[1].recovery_cause = Some(RecoveryCause::Transport);
+        pool.proxies[1].restart_attempts = 1;
+
+        let targets = health_probe_targets(&pool);
+        let indices: Vec<usize> = targets.into_iter().map(|(index, _)| index).collect();
+        assert!(!indices.contains(&0));
+        assert!(!indices.contains(&1));
+    }
+
+    #[test]
+    fn configured_restart_attempt_limit_is_honored() {
+        let mut pool = pool();
+        pool.set_max_restart_attempts(2);
+        assert!(apply_restart_failure(&mut pool, 0, 1));
+        assert!(!apply_restart_failure(&mut pool, 0, 2));
+        assert_eq!(pool.proxies[0].restart_attempts, 2);
+        assert!(pool.restart_queue.is_empty());
+    }
+
+    #[test]
+    fn rate_limit_recovery_rejects_same_exit_before_quota_expiry() {
+        let mut pool = pool();
+        pool.proxies[0].exit_identity = Some(identity("1.1.1.1"));
+        pool.mark_rate_limited(0, Duration::from_secs(3_600));
+        pool.drain_restart_queue();
+
+        let error = accept_recovered_identity(&mut pool, 0, identity("1.1.1.1"))
+            .expect_err("same exit must remain quarantined");
+        assert!(error.contains("reused rate-limited exit IP"));
+        assert_eq!(
+            pool.proxies[0].recovery_cause,
+            Some(RecoveryCause::RateLimit)
+        );
+    }
+
+    #[test]
+    fn rate_limit_recovery_may_reuse_exit_owned_only_by_disabled_spare() {
+        let mut pool = pool();
+        pool.active_count = 1;
+        for (index, node) in pool.proxies.iter_mut().enumerate() {
+            node.routing_enabled = index == 0;
+        }
+        pool.proxies[0].exit_identity = Some(identity("1.1.1.1"));
+        pool.proxies[1].exit_identity = Some(identity("8.8.8.8"));
+        pool.mark_rate_limited(0, Duration::from_secs(3_600));
+        pool.drain_restart_queue();
+
+        accept_recovered_identity(&mut pool, 0, identity("8.8.8.8"))
+            .expect("disabled spare must not block active recovery");
+        assert_eq!(pool.proxies[0].health, HealthState::Healthy);
+        assert_eq!(pool.proxies[0].circuit, CircuitState::Closed);
+        assert_eq!(
+            pool.proxies[0]
+                .exit_identity
+                .as_ref()
+                .map(|identity| identity.public_ip.as_str()),
+            Some("8.8.8.8")
+        );
+        assert_eq!(
+            pool.proxies[1].duplicate_of.as_deref(),
+            Some(pool.proxies[0].id.as_str())
+        );
+    }
+
+    #[test]
+    fn rate_limit_recovery_may_take_exit_owned_by_warm_standby() {
+        let mut pool = pool();
+        let standby = pool
+            .proxies
+            .iter()
+            .position(|node| node.role == EgressRole::WarmStandby)
+            .expect("warm standby");
+        pool.proxies[0].exit_identity = Some(identity("1.1.1.1"));
+        pool.proxies[standby].exit_identity = Some(identity("8.8.8.8"));
+        pool.proxies[standby].health = HealthState::Healthy;
+        pool.proxies[standby].circuit = CircuitState::Closed;
+        pool.mark_rate_limited(0, Duration::from_secs(3_600));
+        pool.drain_restart_queue();
+
+        accept_recovered_identity(&mut pool, 0, identity("8.8.8.8"))
+            .expect("warm standby must yield duplicate ownership to primary");
+
+        assert_eq!(pool.proxies[0].health, HealthState::Healthy);
+        assert_eq!(pool.proxies[0].circuit, CircuitState::Closed);
+        assert_eq!(
+            pool.proxies[0]
+                .exit_identity
+                .as_ref()
+                .map(|identity| identity.public_ip.as_str()),
+            Some("8.8.8.8")
+        );
+        assert_eq!(
+            pool.proxies[standby].duplicate_of.as_deref(),
+            Some(pool.proxies[0].id.as_str())
+        );
+    }
+
+    #[test]
+    fn rate_limit_recovery_rejects_duplicate_exit() {
+        let mut pool = pool();
+        pool.proxies[0].exit_identity = Some(identity("1.1.1.1"));
+        pool.proxies[1].exit_identity = Some(identity("8.8.8.8"));
+        pool.mark_rate_limited(0, Duration::from_secs(3_600));
+        pool.drain_restart_queue();
+
+        let error = accept_recovered_identity(&mut pool, 0, identity("8.8.8.8"))
+            .expect_err("duplicate exit must be rejected");
+        assert!(error.contains("duplicate exit IP"));
+    }
+
+    #[test]
+    fn rate_limit_recovery_accepts_new_unique_exit() {
+        let mut pool = pool();
+        pool.proxies[0].exit_identity = Some(identity("1.1.1.1"));
+        pool.proxies[1].exit_identity = Some(identity("8.8.8.8"));
+        pool.mark_rate_limited(0, Duration::from_secs(3_600));
+        pool.drain_restart_queue();
+
+        accept_recovered_identity(&mut pool, 0, identity("9.9.9.9"))
+            .expect("new unique exit should recover");
+        assert_eq!(pool.proxies[0].health, HealthState::Healthy);
+        assert_eq!(pool.proxies[0].circuit, CircuitState::Closed);
+        assert_eq!(
+            pool.proxies[0]
+                .exit_identity
+                .as_ref()
+                .map(|identity| identity.public_ip.as_str()),
+            Some("9.9.9.9")
+        );
+        assert!(pool.proxies[0].rate_limit_until.is_none());
+        assert!(pool.proxies[0].quarantined_exit_ip.is_none());
+        assert!(pool.proxies[0].recovery_cause.is_none());
+    }
+
+    #[test]
+    fn restart_failure_preserves_long_rate_limit_deadline() {
+        let mut pool = pool();
+        pool.proxies[0].exit_identity = Some(identity("1.1.1.1"));
+        pool.mark_rate_limited(0, Duration::from_secs(3_600));
+        let original_deadline = pool.proxies[0].rate_limit_until.expect("deadline");
+        pool.drain_restart_queue();
+
+        assert!(apply_restart_failure(&mut pool, 0, 1));
+        assert_eq!(pool.proxies[0].rate_limit_until, Some(original_deadline));
+        assert!(matches!(
+            pool.proxies[0].circuit,
+            CircuitState::Open { until } if until == original_deadline
+        ));
     }
 
     #[test]
@@ -436,7 +931,9 @@ mod metrics_tests {
             Ok(())
         }
         async fn restart_managed(&self, _spec: &ProxySpec) -> DockerResult<()> {
-            Ok(())
+            Err(DockerError::CommandFailed(
+                "intentional restart failure".to_string(),
+            ))
         }
         async fn stop_managed(&self, _spec: &ProxySpec) -> DockerResult<()> {
             Ok(())
@@ -457,12 +954,21 @@ mod metrics_tests {
         let pool = Arc::new(TokioRwLock::new(ProxyPool::new(&[
             "socks5://127.0.0.1:40001".to_string(),
         ])));
+        {
+            let mut guard = pool.write().await;
+            guard.proxies[0].health = HealthState::Unhealthy;
+            guard.proxies[0].circuit = CircuitState::Open {
+                until: Instant::now() + Duration::from_secs(120),
+            };
+            guard.proxies[0].recovery_cause = Some(RecoveryCause::Transport);
+        }
         let metrics = Arc::new(Metrics::default());
         restart_container(
             0,
             pool,
             Arc::new(FailingRuntime),
             "example/warp:test".to_string(),
+            Vec::new(),
             metrics.clone(),
         )
         .await;

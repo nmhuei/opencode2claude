@@ -70,7 +70,7 @@ pub async fn proxy_snapshot(state: &AppState) -> ProxyPoolStats {
     pool.snapshot()
 }
 
-pub fn safe_config_snapshot(state: &AppState) -> SafeConfigSnapshot {
+pub async fn safe_config_snapshot(state: &AppState) -> SafeConfigSnapshot {
     let cfg = &state.config;
     SafeConfigSnapshot {
         host: cfg.host.to_string(),
@@ -88,10 +88,7 @@ pub fn safe_config_snapshot(state: &AppState) -> SafeConfigSnapshot {
         warm_standby_proxies: redact_proxy_urls(
             cfg.warm_standby_proxies.as_deref().unwrap_or_default(),
         ),
-        client_auth_configured: cfg
-            .auth_tokens
-            .as_ref()
-            .is_some_and(|tokens| !tokens.is_empty()),
+        client_auth_configured: state.api_keys.read().await.configured(),
         tavily_configured: cfg.tavily_api_key.is_some(),
         exa_configured: cfg.exa_api_key.is_some(),
         serper_configured: cfg.serper_api_key.is_some(),
@@ -104,7 +101,6 @@ pub async fn restart_managed_proxy(
     state: &AppState,
     port: u16,
 ) -> Result<ProxyRestartResult, ManagementError> {
-    validate_restart_target(state, port).await?;
     let spec = ProxySpec::new(port, state.config.runtime.warp_image.clone()).map_err(|err| {
         ManagementError::new(
             StatusCode::BAD_REQUEST,
@@ -112,24 +108,29 @@ pub async fn restart_managed_proxy(
             err.to_string(),
         )
     })?;
+    let index = prepare_restart_target(state, port).await?;
 
-    state
-        .container_runtime
-        .recreate_managed(&spec)
-        .await
-        .map_err(|err| {
-            error!(port, error = %err, "management API failed to restart proxy");
-            ManagementError::new(
-                StatusCode::BAD_GATEWAY,
-                "proxy_restart_failed",
-                format!("Failed to restart proxy port {port}: {err}"),
-            )
-        })?;
+    state.metrics.record_proxy_restart_attempt();
+    if let Err(err) = state.container_runtime.recreate_managed(&spec).await {
+        state
+            .proxy_pool
+            .write()
+            .await
+            .mark_manual_restart_failed(index);
+        state.metrics.record_proxy_restart_failure();
+        error!(port, error = %err, "management API failed to restart proxy");
+        return Err(ManagementError::new(
+            StatusCode::BAD_GATEWAY,
+            "proxy_restart_failed",
+            format!("Failed to restart proxy port {port}: {err}"),
+        ));
+    }
+    state.metrics.record_proxy_restart_success();
 
     info!(port, "management API restarted managed proxy");
     let _ = state.event_tx.send(DashboardEvent::ProxyStatus {
         port,
-        status: "restarted".to_string(),
+        status: "recovering".to_string(),
         timestamp: unix_timestamp(),
     });
 
@@ -151,7 +152,7 @@ pub fn redact_proxy_url(value: &str) -> String {
     format!("{}***{}", &value[..authority_start], &value[at..])
 }
 
-async fn validate_restart_target(state: &AppState, port: u16) -> Result<(), ManagementError> {
+async fn prepare_restart_target(state: &AppState, port: u16) -> Result<usize, ManagementError> {
     if is_protected_proxy_port(port) {
         return Err(ManagementError::new(
             StatusCode::FORBIDDEN,
@@ -170,7 +171,7 @@ async fn validate_restart_target(state: &AppState, port: u16) -> Result<(), Mana
         ));
     }
 
-    let pool = state.proxy_pool.read().await;
+    let mut pool = state.proxy_pool.write().await;
     let index = pool
         .proxies
         .iter()
@@ -182,10 +183,10 @@ async fn validate_restart_target(state: &AppState, port: u16) -> Result<(), Mana
                 format!("Proxy port {port} is not present in the active configuration"),
             )
         })?;
-    pool.can_modify_node(index)
+    pool.begin_manual_restart(index)
         .map_err(|message| ManagementError::new(StatusCode::CONFLICT, "proxy_busy", message))?;
 
-    Ok(())
+    Ok(index)
 }
 
 fn redact_proxy_urls(values: &[String]) -> Vec<String> {
@@ -289,6 +290,21 @@ mod runtime_tests {
             .expect("restart result");
         assert_eq!(result.port, 40001);
         assert_eq!(*runtime.recreated.lock().unwrap(), vec![40001]);
+        let pool = state.proxy_pool.read().await;
+        assert_eq!(
+            pool.proxies[0].health,
+            crate::proxy_pool::HealthState::Recovering
+        );
+        assert_eq!(
+            pool.proxies[0].circuit,
+            crate::proxy_pool::CircuitState::HalfOpen
+        );
+        assert!(pool.restart_queue.is_empty());
+        drop(pool);
+        let metrics = state.metrics.snapshot();
+        assert_eq!(metrics.proxy_restart_attempts, 1);
+        assert_eq!(metrics.proxy_restart_successes, 1);
+        assert_eq!(metrics.proxy_restart_failures, 0);
     }
 
     #[tokio::test]

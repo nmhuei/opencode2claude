@@ -25,7 +25,7 @@ git push origin main
 ```
 
 ### Bước 4: Tạo và đẩy Git Tag (Kích hoạt Tự động hóa)
-Tạo một Git Tag khớp với phiên bản mới của bạn. Khi bạn đẩy tag này lên GitHub, GitHub Actions sẽ tự động biên dịch binary cho Linux/macOS, tạo GitHub Release, phát hành Docker image lên ghcr.io và push lên crates.io:
+Tạo một Git Tag khớp với phiên bản mới của bạn. Khi bạn đẩy tag này lên GitHub, GitHub Actions sẽ tự động biên dịch binary Linux cho x86_64 và ARM64, tạo GitHub Release, phát hành Docker image lên ghcr.io và push lên crates.io:
 ```bash
 # Thay thế v0.2.2 bằng phiên bản tương ứng
 git tag -a v0.2.2 -m "Release v0.2.2"

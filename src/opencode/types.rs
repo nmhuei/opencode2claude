@@ -5,7 +5,19 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct OpenAiInboundRequest {
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub messages: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub stream: bool,
+    #[serde(flatten)]
+    pub extra: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Serialize, Clone, Default)]
 pub struct OpenAiRequest {
     pub model: String,
     pub messages: Vec<OpenAiMessage>,
@@ -17,9 +29,25 @@ pub struct OpenAiRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<OpenAiThinkingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub include_reasoning: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct OpenAiThinkingConfig {
+    #[serde(rename = "type")]
+    pub thinking_type: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

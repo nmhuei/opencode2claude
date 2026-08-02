@@ -8,10 +8,11 @@ use super::response::LeasedResponse;
 use super::warp::reconnect_warp;
 use crate::error::BridgeError;
 use crate::observability::RetryMetricClass;
-use crate::opencode::types::OpenAiRequest;
+use crate::opencode::types::{OpenAiInboundRequest, OpenAiRequest};
 use crate::proxy_pool::EgressLease;
 use crate::state::AppState;
 use reqwest::{Client, StatusCode};
+use serde::Serialize;
 use std::time::Duration;
 use tracing::{info, warn};
 
@@ -22,22 +23,72 @@ struct SelectedRoute {
     lease: Option<EgressLease>,
 }
 
+trait RetryableOpenAiRequest: Serialize + Clone {
+    fn model(&self) -> &str;
+    fn stream(&self) -> bool;
+    fn set_model(&mut self, model: String);
+}
+
+impl RetryableOpenAiRequest for OpenAiRequest {
+    fn model(&self) -> &str {
+        &self.model
+    }
+
+    fn stream(&self) -> bool {
+        self.stream
+    }
+
+    fn set_model(&mut self, model: String) {
+        self.model = model;
+    }
+}
+
+impl RetryableOpenAiRequest for OpenAiInboundRequest {
+    fn model(&self) -> &str {
+        &self.model
+    }
+
+    fn stream(&self) -> bool {
+        self.stream
+    }
+
+    fn set_model(&mut self, model: String) {
+        self.model = model;
+    }
+}
+
 pub(crate) async fn execute_with_warp_retry(
     state: &AppState,
     routing_key: &str,
     request: &OpenAiRequest,
 ) -> Result<LeasedResponse, BridgeError> {
+    execute_retryable_request(state, routing_key, request).await
+}
+
+pub(crate) async fn execute_openai_with_warp_retry(
+    state: &AppState,
+    routing_key: &str,
+    request: &OpenAiInboundRequest,
+) -> Result<LeasedResponse, BridgeError> {
+    execute_retryable_request(state, routing_key, request).await
+}
+
+async fn execute_retryable_request<T: RetryableOpenAiRequest>(
+    state: &AppState,
+    routing_key: &str,
+    request: &T,
+) -> Result<LeasedResponse, BridgeError> {
     let max_retries = state.config.retry.max_network_attempts as u32;
     let max_provider_retries = state.config.retry.max_provider_attempts;
-    let models = build_model_retry_list(request, &state.config.retry);
+    let models = build_model_retry_list(request.model(), request.stream(), &state.config.retry);
     let upstream_url = format!(
         "{}/chat/completions",
         state.config.retry.upstream_base_url.trim_end_matches('/')
     );
 
-    if request.stream && is_reasoning_heavy_model(&request.model) && models.len() == 1 {
+    if request.stream() && is_reasoning_heavy_model(request.model()) && models.len() == 1 {
         info!(
-            model = %request.model,
+            model = %request.model(),
             "preserving reasoning-stream semantics without implicit fallback"
         );
     }
@@ -47,9 +98,12 @@ pub(crate) async fn execute_with_warp_retry(
     let mut last_failed_proxy = None;
 
     loop {
-        let current_model = models.get(model_index).unwrap_or(&request.model).clone();
+        let current_model = models
+            .get(model_index)
+            .cloned()
+            .unwrap_or_else(|| request.model().to_string());
         let mut attempt_request = request.clone();
-        attempt_request.model = current_model.clone();
+        attempt_request.set_model(current_model.clone());
 
         let mut route = select_route(state, routing_key, last_failed_proxy).await?;
         let result = route
@@ -88,7 +142,7 @@ pub(crate) async fn execute_with_warp_retry(
                                 parse_retry_after(value, std::time::SystemTime::now())
                             });
                         apply_rate_limit_penalty(state, &route, retry_count, retry_after).await;
-                        last_failed_proxy = route.proxy_index;
+                        last_failed_proxy = None;
                         sleep_backoff(state, retry_count, route.proxy_index).await;
                         continue;
                     }
@@ -154,7 +208,7 @@ pub(crate) async fn execute_with_warp_retry(
                             state.metrics.record_retry(RetryMetricClass::RateLimit);
                             retry_count += 1;
                             apply_rate_limit_penalty(state, &route, retry_count, None).await;
-                            last_failed_proxy = route.proxy_index;
+                            last_failed_proxy = None;
                             sleep_backoff(state, retry_count, route.proxy_index).await;
                             continue;
                         }
@@ -254,40 +308,63 @@ async fn select_route(
     routing_key: &str,
     excluded_proxy: Option<usize>,
 ) -> Result<SelectedRoute, BridgeError> {
-    let mut pool = state.proxy_pool.write().await;
-    if pool.proxies.is_empty() {
-        if state.config.egress.mode == crate::config::EgressMode::Direct {
-            return Ok(SelectedRoute {
-                client: state.http_client.clone(),
-                proxy_url: None,
-                proxy_index: None,
-                lease: None,
-            });
-        }
-        return Err(BridgeError::UpstreamError(
-            "Proxy egress mode is configured but the proxy pool is empty".to_string(),
-        ));
+    if state.config.egress.mode == crate::config::EgressMode::Direct {
+        return Ok(SelectedRoute {
+            client: state.http_client.clone(),
+            proxy_url: None,
+            proxy_index: None,
+            lease: None,
+        });
     }
 
-    let selection = match excluded_proxy {
-        Some(index) => pool.get_client_excluding(routing_key, index),
-        None => pool.get_client(routing_key),
-    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let (selection, recovery_in_progress, retry_after) = {
+            let mut pool = state.proxy_pool.write().await;
+            if pool.proxies.is_empty() {
+                return Err(BridgeError::UpstreamError(
+                    "Proxy egress mode is configured but the proxy pool is empty".to_string(),
+                ));
+            }
 
-    let (client, proxy_url, proxy_index) = selection.ok_or_else(|| {
-        BridgeError::UpstreamError(
+            let selection = match excluded_proxy {
+                Some(index) => pool.get_client_excluding(routing_key, index),
+                None => pool.get_client(routing_key),
+            }
+            .and_then(|(client, proxy_url, proxy_index)| {
+                pool.begin_lease(proxy_index)
+                    .map(|lease| (client, proxy_url, proxy_index, lease))
+            });
+            let recovery_in_progress = pool.recovery_in_progress();
+            let retry_after = pool.minimum_rate_limit_remaining();
+            (selection, recovery_in_progress, retry_after)
+        };
+
+        if let Some((client, proxy_url, proxy_index, lease)) = selection {
+            return Ok(SelectedRoute {
+                client,
+                proxy_url: Some(proxy_url),
+                proxy_index: Some(proxy_index),
+                lease: Some(lease),
+            });
+        }
+
+        if recovery_in_progress && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            continue;
+        }
+
+        if let Some(remaining) = retry_after {
+            return Err(BridgeError::RateLimited(format!(
+                "no unique healthy proxy exit is currently available; retry after {} second(s)",
+                remaining.as_secs().max(1)
+            )));
+        }
+
+        return Err(BridgeError::UpstreamError(
             "Proxy pool is configured but no eligible egress route is available".to_string(),
-        )
-    })?;
-    let lease = pool.begin_lease(proxy_index).ok_or_else(|| {
-        BridgeError::UpstreamError("failed to acquire egress request lease".to_string())
-    })?;
-    Ok(SelectedRoute {
-        client,
-        proxy_url: Some(proxy_url),
-        proxy_index: Some(proxy_index),
-        lease: Some(lease),
-    })
+        ));
+    }
 }
 
 async fn record_transport_success(state: &AppState, proxy_index: Option<usize>) {
@@ -368,11 +445,29 @@ mod tests {
     use crate::proxy_pool::{CircuitState, HealthState};
 
     #[tokio::test]
-    async fn configured_proxy_pool_never_silently_falls_back_to_direct() {
-        let config = BridgeConfig {
+    async fn direct_mode_ignores_configured_proxy_pool() {
+        let mut config = BridgeConfig {
             primary_proxies: Some(vec!["socks5://127.0.0.1:40001".to_string()]),
             ..BridgeConfig::default()
         };
+        config.egress.mode = crate::config::EgressMode::Direct;
+        let state = AppState::new(config);
+
+        let route = select_route(&state, "test", None)
+            .await
+            .expect("direct mode should bypass configured proxies");
+        assert!(route.proxy_url.is_none());
+        assert!(route.proxy_index.is_none());
+        assert!(route.lease.is_none());
+    }
+
+    #[tokio::test]
+    async fn configured_proxy_pool_never_silently_falls_back_to_direct() {
+        let mut config = BridgeConfig {
+            primary_proxies: Some(vec!["socks5://127.0.0.1:40001".to_string()]),
+            ..BridgeConfig::default()
+        };
+        config.egress.mode = crate::config::EgressMode::Proxy;
         let state = AppState::new(config);
         {
             let mut pool = state.proxy_pool.write().await;

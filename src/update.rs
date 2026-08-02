@@ -49,8 +49,6 @@ fn platform_asset_name() -> Option<&'static str> {
     match (os, arch) {
         ("linux", "x86_64") => Some("opencode2api-linux-amd64"),
         ("linux", "aarch64") => Some("opencode2api-linux-arm64"),
-        ("macos", "x86_64") => Some("opencode2api-macos-amd64"),
-        ("macos", "aarch64") => Some("opencode2api-macos-arm64"),
         _ => None,
     }
 }
@@ -140,25 +138,13 @@ pub fn find_matching_asset(release: &ReleaseInfo) -> Option<&AssetInfo> {
 /// The updater never replaces the current executable without a valid SHA-256
 /// and a successful `--version` smoke test.
 pub async fn apply_update(client: &reqwest::Client, asset: &AssetInfo) -> Result<PathBuf> {
-    #[cfg(windows)]
-    {
-        let _ = (client, asset);
-        return Err(anyhow!(
-            "self-update is not supported on Windows; install a signed release artifact manually"
-        ));
-    }
-
-    #[cfg(not(windows))]
-    {
-        let current_exe =
-            std::env::current_exe().context("cannot determine current binary path")?;
-        let binary = download_bytes(client, &asset.download_url, &asset.name).await?;
-        let checksum_url = format!("{}.sha256", asset.download_url);
-        let checksum_text = download_text(client, &checksum_url, "checksum").await?;
-        let expected = parse_sha256(&checksum_text).context("invalid checksum asset")?;
-        install_candidate(&current_exe, &binary, &expected).await?;
-        Ok(current_exe)
-    }
+    let current_exe = std::env::current_exe().context("cannot determine current binary path")?;
+    let binary = download_bytes(client, &asset.download_url, &asset.name).await?;
+    let checksum_url = format!("{}.sha256", asset.download_url);
+    let checksum_text = download_text(client, &checksum_url, "checksum").await?;
+    let expected = parse_sha256(&checksum_text).context("invalid checksum asset")?;
+    install_candidate(&current_exe, &binary, &expected).await?;
+    Ok(current_exe)
 }
 
 async fn download_bytes(client: &reqwest::Client, url: &str, label: &str) -> Result<Vec<u8>> {
@@ -384,13 +370,13 @@ mod tests {
         let os = std::env::consts::OS;
         let arch = std::env::consts::ARCH;
 
-        if (os == "linux" || os == "macos") && (arch == "x86_64" || arch == "aarch64") {
+        if os == "linux" && (arch == "x86_64" || arch == "aarch64") {
             assert!(
                 name.is_some(),
                 "should return an asset name for {os}/{arch}"
             );
             let name = name.unwrap();
-            assert!(name.contains(os), "asset name should contain OS name");
+            assert!(name.contains("linux"), "asset name should target Linux");
         }
     }
 
@@ -421,8 +407,8 @@ mod tests {
                     download_url: "https://example.com/linux-amd64".into(),
                 },
                 AssetInfo {
-                    name: "opencode2api-macos-arm64".into(),
-                    download_url: "https://example.com/macos-arm64".into(),
+                    name: "opencode2api-linux-arm64".into(),
+                    download_url: "https://example.com/linux-arm64".into(),
                 },
             ],
             body: String::new(),

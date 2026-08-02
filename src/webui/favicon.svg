@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" role="img" aria-labelledby="title">
+  <title id="title">OpenCode2API</title>
+  <rect width="96" height="96" rx="20" fill="#111113"/>
+  <g fill="none" stroke="#d5d6d8" stroke-width="9" stroke-linecap="square" stroke-linejoin="miter" transform="translate(7 20) scale(.69)">
+    <circle cx="32" cy="36" r="21"/>
+    <path d="M61 16 81 36 61 56"/>
+    <path d="M83 16 103 36 83 56"/>
+  </g>
+</svg>

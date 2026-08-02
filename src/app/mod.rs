@@ -15,8 +15,10 @@ use clap::Parser;
 use yansi::Paint;
 
 pub async fn run_cli() {
-    // Load environment variables from .env file if present
-    let _ = dotenvy::dotenv();
+    // Load environment variables from the working directory or from a `.env`
+    // beside/above the executable. This keeps daemon launches from `$HOME`
+    // consistent with direct launches from the repository.
+    let _ = crate::config::load_dotenv();
 
     let cli = cli::Cli::parse();
 
@@ -41,10 +43,11 @@ pub async fn run_cli() {
 
         // New commands
         Some(Command::Doctor) => utility::cmd_doctor(fmt).await,
-        Some(Command::Completion(args)) => utility::cmd_completion(args),
-        Some(Command::Update(args)) => utility::cmd_update(args).await,
-        Some(Command::Init(args)) => utility::cmd_init(args).await,
+        Some(Command::Completion(args)) => utility::cmd_completion(args, fmt),
+        Some(Command::Update(args)) => utility::cmd_update(args, fmt).await,
+        Some(Command::Init(args)) => utility::cmd_init(args, fmt).await,
         Some(Command::Env) => utility::cmd_env(fmt),
+        Some(Command::ApiKey(cmd)) => utility::cmd_api_key(cmd, fmt),
 
         // Proxy group (unchanged, but uses fmt)
         Some(Command::Proxy(cmd)) => proxy::cmd_proxy(cmd, fmt).await,

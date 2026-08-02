@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use std::path::Path;
 
 /// Default config template content.
-const CONFIG_TEMPLATE: &str = r##"# OpenCode2API configuration
+pub const CONFIG_TEMPLATE: &str = r##"# OpenCode2API configuration
 # Uncomment and adjust values as needed.
 
 # Config schema. The loader migrates supported legacy keys to this version.
@@ -70,6 +70,7 @@ schema_version = 1
 # exa_url = "https://api.exa.ai/search"
 # serper_url = "https://google.serper.dev/search"
 # duckduckgo_url = "https://html.duckduckgo.com/html/"
+# yahoo_url = "https://search.yahoo.com/search"
 # allow_private_searxng = false
 
 # ── Proxy Pool (WARP SOCKS5) ──────────────────────────────────────────
@@ -93,7 +94,7 @@ schema_version = 1
 # ]
 
 # Exit identity verification policy.
-# require_verified_exit_ip = false
+# require_verified_exit_ip = true
 # minimum_unique_exit_ips = 1
 # identity_endpoints = [
 #     "https://cloudflare.com/cdn-cgi/trace",
@@ -131,6 +132,10 @@ schema_version = 1
 # searxng_api_key = ""
 "##;
 
+pub fn config_template() -> &'static str {
+    CONFIG_TEMPLATE
+}
+
 /// Generate the default config file at the given path.
 ///
 /// Returns an error if the file already exists (unless `force` is true).
@@ -145,10 +150,6 @@ pub async fn generate_config(path: &Path, force: bool) -> Result<()> {
     tokio::fs::write(path, CONFIG_TEMPLATE)
         .await
         .with_context(|| format!("failed to write config to {}", path.display()))?;
-
-    eprintln!("✓ Config template written to {}", path.display());
-    eprintln!("  Edit it to match your setup, then run:");
-    eprintln!("    opencode2api server start -c {}", path.display());
 
     Ok(())
 }

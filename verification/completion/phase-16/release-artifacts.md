@@ -3,6 +3,7 @@
 Implementation commit: `b9e0ea1`
 Branch: `completion/full-repository-20260711`
 Date: 2026-07-11
+Platform scope updated: 2026-07-20 (Linux-only)
 
 ## Workflow validation
 
@@ -16,7 +17,7 @@ docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:latest
 Result:
 
 ```text
-release-workflow: PASS invariants=18
+release-workflow: PASS invariants=17
 actionlint: PASS
 ```
 
@@ -25,7 +26,6 @@ Validated release invariants include:
 - exact tag/package version gate;
 - mandatory Tier B and Tier C release gates;
 - Linux x86_64 and ARM64 artifacts;
-- macOS x86_64 and ARM64 artifacts;
 - locked release builds;
 - companion `.sha256` files;
 - aggregate `SHA256SUMS` verification;
@@ -51,7 +51,7 @@ opencode2api-linux-amd64: checksum OK
 SPDX-2.3 SBOM: PASS
 version-consistency: PASS version=0.5.0
 install-e2e: PASS checksum, smoke, rejection, dry-run, uninstall
-release-workflow: PASS invariants=18
+release-workflow: PASS invariants=17
 release-smoke: PASS
 ```
 

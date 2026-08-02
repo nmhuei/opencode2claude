@@ -22,6 +22,8 @@ opencode2api
 │   ├── start
 │   └── status
 ├── env
+├── api-key
+│   └── generate
 ├── doctor
 ├── completion <shell>
 ├── update
@@ -104,6 +106,18 @@ opencode2api doctor
 ```
 
 `env` emits the Claude Code integration variables derived from resolved configuration. `doctor` evaluates configuration, port, runtime, Docker/proxy requirements, and other dependencies appropriate to the selected egress mode. Docker is not treated as required in direct mode.
+
+
+## API keys
+
+```bash
+opencode2api api-key generate
+opencode2api api-key generate --count 3 --quiet
+opencode2api api-key generate --save --config opencode2api.toml
+opencode2api api-key generate --save --replace --config opencode2api.toml
+```
+
+Keys use cryptographically secure random bytes and default to a 256-bit value prefixed with `sk-oc2-`. `--save` atomically appends to `auth_tokens`, preserves existing TOML comments, writes the config with owner-only mode `0600`, and reports that a bridge restart is required. `--replace` discards existing bridge client keys.
 
 ## Completion
 

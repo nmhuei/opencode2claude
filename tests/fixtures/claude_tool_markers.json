@@ -1,0 +1,103 @@
+[
+  {
+    "name": "cron_direct_after_prose",
+    "input": "Preparing the schedule.\n[Requesting CronCreate: {\"cron\":\"*/30 * * * *\",\"prompt\":\"write CRON_PARSE_VERIFY_OK\",\"recurring\":true}]",
+    "expected_cleaned": "Preparing the schedule.\n",
+    "expected_calls": [{"name":"CronCreate","arguments":{"cron":"*/30 * * * *","prompt":"write CRON_PARSE_VERIFY_OK","recurring":true}}],
+    "expected_malformed": false
+  },
+  {
+    "name": "cron_direct_unicode",
+    "input": "[Requesting CronCreate: {\"cron\":\"*/30 * * * *\",\"prompt\":\"ghi tiếng Việt: đã kiểm tra ✓\",\"recurring\":true}]",
+    "expected_cleaned": "",
+    "expected_calls": [{"name":"CronCreate","arguments":{"cron":"*/30 * * * *","prompt":"ghi tiếng Việt: đã kiểm tra ✓","recurring":true}}],
+    "expected_malformed": false
+  },
+  {
+    "name": "taskupdate_direct",
+    "input": "[Requesting TaskUpdate: {\"taskId\":\"10\",\"status\":\"completed\"}]",
+    "expected_cleaned": "",
+    "expected_calls": [{"name":"TaskUpdate","arguments":{"taskId":"10","status":"completed"}}],
+    "expected_malformed": false
+  },
+  {
+    "name": "ask_user_question_direct",
+    "input": "[Requesting AskUserQuestion: {\"questions\":[{\"question\":\"Proceed?\",\"header\":\"Confirm\",\"options\":[{\"label\":\"Yes\",\"description\":\"Continue\"}],\"multiSelect\":false}]}]",
+    "expected_cleaned": "",
+    "expected_calls": [{"name":"AskUserQuestion","arguments":{"questions":[{"question":"Proceed?","header":"Confirm","options":[{"label":"Yes","description":"Continue"}],"multiSelect":false}]}}],
+    "expected_malformed": false
+  },
+  {
+    "name": "approval_direct",
+    "input": "[Requesting approval: {\"reason\":\"Run harmless verification\"}]",
+    "expected_cleaned": "",
+    "expected_calls": [{"name":"approval","arguments":{"reason":"Run harmless verification"}}],
+    "expected_malformed": false
+  },
+  {
+    "name": "creating_json_direct",
+    "input": "[Creating CronCreate: {\"cron\":\"7 * * * *\",\"prompt\":\"verify\",\"recurring\":true}]",
+    "expected_cleaned": "",
+    "expected_calls": [{"name":"CronCreate","arguments":{"cron":"7 * * * *","prompt":"verify","recurring":true}}],
+    "expected_malformed": false
+  },
+  {
+    "name": "duplicate_cron_markers",
+    "input": "[Requesting CronCreate: {\"cron\":\"*/30 * * * *\",\"prompt\":\"verify\",\"recurring\":true}]\n[Requesting CronCreate: {\"cron\":\"*/30 * * * *\",\"prompt\":\"verify\",\"recurring\":true}]",
+    "expected_cleaned": "\n",
+    "expected_calls": [
+      {"name":"CronCreate","arguments":{"cron":"*/30 * * * *","prompt":"verify","recurring":true}},
+      {"name":"CronCreate","arguments":{"cron":"*/30 * * * *","prompt":"verify","recurring":true}}
+    ],
+    "expected_malformed": false
+  },
+  {
+    "name": "direct_fenced_inert",
+    "input": "```text\n[Requesting CronCreate: {\"cron\":\"*/30 * * * *\",\"prompt\":\"example\"}]\n```",
+    "expected_cleaned": "```text\n[Requesting CronCreate: {\"cron\":\"*/30 * * * *\",\"prompt\":\"example\"}]\n```",
+    "expected_calls": [],
+    "expected_malformed": false
+  },
+  {
+    "name": "direct_inline_inert",
+    "input": "Use `[Requesting CronCreate: {\"cron\":\"*/30 * * * *\",\"prompt\":\"example\"}]` as documentation.",
+    "expected_cleaned": "Use `[Requesting CronCreate: {\"cron\":\"*/30 * * * *\",\"prompt\":\"example\"}]` as documentation.",
+    "expected_calls": [],
+    "expected_malformed": false
+  },
+  {
+    "name": "direct_quote_inert",
+    "input": "> [Requesting CronCreate: {\"cron\":\"*/30 * * * *\",\"prompt\":\"example\"}]",
+    "expected_cleaned": "> [Requesting CronCreate: {\"cron\":\"*/30 * * * *\",\"prompt\":\"example\"}]",
+    "expected_calls": [],
+    "expected_malformed": false
+  },
+  {
+    "name": "direct_escaped_inert",
+    "input": "\\[Requesting CronCreate: {\"cron\":\"*/30 * * * *\",\"prompt\":\"example\"}]",
+    "expected_cleaned": "\\[Requesting CronCreate: {\"cron\":\"*/30 * * * *\",\"prompt\":\"example\"}]",
+    "expected_calls": [],
+    "expected_malformed": false
+  },
+  {
+    "name": "direct_valid_then_malformed",
+    "input": "[Requesting CronList: {}]\n[Requesting CronCreate: {\"cron\":]",
+    "expected_cleaned": "\n[Requesting CronCreate: {\"cron\":]",
+    "expected_calls": [{"name":"CronList","arguments":{}}],
+    "expected_malformed": true
+  },
+  {
+    "name": "direct_malformed_then_valid",
+    "input": "[Requesting CronCreate: {\"cron\":\"*/30 * * * *\"\n[Requesting CronList: {}]",
+    "expected_cleaned": "[Requesting CronCreate: {\"cron\":\"*/30 * * * *\"\n",
+    "expected_calls": [{"name":"CronList","arguments":{}}],
+    "expected_malformed": true
+  },
+  {
+    "name": "creating_formatter_non_json_fail_closed",
+    "input": "[Creating cron: */30 * * * *, prompt: verify, recurring: true]",
+    "expected_cleaned": "[Creating cron: */30 * * * *, prompt: verify, recurring: true]",
+    "expected_calls": [],
+    "expected_malformed": true
+  }
+]

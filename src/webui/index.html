@@ -1,347 +1,471 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="mecha">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>OpenCode2API Console</title>
-<meta name="description" content="Operations Dashboard for OpenCode2API API Bridge">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/dashboard/style.css?v=1.1.2">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#080B1A">
+  <title>OpenCode2API — Mecha Control Deck</title>
+  <link rel="icon" type="image/png" sizes="32x32" href="/dashboard/assets/mecha/branding/favicon-32.png">
+  <link rel="stylesheet" href="/dashboard/style.css">
+  <link rel="stylesheet" href="/dashboard/mecha.css">
+  <link rel="stylesheet" href="/dashboard/control-deck-v2.css">
 </head>
-<body>
+<body class="dashboard-page">
+  <svg class="icon-sprite" aria-hidden="true">
+    <symbol id="icon-dashboard" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="5" rx="2"/><rect x="14" y="12" width="7" height="9" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/></symbol>
+    <symbol id="icon-key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="m11 12 8-8M15 4h4v4M4 19l-2 2M8 19v3"/></symbol>
+    <symbol id="icon-model" viewBox="0 0 24 24"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z"/><path d="m4.4 7.7 7.6 4.2 7.6-4.2M12 12v9"/></symbol>
+    <symbol id="icon-history" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/></symbol>
+    <symbol id="icon-system" viewBox="0 0 24 24"><path d="M4 6h10M18 6h2M4 12h2M10 12h10M4 18h7M15 18h5"/><circle cx="16" cy="6" r="2"/><circle cx="8" cy="12" r="2"/><circle cx="13" cy="18" r="2"/></symbol>
+    <symbol id="icon-service" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><circle cx="4" cy="6" r="2"/><circle cx="20" cy="6" r="2"/><circle cx="4" cy="18" r="2"/><circle cx="20" cy="18" r="2"/><path d="m6 7 3.5 3M18 7l-3.5 3M6 17l3.5-3M18 17l-3.5-3"/></symbol>
+    <symbol id="icon-requests" viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/><path d="m4 7 5-4 6 5 6-4"/></symbol>
+    <symbol id="icon-clock" viewBox="0 0 24 24"><circle cx="12" cy="13" r="8"/><path d="M9 2h6M12 5v8l4 2"/></symbol>
+    <symbol id="icon-server" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7h.01M7 17h.01M11 7h6M11 17h6"/></symbol>
+    <symbol id="icon-network" viewBox="0 0 24 24"><circle cx="12" cy="5" r="2.5"/><circle cx="5" cy="18" r="2.5"/><circle cx="19" cy="18" r="2.5"/><path d="M10.7 7.2 6.3 15.8M13.3 7.2l4.4 8.6M7.5 18h9"/></symbol>
+    <symbol id="icon-shield" viewBox="0 0 24 24"><path d="M12 3 20 6v6c0 5-3.4 8.2-8 9-4.6-.8-8-4-8-9V6l8-3Z"/><path d="m9 12 2 2 4-5"/></symbol>
+    <symbol id="icon-tool" viewBox="0 0 24 24"><path d="M14.7 6.3a4 4 0 0 0-5 5L3 18l3 3 6.7-6.7a4 4 0 0 0 5-5l-3 3-3-3 3-3Z"/></symbol>
+    <symbol id="icon-refresh" viewBox="0 0 24 24"><path d="M20 6v5h-5M4 18v-5h5"/><path d="M18.5 10A7 7 0 0 0 6 7.5L4 11M5.5 14A7 7 0 0 0 18 16.5l2-3.5"/></symbol>
+    <symbol id="icon-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></symbol>
+    <symbol id="icon-download" viewBox="0 0 24 24"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 20h16"/></symbol>
+    <symbol id="icon-log" viewBox="0 0 24 24"><path d="M4 4h16v16H4zM8 9l3 3-3 3M13 15h3"/></symbol>
+    <symbol id="icon-doctor" viewBox="0 0 24 24"><path d="M3 12h4l2-5 4 10 2-5h6"/><rect x="3" y="4" width="18" height="16" rx="2"/></symbol>
+  </svg>
 
-<!-- Login Screen -->
-<div id="loginOverlay" class="login-overlay hidden">
-  <div class="login-card">
-    <div class="login-header">
-      <div class="login-icon">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
-          <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
-        </svg>
-      </div>
-      <h2>Console Login</h2>
-      <p>Enter your admin authorization token to access the operations dashboard.</p>
-    </div>
-    <form id="loginForm" class="login-form">
-      <div class="form-group">
-        <label for="loginToken">Admin Token</label>
-        <input type="password" id="loginToken" placeholder="Enter DASHBOARD_ADMIN_TOKEN" required autocomplete="current-password">
-      </div>
-      <button type="submit" class="btn btn-primary btn-block" id="loginSubmitBtn">
-        <span>Sign In</span>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <line x1="5" y1="12" x2="19" y2="12"/>
-          <polyline points="12 5 19 12 12 19"/>
-        </svg>
-      </button>
-    </form>
-    <div class="login-footer">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
-        <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
-      </svg>
-      <span>Secure Bridge Connection</span>
-    </div>
-  </div>
-</div>
-
-<!-- Main App Layout -->
-<div class="app-layout" id="appLayout">
-  <!-- Sidebar -->
-  <aside class="sidebar">
-    <div class="sidebar-header">
-      <div class="brand">
-        <div class="brand-logo">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-            <polygon points="12 2 2 7 12 12 22 7 12 2"/>
-            <polyline points="2 17 12 22 22 17"/>
-            <polyline points="2 12 12 17 22 12"/>
-          </svg>
-        </div>
-        <div class="brand-text">
-          <span class="brand-name">OpenCode2API</span>
-          <span class="brand-sub">Bridge Admin Console</span>
-        </div>
-      </div>
-    </div>
-
-    <!-- Navigation -->
-    <nav class="sidebar-nav" id="sidebarNav">
-      <button class="nav-btn active" data-view="overview">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon">
-          <rect x="3" y="3" width="7" height="7" rx="1"/>
-          <rect x="14" y="3" width="7" height="7" rx="1"/>
-          <rect x="3" y="14" width="7" height="7" rx="1"/>
-          <rect x="14" y="14" width="7" height="7" rx="1"/>
-        </svg>
-        <span>Overview</span>
-      </button>
-      <button class="nav-btn" data-view="proxies">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon">
-          <rect x="2" y="2" width="20" height="8" rx="2"/>
-          <rect x="2" y="14" width="20" height="8" rx="2"/>
-          <circle cx="6" cy="6" r="1" fill="currentColor"/>
-          <circle cx="6" cy="18" r="1" fill="currentColor"/>
-        </svg>
-        <span>Proxy Pool</span>
-      </button>
-      <button class="nav-btn" data-view="config">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon">
-          <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>
-          <circle cx="12" cy="12" r="4"/>
-        </svg>
-        <span>Configuration</span>
-      </button>
-      <button class="nav-btn" data-view="tester">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="nav-icon">
-          <polygon points="5 3 19 12 5 21 5 3"/>
-        </svg>
-        <span>API Tester</span>
-      </button>
-    </nav>
-
-    <!-- Sidebar Footer (System Status) -->
-    <div class="sidebar-footer">
-      <div class="footer-status-row">
-        <span class="status-title">System Status</span>
-        <span class="status-badge" id="systemStatusBadge">
-          <span class="status-badge-dot"></span>
-          <span class="status-badge-text">Connecting</span>
-        </span>
-      </div>
-
-      <div class="footer-stats-grid">
-        <div class="footer-stat-card">
-          <div class="stat-card-label">Primary</div>
-          <div class="stat-card-value" id="sidebarPrimaryCount">0/0</div>
-        </div>
-        <div class="footer-stat-card">
-          <div class="stat-card-label">Standby</div>
-          <div class="stat-card-value" id="sidebarStandbyCount">0/0</div>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar" aria-label="Primary navigation">
+      <div class="brand-row">
+        <div class="brand-mark"><img class="brand-symbol pixel-art" src="/dashboard/assets/mecha/branding/logo-icon.png" alt="OpenCode2API"></div>
+        <div class="brand-copy">
+          <strong>OpenCode2API</strong>
+          <span data-i18n="localControlPlane">Local control plane</span>
         </div>
       </div>
 
-      <div class="footer-meta-card">
-        <div class="meta-row">
-          <span class="meta-label">Version</span>
-          <span class="meta-val" id="sidebarVersion">---</span>
-        </div>
-        <div class="meta-row">
-          <span class="meta-label">Uptime</span>
-          <span class="meta-val" id="sidebarUptime">---</span>
-        </div>
-      </div>
-
-      <div class="footer-actions">
-        <button class="btn btn-destructive btn-block" id="logoutBtn" style="display:none; margin-bottom: 8px;">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
-            <polyline points="16 17 21 12 16 7"/>
-            <line x1="21" y1="12" x2="9" y2="12"/>
-          </svg>
-          <span>Sign Out</span>
+      <nav class="nav-list" id="navList">
+        <button class="nav-item active" data-view="dashboard" type="button">
+          <svg class="icon"><use href="#icon-dashboard"></use></svg><span data-i18n="dashboard">Dashboard</span>
         </button>
-        <button class="btn btn-secondary btn-block" id="settingsBtn">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="3"/>
-            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-          </svg>
-          <span>Admin Token</span>
+        <button class="nav-item" data-view="api" type="button">
+          <svg class="icon"><use href="#icon-key"></use></svg><span data-i18n="apiKeys">API Keys</span>
         </button>
+        <button class="nav-item" data-view="models" type="button">
+          <svg class="icon"><use href="#icon-model"></use></svg><span data-i18n="models">Models</span>
+        </button>
+        <button class="nav-item" data-view="history" type="button">
+          <svg class="icon"><use href="#icon-history"></use></svg><span data-i18n="history">History</span>
+        </button>
+        <button class="nav-item" data-view="system" type="button">
+          <svg class="icon"><use href="#icon-system"></use></svg><span data-i18n="system">System</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-spacer"></div>
+      <div class="sidebar-footer">
+        <div class="sidebar-status-row">
+          <span class="status-dot neutral" id="sidebarStatusDot"></span>
+          <span id="sidebarStatusText" data-i18n="connecting">Connecting</span>
+        </div>
+        <div class="sidebar-model" id="sidebarModel">—</div>
+        <div class="sidebar-version" id="sidebarVersion">—</div>
+        <div class="sidebar-footer-actions">
+          <button class="compact-button" id="languageToggle" type="button" aria-label="Change language">VI</button>
+          <button class="compact-button" id="logoutButton" type="button" data-i18n="signOut">Sign out</button>
+        </div>
       </div>
-    </div>
-  </aside>
+    </aside>
 
-  <!-- Sidebar Backdrop for mobile drawer -->
-  <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
-
-  <!-- Main Work Area -->
-  <main class="main-content" id="mainContent">
-    <!-- Mobile Header -->
-    <header class="mobile-header" id="mobileHeader">
-      <div class="brand">
-        <div class="brand-logo">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-            <polygon points="12 2 2 7 12 12 22 7 12 2"/>
-            <polyline points="2 17 12 22 22 17"/>
-            <polyline points="2 12 12 17 22 12"/>
-          </svg>
+    <div class="main-shell">
+      <header class="topbar">
+        <button class="icon-button mobile-only" id="menuButton" type="button" aria-label="Open navigation">☰</button>
+        <div class="topbar-title">
+          <h1 id="viewTitle">Dashboard</h1>
+          <p id="viewDescription" data-i18n="dashboardDescription">Observe bridge health, traffic and recent changes.</p>
         </div>
-        <span class="brand-name">OpenCode2API</span>
-      </div>
-      <button class="icon-btn" id="mobileMenuBtn">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/>
-        </svg>
-      </button>
-    </header>
-
-    <div class="content-container">
-      
-      <!-- Overview View -->
-      <section class="view active" id="view-overview">
-        <div class="view-header">
-          <div>
-            <h1 class="view-title">Overview</h1>
-            <p class="view-desc">Monitor bridge API status, uptime, proxy node availability, and health metrics.</p>
-          </div>
-          <button class="btn btn-secondary btn-sm" id="refreshOverviewBtn">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
-            </svg>
-            <span>Refresh</span>
+        <div class="topbar-actions">
+          <span class="connection-pill" id="connectionPill"><span class="status-dot neutral"></span><span data-i18n="connecting">Connecting</span></span>
+          <button class="button ghost theme-toggle" id="themeToggle" data-theme-toggle type="button" aria-pressed="true"><span data-theme-label>MECHA</span></button>
+          <button class="button ghost icon-text-button" id="refreshButton" type="button">
+            <svg class="icon"><use href="#icon-refresh"></use></svg><span data-i18n="refresh">Refresh</span>
           </button>
+          <details class="more-menu">
+            <summary class="icon-button" aria-label="More actions">•••</summary>
+            <div class="menu-popover">
+              <button type="button" data-global-action="restart" data-i18n="restartBridge">Restart bridge</button>
+              <button type="button" data-global-action="logs" data-i18n="openLogs">Open logs</button>
+              <button type="button" data-global-action="doctor" data-i18n="runDiagnostics">Run diagnostics</button>
+              <button type="button" data-global-action="logout" data-i18n="signOut">Sign out</button>
+            </div>
+          </details>
         </div>
+      </header>
 
-        <div class="metrics-grid" id="metricsGrid">
-          <!-- Rendered dynamically -->
-        </div>
+      <main class="content" id="mainContent">
+        <section class="view active" data-view-panel="dashboard">
+          <div class="metric-grid">
+            <article class="metric-card"><div class="metric-icon"><svg class="icon"><use href="#icon-service"></use></svg></div><div><span class="metric-label" data-i18n="service">Service</span><strong id="metricService">—</strong><small id="metricServiceDetail">—</small></div></article>
+            <article class="metric-card"><div class="metric-icon"><svg class="icon"><use href="#icon-model"></use></svg></div><div><span class="metric-label" data-i18n="model">Model</span><strong id="metricModel">—</strong><small data-i18n="currentUpstream">Current upstream</small></div></article>
+            <article class="metric-card"><div class="metric-icon"><svg class="icon"><use href="#icon-requests"></use></svg></div><div><span class="metric-label" data-i18n="requests">Requests</span><strong id="metricRequests">0</strong><small id="metricRequestDetail">—</small></div></article>
+            <article class="metric-card"><div class="metric-icon"><svg class="icon"><use href="#icon-clock"></use></svg></div><div><span class="metric-label" data-i18n="uptime">Uptime</span><strong id="metricUptime">—</strong><small id="metricUptimeDetail">—</small></div></article>
+          </div>
 
-        <div class="view-subheader">
-          <h2>Active Proxy Pool</h2>
-          <span class="badge badge-indigo" id="overviewProxyBadge">0 Nodes</span>
-        </div>
-        <div class="card overflow-x">
-          <div id="overviewProxyTable">
-            <div class="card-empty">Loading proxy nodes...</div>
-          </div>
-        </div>
-
-        <div class="view-subheader">
-          <h2>Console Events</h2>
-          <button class="btn btn-sm btn-secondary" id="clearEventsBtn">Clear Logs</button>
-        </div>
-        <div class="card log-feed-card">
-          <div class="log-feed" id="eventLog">
-            <!-- Dynamic log feed -->
-          </div>
-        </div>
-      </section>
-
-      <!-- Proxies View -->
-      <section class="view" id="view-proxies">
-        <div class="view-header">
-          <div>
-            <h1 class="view-title">Proxy Pool Management</h1>
-            <p class="view-desc">Manage proxy nodes, monitor latency, cooldown timers, success counts, and restart managed containers.</p>
-          </div>
-          <button class="btn btn-secondary btn-sm" id="refreshProxiesBtn">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
-            </svg>
-            <span>Refresh</span>
-          </button>
-        </div>
-        <div class="card overflow-x" id="proxyDetailTable">
-          <div class="card-empty">Loading proxy details...</div>
-        </div>
-      </section>
-
-      <!-- Config View -->
-      <section class="view" id="view-config">
-        <div class="view-header">
-          <div>
-            <h1 class="view-title">Bridge Configuration</h1>
-            <p class="view-desc">Edit parameters of the opencode2api daemon. Admin authorization token required to write changes.</p>
-          </div>
-          <div class="header-actions" style="display: flex; gap: 8px; align-items: center;">
-            <button class="btn btn-secondary btn-sm" id="refreshConfigBtn">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
-              </svg>
-              <span>Refresh</span>
-            </button>
-            <div id="configActions"></div>
-          </div>
-        </div>
-        <div class="card" id="configPanel">
-          <div class="card-empty">Loading configuration data...</div>
-        </div>
-      </section>
-
-      <!-- API Tester View -->
-      <section class="view" id="view-tester">
-        <div class="view-header">
-          <div>
-            <h1 class="view-title">API Tester</h1>
-            <p class="view-desc">Test bridge translation and model routing directly in your browser. Streams live tokens and reasoning process.</p>
-          </div>
-        </div>
-        
-        <div class="tester-layout">
-          <!-- Left settings panel -->
-          <div class="card tester-settings">
-            <div class="card-header-simple">Test Configurations</div>
-            <form id="testerForm" class="tester-form">
-              <div class="form-group">
-                <label for="testerModel">Model to test</label>
-                <input type="text" id="testerModel" list="availableModels" placeholder="opencode/deepseek-v4-flash-free" required>
-                <p class="form-help">Select or type any model identifier configured upstream.</p>
+          <div class="dashboard-grid">
+            <article class="section-card">
+              <div class="section-header"><div><h2 data-i18n="systemStatus">System status</h2><p data-i18n="systemStatusDescription">Core services and protected runtime components.</p></div><button class="text-button" type="button" data-jump-view="system" data-i18n="viewSystem">View system</button></div>
+              <div class="status-list" id="dashboardStatusList">
+                <button type="button" data-jump-view="system"><span data-i18n="bridge">Bridge</span><span id="statusBridge" class="status-value">—</span></button>
+                <button type="button" data-jump-view="system"><span data-i18n="apiAuthentication">API authentication</span><span id="statusApiAuth" class="status-value">—</span></button>
+                <button type="button" data-jump-view="system"><span data-i18n="primaryProxies">Primary proxies</span><span id="statusPrimary" class="status-value">—</span></button>
+                <button type="button" data-jump-view="system"><span data-i18n="standbyProxies">Standby proxies</span><span id="statusStandby" class="status-value">—</span></button>
+                <button type="button" data-jump-view="system"><span data-i18n="circuitBreakers">Circuit breakers</span><span id="statusCircuits" class="status-value">—</span></button>
+                <button type="button" data-jump-view="system"><span data-i18n="backgroundWorkers">Background workers</span><span id="statusWorkers" class="status-value">—</span></button>
               </div>
-              <div class="form-row">
-                <div class="form-group flex-1">
-                  <label for="testerTemp">Temperature</label>
-                  <input type="number" id="testerTemp" min="0" max="1" step="0.1" value="0.7">
-                </div>
-                <div class="form-group flex-1">
-                  <label for="testerTokens">Max Tokens</label>
-                  <input type="number" id="testerTokens" min="1" max="8192" value="2048">
-                </div>
-              </div>
-              <div class="form-group">
-                <label for="testerPrompt">User Prompt</label>
-                <textarea id="testerPrompt" rows="5" placeholder="Type a prompt for the model..." required>Solve this small routing puzzle: three agents send 12, 18, and 25 requests. Explain briefly how you calculate the total, then give the final number.</textarea>
-              </div>
-              
-              <button type="submit" class="btn btn-primary btn-block" id="testerSubmitBtn">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <polygon points="5 3 19 12 5 21 5 3"/>
-                </svg>
-                <span>Run Prompt Test</span>
-              </button>
-              <button type="button" class="btn btn-secondary btn-block" id="testerSyntheticBtn">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <polyline points="23 4 23 10 17 10"/>
-                  <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
-                </svg>
-                <span>Run Synthetic Stream</span>
-              </button>
-            </form>
+            </article>
+
+            <article class="section-card">
+              <div class="section-header"><div><h2 data-i18n="recentActivity">Recent activity</h2><p data-i18n="recentActivityDescription">Meaningful changes from the local control plane.</p></div><button class="text-button" id="clearEventsButton" type="button" data-i18n="clear">Clear</button></div>
+              <div class="event-list" id="eventList"><div class="empty-state" data-i18n="waitingForEvents">Waiting for events…</div></div>
+            </article>
           </div>
-          
-          <!-- Right output panel -->
-          <div class="tester-output-container">
-            <div class="card tester-results">
-              <div class="card-header-simple">
-                <span>Model Output</span>
-                <span class="test-badge hidden" id="testLatencyBadge">--- ms</span>
-              </div>
-              <div class="test-response-area" id="testResponseArea">
-                <div class="response-placeholder">Run a prompt test to view model response.</div>
-              </div>
+
+          <article class="quick-actions section-card">
+            <div class="quick-actions-header"><div><span class="eyebrow">COMMAND SHORTCUTS</span><h2 data-i18n="quickActions">Quick actions</h2></div><p data-i18n="quickActionsDescription">Common tasks without leaving the dashboard.</p></div>
+            <div class="quick-action-grid">
+              <button class="quick-action-card" id="quickCreateKey" type="button"><span class="quick-action-icon"><svg class="icon"><use href="#icon-key"></use></svg></span><span class="quick-action-copy"><strong data-i18n="createApiKey">Create API key</strong><small>Generate a new credential</small></span><span class="quick-action-arrow" aria-hidden="true">→</span></button>
+              <button class="quick-action-card" id="quickTestModel" type="button"><span class="quick-action-icon"><svg class="icon"><use href="#icon-model"></use></svg></span><span class="quick-action-copy"><strong data-i18n="testModel">Test model</strong><small>Run a live model check</small></span><span class="quick-action-arrow" aria-hidden="true">→</span></button>
+              <button class="quick-action-card" id="quickViewLogs" type="button"><span class="quick-action-icon"><svg class="icon"><use href="#icon-log"></use></svg></span><span class="quick-action-copy"><strong data-i18n="viewLogs">View logs</strong><small>Inspect bridge output</small></span><span class="quick-action-arrow" aria-hidden="true">→</span></button>
+            </div>
+          </article>
+        </section>
+
+        <section class="view" data-view-panel="api">
+          <div class="page-actions compact-page-actions">
+            <div class="inline-note"><span class="status-dot ok"></span><span data-i18n="hotReloadNote">Changes apply immediately without restarting the bridge.</span></div>
+            <div class="button-row">
+              <button class="button" id="verifyApiKeyButton" type="button" data-i18n="checkApiKey">Check API key</button>
+              <button class="button primary" id="createApiKeyButton" type="button" data-i18n="createApiKey">Create API key</button>
             </div>
           </div>
-        </div>
-      </section>
 
+          <div class="api-workspace split-workspace">
+            <article class="section-card table-card split-list-pane api-list-pane">
+              <div class="section-header"><div><h2 data-i18n="clientApiKeys">Client API keys</h2><p data-i18n="clientApiKeysDescription">Select a key to inspect its access policy.</p></div><span class="count-badge" id="apiKeyCountBadge">0</span></div>
+              <div class="table-toolbar compact-toolbar">
+                <label class="search-field"><span data-i18n="search">Search</span><input id="apiKeySearch" type="search" data-i18n-placeholder="searchKeyPlaceholder" placeholder="Name or fingerprint"></label>
+                <label><span data-i18n="status">Status</span><select id="apiKeyStatusFilter"><option value="all" data-i18n="allStatuses">All statuses</option><option value="active" data-i18n="active">Active</option><option value="disabled" data-i18n="disabled">Disabled</option><option value="expired" data-i18n="expired">Expired</option></select></label>
+              </div>
+              <div class="resource-list api-key-resource-list" id="apiKeyInventory"><div class="empty-state" data-i18n="loadingApiKeys">Loading API keys…</div></div>
+            </article>
+
+            <aside class="section-card split-detail-pane api-overview-pane" id="apiKeyOverviewPane">
+              <div class="section-header api-overview-header"><div><span class="eyebrow" data-i18n="apiKeySettings">API key overview</span><h2 id="apiOverviewTitle">Select an API key</h2><p id="apiOverviewSubtitle">Policy, permissions and usage appear here.</p></div><span id="apiOverviewStatus" class="status-tag neutral"><span class="status-dot neutral"></span>—</span></div>
+              <div class="api-overview-content" id="apiKeyOverviewContent"><div class="empty-state">Select a credential from the list.</div></div>
+              <div class="split-detail-footer"><button class="button primary" id="editSelectedApiKeyButton" type="button" disabled data-i18n="edit">Edit API key</button></div>
+            </aside>
+          </div>
+        </section>
+
+        <section class="view" data-view-panel="models">
+          <div class="models-workspace split-workspace">
+            <div class="models-list-column split-list-pane">
+              <article class="section-card current-model-card compact-current-model-card">
+                <div class="current-model-main"><div class="metric-icon"><svg class="icon"><use href="#icon-model"></use></svg></div><div><span class="metric-label" data-i18n="currentModel">Current model</span><h2 id="currentModelName">—</h2><code id="currentModelId">—</code></div></div>
+                <div class="current-model-state"><span id="currentModelState"><span class="status-tag neutral"><span class="status-dot neutral"></span>—</span></span><button class="button" id="restartModelButton" type="button" hidden data-i18n="restartBridge">Restart bridge</button></div>
+              </article>
+              <div class="notice warning" id="modelRestartNotice" hidden data-i18n="modelRestartRequired">The configured model changed. Restart the bridge to activate it.</div>
+
+              <article class="section-card table-card model-catalog-card">
+                <div class="section-header"><div><h2 data-i18n="availableModels">Available models</h2><p data-i18n="availableModelsDescription">Choose one free upstream model for the bridge.</p></div><button class="button" id="reloadModelsButton" type="button" data-i18n="reload">Reload</button></div>
+                <label class="model-search"><span data-i18n="search">Search</span><input id="modelSearch" type="search" data-i18n-placeholder="searchModelPlaceholder" placeholder="Search model"></label>
+                <div class="model-list" id="modelGrid"><div class="empty-state" data-i18n="loadingModels">Loading models…</div></div>
+              </article>
+            </div>
+
+            <article class="section-card tester-panel split-detail-pane" id="modelTesterPanel">
+              <div class="section-header"><div><h2 data-i18n="testModel">Test model</h2><p data-i18n="testModelDescription">Run a reasoning and streaming check without leaving this page.</p></div><span class="count-badge" id="testerLatency" data-i18n="idle">Idle</span></div>
+              <form id="testerForm" class="stack-form">
+                <label><span data-i18n="prompt">Prompt</span><textarea id="testerPrompt" rows="4">Rank: Atlas 820ms/1.2%/$0.40; Nova 1050ms/0.5%/$0.25; Orion 700ms/1.8%/$0.55. Use weights 45/35/20, normalize, show math, and recommend one.</textarea></label>
+                <div class="tester-controls">
+                  <label class="tester-model-select"><span data-i18n="model">Model</span><select id="testerModel" aria-label="Model used for this test"></select></label>
+                  <div class="tester-options">
+                    <label class="switch-control" title="Request model reasoning at maximum effort"><input id="testerThinking" type="checkbox" role="switch" checked><span class="switch-track" aria-hidden="true"></span><span data-i18n="thinking">Thinking</span></label>
+                    <label class="check"><input id="testerStream" type="checkbox" checked><span data-i18n="streamResponse">Stream response</span></label>
+                  </div>
+                  <button class="button primary" id="testerSubmit" type="submit" data-i18n="runTest">Run test</button>
+                </div>
+              </form>
+              <div class="response-grid compact-response-grid">
+                <div><span class="response-label" data-i18n="response">Response</span><pre id="testerOutput" data-i18n="noResponseYet">No response yet.</pre></div>
+                <div><span class="response-label" data-i18n="reasoning">Reasoning</span><pre id="testerReasoning" data-i18n="noReasoningYet">No reasoning yet.</pre></div>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" data-view-panel="history">
+          <div class="metric-grid history-metric-grid compact-metric-grid">
+            <article class="metric-card"><div class="metric-icon"><svg class="icon"><use href="#icon-history"></use></svg></div><div><span class="metric-label" data-i18n="requestsToday">Requests today</span><strong id="historyMetricToday">0</strong><small id="historyMetricTotal">0 total</small></div></article>
+            <article class="metric-card"><div class="metric-icon"><svg class="icon"><use href="#icon-shield"></use></svg></div><div><span class="metric-label" data-i18n="successRate">Success rate</span><strong id="historyMetricSuccess">—</strong><small id="historyMetricFailed">0 failed</small></div></article>
+            <article class="metric-card"><div class="metric-icon"><svg class="icon"><use href="#icon-clock"></use></svg></div><div><span class="metric-label" data-i18n="averageLatency">Average latency</span><strong id="historyMetricLatency">—</strong><small data-i18n="completedRequests">Completed requests</small></div></article>
+            <article class="metric-card"><div class="metric-icon"><svg class="icon"><use href="#icon-server"></use></svg></div><div><span class="metric-label" data-i18n="storedSize">Stored size</span><strong id="historyMetricSize">—</strong><small id="historyMetricStorage">—</small></div></article>
+          </div>
+
+          <div class="page-actions history-page-actions compact-page-actions">
+            <div class="inline-note" id="historyCaptureState"><span class="status-dot neutral"></span><span data-i18n="loadingHistoryStatus">Loading history status…</span></div>
+            <div class="button-row">
+              <button class="button" id="historySettingsButton" type="button" data-i18n="historySettings">History settings</button>
+              <button class="button" id="historyExportFilteredButton" type="button" data-i18n="exportFiltered">Export filtered</button>
+              <button class="button danger" id="historyPurgeButton" type="button" data-i18n="purgeHistory">Purge history</button>
+            </div>
+          </div>
+
+          <div class="history-workspace split-workspace">
+            <article class="section-card table-card split-list-pane history-list-pane">
+              <div class="section-header"><div><h2 data-i18n="requestHistory">Request history</h2><p data-i18n="requestHistoryDescription">Select a request to inspect its captured content.</p></div><span class="count-badge" id="historyCountBadge">0</span></div>
+              <div class="history-toolbar compact-history-toolbar">
+                <label class="search-field history-search"><span data-i18n="search">Search</span><input id="historySearch" type="search" data-i18n-placeholder="historySearchPlaceholder" placeholder="Request ID, prompt, client or model"></label>
+                <label><span data-i18n="status">Status</span><select id="historyStatusFilter"><option value="" data-i18n="allStatuses">All statuses</option><option value="completed" data-i18n="completed">Completed</option><option value="failed" data-i18n="failed">Failed</option><option value="cancelled" data-i18n="cancelled">Cancelled</option><option value="interrupted" data-i18n="interrupted">Interrupted</option><option value="running" data-i18n="running">Running</option></select></label>
+                <label><span data-i18n="protocol">Protocol</span><select id="historyProtocolFilter"><option value="" data-i18n="allProtocols">All protocols</option><option value="anthropic">Anthropic</option><option value="openai">OpenAI</option></select></label>
+                <label><span data-i18n="model">Model</span><select id="historyModelFilter"><option value="" data-i18n="allModels">All models</option></select></label>
+                <label><span data-i18n="thinking">Thinking</span><select id="historyThinkingFilter"><option value="" data-i18n="all">All</option><option value="true" data-i18n="enabled">Enabled</option><option value="false" data-i18n="disabled">Disabled</option></select></label>
+                <label><span data-i18n="streamResponse">Stream</span><select id="historyStreamFilter"><option value="" data-i18n="all">All</option><option value="true" data-i18n="enabled">Enabled</option><option value="false" data-i18n="disabled">Disabled</option></select></label>
+                <button class="button ghost" id="historyClearFiltersButton" type="button" data-i18n="clearFilters">Clear</button>
+              </div>
+              <div class="resource-list history-resource-list" id="historyTable"><div class="empty-state" data-i18n="loadingHistory">Loading request history…</div></div>
+              <div class="history-pagination">
+                <span id="historyPageInfo">—</span>
+                <div class="button-row"><button class="button" id="historyPreviousButton" type="button" data-i18n="previous">Previous</button><button class="button" id="historyNextButton" type="button" data-i18n="next">Next</button></div>
+              </div>
+            </article>
+
+            <article class="section-card split-detail-pane history-inline-detail" id="historyDetailPane">
+              <div class="history-inline-header"><div><span class="eyebrow" data-i18n="requestDetail">Request detail</span><h2 id="historyDetailTitle">Select a request</h2><div class="key-meta" id="historyDetailMeta">Prompt, reasoning and response will appear here.</div></div></div>
+              <div class="drawer-tabs history-detail-tabs" id="historyDetailTabs" role="tablist">
+                <button class="active" type="button" data-history-tab="overview" data-i18n="overview">Overview</button>
+                <button type="button" data-history-tab="inbound_request" data-i18n="inboundRequest">Inbound</button>
+                <button type="button" data-history-tab="effective_request" data-i18n="effectivePrompt">Effective</button>
+                <button type="button" data-history-tab="reasoning" data-i18n="reasoning">Reasoning</button>
+                <button type="button" data-history-tab="response" data-i18n="response">Response</button>
+                <button type="button" data-history-tab="tools" data-i18n="toolsAndSearch">Tools</button>
+                <button type="button" data-history-tab="attempts" data-i18n="attempts">Attempts</button>
+                <button type="button" data-history-tab="provider_raw_response" data-i18n="rawJson">Raw</button>
+              </div>
+              <div class="history-detail-body">
+                <section class="history-detail-panel active" data-history-panel="overview"><div class="history-overview-grid" id="historyOverview"><div class="empty-state">Select a request from the left.</div></div></section>
+                <section class="history-detail-panel" data-history-panel="inbound_request"><div class="history-content-toolbar"><span id="historyInboundBadge" class="count-badge">—</span><button class="button" type="button" data-copy-history-content="inbound_request" data-i18n="copy">Copy</button></div><pre class="history-content-pane" id="historyContentInbound">Select a request first.</pre></section>
+                <section class="history-detail-panel" data-history-panel="effective_request"><div class="history-content-toolbar"><span id="historyEffectiveBadge" class="count-badge">—</span><button class="button" type="button" data-copy-history-content="effective_request" data-i18n="copy">Copy</button></div><pre class="history-content-pane" id="historyContentEffective">Select a request first.</pre></section>
+                <section class="history-detail-panel" data-history-panel="reasoning"><div class="history-content-toolbar"><span id="historyReasoningBadge" class="count-badge">—</span><button class="button" type="button" data-copy-history-content="reasoning" data-i18n="copy">Copy</button></div><pre class="history-content-pane" id="historyContentReasoning">Select a request first.</pre></section>
+                <section class="history-detail-panel" data-history-panel="response"><div class="history-content-toolbar"><span id="historyResponseBadge" class="count-badge">—</span><button class="button" type="button" data-copy-history-content="response" data-i18n="copy">Copy</button></div><pre class="history-content-pane" id="historyContentResponse">Select a request first.</pre></section>
+                <section class="history-detail-panel" data-history-panel="tools"><div class="history-timeline" id="historyToolsTimeline"><div class="empty-state" data-i18n="noToolEvents">No tool or search events.</div></div></section>
+                <section class="history-detail-panel" data-history-panel="attempts"><div class="history-attempt-list" id="historyAttemptList"><div class="empty-state" data-i18n="noAttempts">No attempts recorded.</div></div></section>
+                <section class="history-detail-panel" data-history-panel="provider_raw_response"><div class="history-content-toolbar"><span id="historyRawBadge" class="count-badge">—</span><button class="button" type="button" data-copy-history-content="provider_raw_response" data-i18n="copy">Copy</button></div><pre class="history-content-pane" id="historyContentRaw">Select a request first.</pre></section>
+              </div>
+              <div class="split-detail-footer history-detail-footer"><button class="button danger" id="historyDeleteButton" type="button" disabled data-i18n="deleteRequest">Delete request</button><span class="toolbar-spacer"></span><button class="button" id="historyExportOneButton" type="button" disabled data-i18n="exportJson">Export JSON</button></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" data-view-panel="system">
+          <div class="system-workspace split-workspace">
+            <div class="system-overview-column split-list-pane">
+              <div class="system-grid compact-system-grid">
+                <article class="section-card server-overview-card">
+                  <div class="section-header"><div><h2 data-i18n="server">Server</h2><p data-i18n="serverDescription">Current process and listener state.</p></div><div class="button-row"><button class="button" id="restartServerButton" type="button" data-i18n="restart">Restart</button><button class="button danger" id="stopServerButton" type="button" data-i18n="stop">Stop</button></div></div>
+                  <dl class="definition-list compact-definition-list" id="serverFacts"></dl>
+                </article>
+
+                <article class="section-card security-overview-card">
+                  <div class="section-header"><div><h2 data-i18n="security">Security</h2><p data-i18n="securityDescription">Authentication and feature posture.</p></div></div>
+                  <div class="status-list static-list compact-status-list">
+                    <div><span data-i18n="dashboardAuthentication">Dashboard authentication</span><span id="securityDashboard">—</span></div>
+                    <div><span data-i18n="apiAuthentication">API authentication</span><span id="securityApi">—</span></div>
+                    <div><span data-i18n="shellCommands">Shell commands</span><span id="securityShell">—</span></div>
+                    <div><span data-i18n="managedApiKeys">Managed API keys</span><span id="securityKeys">—</span></div>
+                  </div>
+                </article>
+              </div>
+
+              <article class="section-card maintenance-card compact-maintenance-card">
+                <div><h2 data-i18n="maintenance">Maintenance</h2><p data-i18n="maintenanceDescription">Open operational tools without leaving the overview.</p></div>
+                <div class="maintenance-actions">
+                  <button class="maintenance-button" id="openLogsButton" type="button"><svg class="icon"><use href="#icon-log"></use></svg><span><strong data-i18n="viewLogs">View logs</strong><small data-i18n="viewLogsDescription">Bridge or proxy output.</small></span></button>
+                  <button class="maintenance-button" id="openDiagnosticsButton" type="button"><svg class="icon"><use href="#icon-doctor"></use></svg><span><strong data-i18n="runDiagnostics">Diagnostics</strong><small data-i18n="runDiagnosticsDescription">Runtime and connectivity.</small></span></button>
+                  <button class="maintenance-button" id="openConfigButton" type="button"><svg class="icon"><use href="#icon-system"></use></svg><span><strong data-i18n="advancedConfiguration">Configuration</strong><small data-i18n="advancedConfigurationDescription">Validate active TOML.</small></span></button>
+                </div>
+              </article>
+            </div>
+
+            <article class="section-card table-card split-detail-pane proxy-pool-pane">
+              <div class="section-header"><div><h2 data-i18n="proxyPool">Proxy pool</h2><p id="systemProxySummary" data-i18n="loadingProxyHealth">Loading proxy health…</p></div><button class="button" id="reloadProxiesButton" type="button" data-i18n="refreshHealth">Refresh health</button></div>
+              <div class="table-wrap proxy-table-wrap" id="networkProxyTable"><div class="empty-state" data-i18n="loadingNodes">Loading nodes…</div></div>
+            </article>
+          </div>
+        </section>
+      </main>
     </div>
-  </main>
-</div>
+  </div>
 
-<!-- Toast Container -->
-<div id="toastContainer"></div>
+  <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
+  <div class="toast-region" id="toastRegion" aria-live="polite"></div>
 
-<!-- Modal Container -->
-<div id="modalContainer"></div>
+  <dialog class="modal api-key-create-modal" id="apiKeyCreateDialog">
+    <form id="apiKeyCreateForm" class="modal-shell create-key-shell">
+      <div class="modal-header"><div><span class="eyebrow" data-i18n="newCredential">New credential</span><h2 data-i18n="createApiKey">Create API key</h2><p data-i18n="createApiKeyDescription">Create a named credential with a safe default policy.</p></div><button class="icon-button" type="button" data-close-dialog="apiKeyCreateDialog">×</button></div>
+      <div class="modal-body create-key-body">
+        <div class="form-grid create-key-basics">
+          <label><span data-i18n="name">Name</span><input id="createKeyName" maxlength="80" required placeholder="Mobile App"></label>
+          <label><span data-i18n="preset">Preset</span><select id="createKeyPreset"><option value="claude-code">Claude Code</option><option value="backend">Backend service</option><option value="mobile">Mobile app</option><option value="readonly">Read-only test</option><option value="custom">Custom</option></select></label>
+          <label><span data-i18n="environment">Environment</span><select id="createKeyEnvironment"><option value="production">Production</option><option value="staging">Staging</option><option value="development">Development</option></select></label>
+          <label><span data-i18n="defaultModel">Default model</span><select id="createKeyModel"></select></label>
+          <label class="full create-key-description"><span data-i18n="description">Description</span><textarea id="createKeyDescription" rows="1"></textarea></label>
+        </div>
+        <details class="advanced-section create-key-advanced">
+          <summary data-i18n="advancedSettings">Advanced settings</summary>
+          <div class="advanced-content create-key-advanced-content">
+            <div class="form-grid create-key-policy-grid">
+              <label><span data-i18n="expires">Expires</span><select id="createKeyExpiration"><option value="0">Never</option><option value="7">7 days</option><option value="30">30 days</option><option value="90">90 days</option></select></label>
+              <label><span data-i18n="maxOutputTokens">Max output tokens</span><input id="createKeyMaxOutput" type="number" min="1" value="4096"></label>
+              <label><span data-i18n="reasoningMode">Reasoning mode</span><select id="createKeyReasoning"><option value="inherit">Inherit request</option><option value="disabled">Disabled</option><option value="enabled">Enabled</option></select></label>
+              <label><span data-i18n="reasoningEffort">Reasoning effort</span><select id="createKeyReasoningEffort"><option value="">Provider default</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="max">Max</option></select></label>
+              <label><span data-i18n="maxReasoningTokens">Max reasoning tokens</span><input id="createKeyMaxReasoning" type="number" min="1"></label>
+              <label><span data-i18n="overLimitBehavior">Over-limit behavior</span><select id="createKeyLimitAction"><option value="reject">Reject request</option><option value="clamp">Clamp to limit</option></select></label>
+              <label><span data-i18n="requestsPerMinute">Requests / minute</span><input id="createKeyRpm" type="number" min="0" value="60"></label>
+              <label><span data-i18n="concurrentRequests">Concurrent requests</span><input id="createKeyConcurrent" type="number" min="0" value="4"></label>
+              <label><span data-i18n="dailyQuota">Daily request quota</span><input id="createKeyDailyQuota" type="number" min="0" value="0"></label>
+            </div>
+            <div class="permission-section create-key-permissions"><h3 data-i18n="permissions">Permissions</h3><div class="permission-grid create-key-permission-grid" id="createKeyPermissions">
+              <label class="check"><input data-permission="anthropic_messages" type="checkbox" checked><span>Anthropic Messages</span></label>
+              <label class="check"><input data-permission="openai_chat" type="checkbox" checked><span>OpenAI Chat</span></label>
+              <label class="check"><input data-permission="list_models" type="checkbox" checked><span>List models</span></label>
+              <label class="check"><input data-permission="count_tokens" type="checkbox" checked><span>Count tokens</span></label>
+              <label class="check"><input data-permission="streaming" type="checkbox" checked><span>Streaming</span></label>
+              <label class="check"><input data-permission="tools" type="checkbox" checked><span>Tool calls</span></label>
+              <label class="check"><input data-permission="web_search" type="checkbox" checked><span>Web search</span></label>
+              <label class="check"><input data-permission="shell" type="checkbox"><span>Shell commands</span></label>
+            </div></div>
+          </div>
+        </details>
+      </div>
+      <div class="modal-footer"><button class="button" type="button" data-close-dialog="apiKeyCreateDialog" data-i18n="cancel">Cancel</button><button class="button primary" type="submit" data-i18n="createApiKey">Create API key</button></div>
+    </form>
+  </dialog>
 
-<datalist id="availableModels">
-  <option value="opencode/deepseek-v4-flash-free">DeepSeek V4 Flash (Free)</option>
-  <option value="opencode/nemotron-3-ultra-free">Nemotron 3 Ultra (Free)</option>
-</datalist>
+  <dialog class="drawer" id="apiKeyDrawer">
+    <form id="apiKeyEditForm" class="drawer-shell">
+      <div class="drawer-header"><div><span class="eyebrow" data-i18n="apiKeySettings">API key settings</span><h2 id="editKeyTitle">API key</h2><div class="key-meta" id="editKeyMeta">—</div></div><button class="icon-button" type="button" data-close-dialog="apiKeyDrawer">×</button></div>
+      <div class="drawer-tabs" role="tablist">
+        <button class="active" type="button" data-drawer-tab="general" data-i18n="general">General</button>
+        <button type="button" data-drawer-tab="policy" data-i18n="policy">Policy</button>
+        <button type="button" data-drawer-tab="permissions" data-i18n="permissions">Permissions</button>
+        <button type="button" data-drawer-tab="usage" data-i18n="usage">Usage</button>
+      </div>
+      <div class="drawer-body">
+        <input id="editKeyId" type="hidden">
+        <section class="drawer-panel active" data-drawer-panel="general">
+          <div class="form-grid">
+            <label><span data-i18n="name">Name</span><input id="editKeyName" maxlength="80" required></label>
+            <label><span data-i18n="status">Status</span><select id="editKeyStatus"><option value="active">Active</option><option value="disabled">Disabled</option></select></label>
+            <label><span data-i18n="environment">Environment</span><select id="editKeyEnvironment"><option value="production">Production</option><option value="staging">Staging</option><option value="development">Development</option></select></label>
+            <label><span data-i18n="expirationDate">Expiration date</span><input id="editKeyExpiresAt" type="date"></label>
+            <label class="full"><span data-i18n="description">Description</span><textarea id="editKeyDescription" rows="3"></textarea></label>
+          </div>
+          <details class="advanced-section compact-details"><summary data-i18n="clientConfiguration">Client configuration</summary><div class="advanced-content">
+            <div class="client-config-controls">
+              <label><span data-i18n="format">Format</span><select id="clientConfigFormat"><option value="env">.env</option><option value="claude-code">Claude Code settings.json</option><option value="openai-python">OpenAI Python</option><option value="anthropic-python">Anthropic Python</option><option value="curl">cURL</option></select></label>
+              <label><span data-i18n="apiKeySource">API key source</span><select id="clientConfigKeySource"><option value="placeholder">Placeholder</option><option value="provided" disabled>Current session secret</option></select></label>
+              <button class="button" id="generateClientConfigButton" type="button" data-i18n="generate">Generate</button>
+            </div>
+            <div class="button-row"><span class="count-badge" id="clientConfigSecretBadge">Placeholder key</span><button class="button" id="copyClientConfigButton" type="button" disabled data-i18n="copy">Copy</button><button class="button" id="downloadClientConfigButton" type="button" disabled data-i18n="download">Download</button></div>
+            <pre class="code-block" id="clientConfigOutput">Generate a client configuration.</pre>
+          </div></details>
+          <div class="danger-zone"><h3 data-i18n="dangerZone">Danger zone</h3><p data-i18n="dangerZoneDescription">Rotation invalidates the current secret immediately. Revocation is permanent.</p><div class="button-row"><button class="button" id="rotateApiKeyButton" type="button" data-i18n="rotateSecret">Rotate secret</button><button class="button danger" id="revokeApiKeyButton" type="button" data-i18n="revokeKey">Revoke key</button></div></div>
+        </section>
 
-<script src="/dashboard/app.js?v=1.1.10"></script>
+        <section class="drawer-panel" data-drawer-panel="policy">
+          <div class="form-grid">
+            <label><span data-i18n="defaultModel">Default model</span><select id="editKeyModel"></select></label>
+            <label class="check card-check"><input id="editKeyAllowModelOverride" type="checkbox"><span data-i18n="allowModelOverride">Allow client model override</span></label>
+            <label class="full"><span data-i18n="allowedModels">Allowed models</span><div class="model-checkboxes" id="editAllowedModels"></div></label>
+            <label><span data-i18n="maxOutputTokens">Max output tokens</span><input id="editKeyMaxOutput" type="number" min="1"></label>
+            <label><span data-i18n="reasoningMode">Reasoning mode</span><select id="editKeyReasoning"><option value="inherit">Inherit request</option><option value="disabled">Disabled</option><option value="enabled">Enabled</option></select></label>
+            <label><span data-i18n="reasoningEffort">Reasoning effort</span><select id="editKeyReasoningEffort"><option value="">Provider default</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="max">Max</option></select></label>
+            <label><span data-i18n="maxReasoningTokens">Max reasoning tokens</span><input id="editKeyMaxReasoning" type="number" min="1"></label>
+            <label><span data-i18n="overLimitBehavior">Over-limit behavior</span><select id="editKeyLimitAction"><option value="reject">Reject request</option><option value="clamp">Clamp to limit</option></select></label>
+            <label><span data-i18n="requestsPerMinute">Requests / minute</span><input id="editKeyRpm" type="number" min="0"></label>
+            <label><span data-i18n="concurrentRequests">Concurrent requests</span><input id="editKeyConcurrent" type="number" min="0"></label>
+            <label><span data-i18n="dailyQuota">Daily request quota</span><input id="editKeyDailyQuota" type="number" min="0"></label>
+          </div>
+        </section>
+
+        <section class="drawer-panel" data-drawer-panel="permissions">
+          <div class="permission-groups" id="editKeyPermissions">
+            <div><h3 data-i18n="protocols">Protocols</h3><div class="permission-grid" id="editKeyProtocolPermissions">
+              <label class="check"><input data-permission="anthropic_messages" type="checkbox"><span>Anthropic Messages</span></label>
+              <label class="check"><input data-permission="openai_chat" type="checkbox"><span>OpenAI Chat</span></label>
+              <label class="check"><input data-permission="list_models" type="checkbox"><span>List models</span></label>
+              <label class="check"><input data-permission="count_tokens" type="checkbox"><span>Count tokens</span></label>
+            </div></div>
+            <div><h3 data-i18n="features">Features</h3><div class="permission-grid" id="editKeyFeaturePermissions">
+              <label class="check"><input data-permission="streaming" type="checkbox"><span>Streaming</span></label>
+              <label class="check"><input data-permission="tools" type="checkbox"><span>Tool calls</span></label>
+              <label class="check"><input data-permission="web_search" type="checkbox"><span>Web search</span></label>
+              <label class="check"><input data-permission="shell" type="checkbox"><span>Shell commands</span></label>
+            </div></div>
+          </div>
+        </section>
+
+        <section class="drawer-panel" data-drawer-panel="usage">
+          <div class="usage-grid" id="editKeyUsage"></div>
+        </section>
+      </div>
+      <div class="drawer-footer"><button class="button" type="button" data-close-dialog="apiKeyDrawer" data-i18n="close">Close</button><button class="button primary" type="submit" data-i18n="saveChanges">Save changes</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="modal compact-modal" id="apiKeySecretDialog">
+    <div class="modal-shell"><div class="modal-header"><div><span class="eyebrow" data-i18n="secretCreated">Secret created</span><h2 id="secretKeyName">API key ready</h2><p data-i18n="secretShownOnce">This secret is shown only once. Store it securely.</p></div><button class="icon-button" type="button" data-close-dialog="apiKeySecretDialog">×</button></div><div class="modal-body"><pre class="code-block secret-output" id="keyOutput">—</pre><div class="notice warning" data-i18n="secretWarning">Closing this window permanently hides the secret.</div></div><div class="modal-footer"><button class="button" id="copyGeneratedKeyButton" type="button" data-i18n="copy">Copy</button><button class="button" id="downloadGeneratedConfigButton" type="button" data-i18n="downloadConfig">Download config</button><button class="button primary" type="button" data-close-dialog="apiKeySecretDialog" data-i18n="done">Done</button></div></div>
+  </dialog>
+
+  <dialog class="modal large-modal" id="apiKeyVerifyDialog">
+    <div class="modal-shell"><div class="modal-header"><div><span class="eyebrow" data-i18n="credentialHealth">Credential health</span><h2 data-i18n="checkApiKey">Check API keys</h2><p data-i18n="checkApiKeyDescription">Check every managed key for disabled, expired or unhealthy registry state.</p></div><button class="icon-button" type="button" data-close-dialog="apiKeyVerifyDialog">×</button></div><div class="modal-body api-key-check-body"><div class="api-key-check-summary" id="verifyApiKeySummary"><div class="empty-state" data-i18n="checkingAllKeys">Checking all API keys…</div></div><div class="api-key-check-list" id="verifyApiKeyResult"></div><p class="api-key-check-note" data-i18n="apiKeyCheckNote">Raw secrets are never stored. This check validates current registry state and whether each key is available for authentication.</p></div><div class="modal-footer"><button class="button" type="button" data-close-dialog="apiKeyVerifyDialog" data-i18n="close">Close</button><button class="button primary" id="verifyAllApiKeysButton" type="button" data-i18n="checkAgain">Check again</button></div></div>
+  </dialog>
+
+  <dialog class="modal wide-modal history-settings-modal" id="historySettingsDialog">
+    <form id="historySettingsForm" class="modal-shell">
+      <div class="modal-header"><div><span class="eyebrow" data-i18n="privacyAndRetention">Privacy & retention</span><h2 data-i18n="historySettings">History settings</h2><p data-i18n="historySettingsDescription">Control local prompt capture, retention and storage limits.</p></div><button class="icon-button" type="button" data-close-dialog="historySettingsDialog">×</button></div>
+      <div class="modal-body history-settings-body">
+        <div class="history-storage-grid" id="historyStorageFacts"></div>
+        <div class="form-grid history-settings-grid">
+          <label class="switch-control history-enabled-switch"><input id="historyEnabledSetting" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span><span data-i18n="enableHistory">Enable request history</span></label>
+          <label><span data-i18n="captureMode">Capture mode</span><select id="historyCaptureModeSetting"><option value="off">Off</option><option value="metadata">Metadata only</option><option value="redacted">Redacted content</option><option value="full">Full content</option></select></label>
+          <label><span data-i18n="retentionDays">Retention days</span><input id="historyRetentionSetting" type="number" min="0" max="3650"></label>
+          <label><span data-i18n="maxRecords">Maximum records</span><input id="historyMaxRecordsSetting" type="number" min="1" max="1000000"></label>
+          <label><span data-i18n="maxStorage">Maximum storage (MiB)</span><input id="historyMaxBytesSetting" type="number" min="1"></label>
+        </div>
+        <div class="notice warning" data-i18n="historySensitiveWarning">Prompts, reasoning and responses may contain sensitive data. Content is redacted before it is written to disk.</div>
+      </div>
+      <div class="modal-footer"><button class="button" type="button" data-close-dialog="historySettingsDialog" data-i18n="cancel">Cancel</button><button class="button primary" type="submit" data-i18n="saveChanges">Save changes</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="modal wide-modal" id="logsDialog">
+    <div class="modal-shell"><div class="modal-header"><div><span class="eyebrow" data-i18n="maintenance">Maintenance</span><h2 data-i18n="logs">Logs</h2><p data-i18n="logsDescription">Inspect recent bridge or proxy output.</p></div><button class="icon-button" type="button" data-close-dialog="logsDialog">×</button></div><div class="modal-body"><div class="logs-toolbar"><label><span data-i18n="source">Source</span><select id="logSource"><option value="bridge">Bridge</option><option value="proxies">All proxies</option></select></label><label><span data-i18n="lines">Lines</span><select id="serverLogTail"><option>100</option><option selected>200</option><option>500</option><option>1000</option></select></label><button class="button" id="reloadServerLogsButton" type="button" data-i18n="reload">Reload</button><button id="reloadProxyLogsButton" type="button" hidden></button></div><pre class="log-output" id="serverLogOutput">—</pre><pre class="log-output" id="proxyLogOutput" hidden>—</pre></div></div>
+  </dialog>
+
+  <dialog class="modal wide-modal" id="diagnosticsDialog">
+    <div class="modal-shell"><div class="modal-header"><div><span class="eyebrow" data-i18n="maintenance">Maintenance</span><h2 data-i18n="diagnostics">Diagnostics</h2><p data-i18n="diagnosticsDescription">Run core runtime, configuration and network checks.</p></div><button class="icon-button" type="button" data-close-dialog="diagnosticsDialog">×</button></div><div class="modal-body"><div class="dialog-toolbar"><button class="button primary" id="runDoctorButton" type="button" data-i18n="runAgain">Run again</button></div><div class="diagnostic-list" id="doctorResults"><div class="empty-state" data-i18n="diagnosticsNotRun">Diagnostics have not run.</div></div></div></div>
+  </dialog>
+
+  <dialog class="modal wide-modal" id="configDialog">
+    <div class="modal-shell"><div class="modal-header"><div><span class="eyebrow" data-i18n="advanced">Advanced</span><h2 data-i18n="advancedConfiguration">Advanced configuration</h2><p data-i18n="configurationDescription">Validate and atomically apply the active TOML document.</p></div><button class="icon-button" type="button" data-close-dialog="configDialog">×</button></div><div class="modal-body"><div class="editor-toolbar"><button class="button" id="reloadConfigButton" type="button" data-i18n="reload">Reload</button><button class="button" id="loadTemplateButton" type="button" data-i18n="loadTemplate">Load template</button><span class="toolbar-spacer"></span><button class="button" id="previewConfigButton" type="button" data-i18n="validate">Validate</button><button class="button primary" id="applyConfigButton" type="button" data-i18n="save">Save</button></div><textarea id="configEditor" class="config-editor" spellcheck="false"></textarea><pre class="code-block preview-output" id="configPreviewOutput">—</pre><details class="advanced-section compact-details"><summary data-i18n="moreTools">More tools</summary><div class="advanced-content"><div class="form-row"><button class="button danger" id="initConfigButton" type="button" data-i18n="resetTemplate">Reset template</button><label><span data-i18n="shellCompletion">Shell completion</span><select id="completionShell"><option>bash</option><option>zsh</option><option>fish</option><option>powershell</option><option>elvish</option></select></label><button class="button" id="downloadCompletionButton" type="button" data-i18n="generate">Generate</button></div><div class="update-box"><div id="updateStatus" class="inline-note" data-i18n="updateNotChecked">Update not checked.</div><div class="button-row"><button class="button" id="checkUpdateButton" type="button" data-i18n="checkUpdate">Check update</button><button class="button" id="applyUpdateButton" type="button" disabled data-i18n="applyUpdate">Apply update</button></div></div></div></details></div></div>
+  </dialog>
+
+  <dialog class="confirm-dialog" id="confirmDialog">
+    <form method="dialog"><span class="eyebrow" data-i18n="confirmAction">Confirm action</span><h2 id="confirmTitle">Continue?</h2><p id="confirmMessage"></p><div class="dialog-actions"><button class="button" value="cancel" data-i18n="cancel">Cancel</button><button class="button danger" id="confirmAccept" value="confirm" data-i18n="confirm">Confirm</button></div></form>
+  </dialog>
+
+  <script src="/dashboard/mecha-components.js" defer></script>
+  <script src="/dashboard/app.js" defer></script>
+  <script src="/dashboard/control-deck-v2.js" defer></script>
 </body>
 </html>

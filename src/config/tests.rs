@@ -461,3 +461,67 @@ fn test_secret_string_formatting_is_redacted() {
     assert!(debug.contains("REDACTED"));
     assert!(!debug.contains("do-not-print-me"));
 }
+
+#[test]
+fn socks5_proxy_environment_values_use_remote_dns() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let names = [
+        "BRIDGE_PRIMARY_PROXIES",
+        "BRIDGE_WARM_STANDBY_PROXIES",
+        "BRIDGE_CONFIG_PATH",
+    ];
+    let previous = names
+        .iter()
+        .map(|name| ((*name).to_string(), env::var(name).ok()))
+        .collect::<Vec<_>>();
+
+    env::set_var(
+        "BRIDGE_PRIMARY_PROXIES",
+        "socks5://127.0.0.1:40001,socks5h://127.0.0.1:40002",
+    );
+    env::set_var("BRIDGE_WARM_STANDBY_PROXIES", "socks5://127.0.0.1:40004");
+    env::set_var(
+        "BRIDGE_CONFIG_PATH",
+        "/tmp/opencode2api-missing-proxy-normalization.toml",
+    );
+
+    let config = BridgeConfig::from_env_and_cli(CliOverrides::default());
+
+    assert_eq!(
+        config.primary_proxies,
+        Some(vec![
+            "socks5h://127.0.0.1:40001".to_string(),
+            "socks5h://127.0.0.1:40002".to_string(),
+        ])
+    );
+    assert_eq!(
+        config.warm_standby_proxies,
+        Some(vec!["socks5h://127.0.0.1:40004".to_string()])
+    );
+
+    for (name, value) in previous {
+        match value {
+            Some(value) => env::set_var(name, value),
+            None => env::remove_var(name),
+        }
+    }
+}
+
+#[test]
+fn test_cli_egress_mode_overrides_environment() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let previous = env::var("BRIDGE_EGRESS_MODE").ok();
+    env::set_var("BRIDGE_EGRESS_MODE", "proxy");
+
+    let config = BridgeConfig::from_env_and_cli(CliOverrides {
+        egress_mode: Some("direct".to_string()),
+        ..Default::default()
+    });
+
+    assert_eq!(config.egress.mode, EgressMode::Direct);
+
+    match previous {
+        Some(value) => env::set_var("BRIDGE_EGRESS_MODE", value),
+        None => env::remove_var("BRIDGE_EGRESS_MODE"),
+    }
+}

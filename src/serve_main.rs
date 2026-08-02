@@ -56,10 +56,19 @@ pub struct ServeArgs {
     /// Override max request body size in bytes (0 = unlimited)
     #[arg(long = "max-body-size")]
     pub max_body_size: Option<usize>,
+
+    /// Override egress mode (direct or proxy)
+    #[arg(long = "egress-mode", hide = true)]
+    pub egress_mode: Option<String>,
 }
 
 #[tokio::main]
 async fn main() {
+    // The detached foreground engine can also be launched directly. Resolve
+    // `.env` from the working directory or from the executable's ancestors so
+    // daemon launches from `$HOME` keep the same configuration as the CLI.
+    let _ = opencode2api::config::load_dotenv();
+
     let args = ServeArgs::parse();
 
     let bridge_args = ServeArgsBridge {
@@ -74,6 +83,7 @@ async fn main() {
         searxng_url: args.searxng_url,
         searxng_api_key: args.searxng_api_key,
         max_body_size: args.max_body_size,
+        egress_mode: args.egress_mode,
     };
 
     if let Err(error) = run_server(bridge_args).await {

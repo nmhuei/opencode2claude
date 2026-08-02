@@ -118,3 +118,75 @@ fn test_last_user_shell_cmd_empty_messages() {
     let msgs: Vec<Message> = vec![];
     assert_eq!(last_user_shell_cmd(&msgs), None);
 }
+
+#[test]
+fn parses_claude_code_2_1_207_request_modes() {
+    let payload: MessagesRequest = serde_json::from_value(serde_json::json!({
+        "model": "claude-sonnet-4-6",
+        "messages": [{
+            "role": "assistant",
+            "content": [{
+                "type": "thinking",
+                "thinking": "reasoning history",
+                "signature": "signed",
+                "cache_control": {"type": "ephemeral"},
+                "future_block_flag": true
+            }]
+        }],
+        "stream": true,
+        "max_tokens": 128000,
+        "thinking": {
+            "type": "enabled",
+            "budget_tokens": 64000,
+            "display": "omitted",
+            "future_thinking_mode": "preserved"
+        },
+        "output_config": {
+            "effort": "max",
+            "format": {
+                "type": "json_schema",
+                "schema": {"type": "object"}
+            },
+            "future_output_mode": 7
+        },
+        "context_management": {
+            "edits": [{"type": "clear_thinking_20251015", "keep": "all"}]
+        },
+        "metadata": {"user_id": "capture"},
+        "service_tier": "auto",
+        "stop_sequences": ["STOP"],
+        "top_p": 0.9,
+        "top_k": 40,
+        "custom_probe": {"enabled": true}
+    }))
+    .unwrap();
+
+    assert_eq!(payload.thinking_enabled(), Some(true));
+    assert_eq!(
+        payload.thinking.as_ref().and_then(|v| v.budget_tokens),
+        Some(64000)
+    );
+    assert_eq!(payload.reasoning_effort(), Some("max"));
+    assert!(payload.context_management.is_some());
+    assert_eq!(
+        payload
+            .stop_sequences
+            .as_ref()
+            .and_then(|values| values.first())
+            .map(String::as_str),
+        Some("STOP")
+    );
+    assert_eq!(payload.extra["custom_probe"]["enabled"], true);
+
+    let ContentVal::Multiple(blocks) = &payload.messages[0].content else {
+        panic!("expected content blocks");
+    };
+    assert_eq!(blocks[0].thinking.as_deref(), Some("reasoning history"));
+    assert_eq!(blocks[0].signature.as_deref(), Some("signed"));
+    assert_eq!(blocks[0].extra["future_block_flag"], true);
+
+    let serialized = serde_json::to_value(payload).unwrap();
+    assert_eq!(serialized["custom_probe"]["enabled"], true);
+    assert_eq!(serialized["thinking"]["future_thinking_mode"], "preserved");
+    assert_eq!(serialized["output_config"]["future_output_mode"], 7);
+}

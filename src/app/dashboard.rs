@@ -2,7 +2,9 @@
 //! `crate::dashboard`; this module only manages command-line lifecycle.
 
 use super::server::{resolve_runtime, start_daemon};
-use super::view::{key_value_table, masked_configured_label, print_brand_header, print_tip};
+use super::view::{
+    key_value_table, masked_configured_label, print_brand_header, print_table, print_tip,
+};
 use crate::cli::{DashboardCommand, ServerStartArgs};
 use crate::config::{BridgeConfig, CliOverrides};
 use crate::output::OutputFormat;
@@ -10,8 +12,9 @@ use crate::supervisor::SupervisorStatus;
 use yansi::Paint;
 
 pub(super) async fn cmd_dashboard(cmd: DashboardCommand, fmt: OutputFormat) {
-    // Load .env if present
-    let _ = dotenvy::dotenv();
+    // Keep dashboard status/start resolution identical to the main CLI and
+    // detached server, regardless of the shell working directory.
+    let _ = crate::config::load_dotenv();
 
     let resolved = BridgeConfig::from_env_and_cli(CliOverrides::default());
     let supervisor = resolve_runtime(None, None);
@@ -53,7 +56,7 @@ pub(super) async fn cmd_dashboard(cmd: DashboardCommand, fmt: OutputFormat) {
                         ("Admin auth", masked_configured_label(token)),
                     ],
                 );
-                println!("{}", table);
+                print_table(&table);
                 if token.is_empty() {
                     print_tip("Set DASHBOARD_ADMIN_TOKEN before exposing or using the dashboard.");
                 }
@@ -85,7 +88,7 @@ pub(super) async fn cmd_dashboard(cmd: DashboardCommand, fmt: OutputFormat) {
                             ("Admin auth", masked_configured_label(token)),
                         ],
                     );
-                    println!("{}", table);
+                    print_table(&table);
                     if token.is_empty() {
                         print_tip(
                             "Dashboard is fail-closed until DASHBOARD_ADMIN_TOKEN is configured.",
@@ -99,7 +102,7 @@ pub(super) async fn cmd_dashboard(cmd: DashboardCommand, fmt: OutputFormat) {
                             ("Next step", "opencode2api dashboard start".to_string()),
                         ],
                     );
-                    println!("{}", table);
+                    print_table(&table);
                 }
             } else if fmt == OutputFormat::Json {
                 println!(

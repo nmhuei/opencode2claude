@@ -1,0 +1,2219 @@
+/* OpenCode2API intentionally uses local system font stacks so the dashboard
+   remains fully functional when the machine has no Internet connection. */
+
+/* Safe baseline when the user switches back to the modern theme. */
+.mecha-operator-figure,
+.mecha-unit-silhouette,
+.mecha-sidebar-drone,
+.mecha-simulation-drone,
+.mecha-mobile-avatar,
+.login-aria-operator,
+.login-drone { display: none; }
+
+.login-theme-toggle {
+  position: fixed;
+  top: 18px;
+  right: 18px;
+  z-index: 50;
+}
+
+/* OpenCode2API — Mecha Control Deck theme
+   The existing style.css remains the modern baseline. Every rule below is scoped
+   to data-theme="mecha" so the dashboard can switch themes without changing logic. */
+
+html[data-theme="mecha"] {
+  color-scheme: dark;
+  --bg-canvas: #080B1A;
+  --bg-sidebar: #0D1025;
+  --bg-header: #10142B;
+  --bg-surface: #14182F;
+  --bg-surface-hover: #1B2040;
+  --bg-surface-active: #242957;
+  --primary: #8B6CFF;
+  --primary-hover: #A18BFF;
+  --primary-dark: #5B43C9;
+  --primary-soft: rgba(139, 108, 255, .16);
+  --anime-pink: #FF8FCF;
+  --anime-pink-soft: rgba(255, 143, 207, .14);
+  --cyber-cyan: #5CCBFF;
+  --cyber-cyan-soft: rgba(92, 203, 255, .14);
+  --success: #55E6A5;
+  --success-soft: rgba(85, 230, 165, .14);
+  --warning: #FFBD68;
+  --warning-soft: rgba(255, 189, 104, .14);
+  --error: #FF6F91;
+  --error-soft: rgba(255, 111, 145, .14);
+  --text-primary: #F8F7FF;
+  --text-secondary: #B8B7D3;
+  --text-muted: #777A9C;
+  --text-disabled: #4C4F70;
+  --border-subtle: #24284B;
+  --border-default: #343963;
+  --border-active: #8B6CFF;
+  --divider: rgba(183, 184, 220, .12);
+  --hud-shadow: 0 16px 40px rgba(2, 5, 18, .45), 0 0 0 1px rgba(92, 203, 255, .035) inset;
+  --hud-glow: 0 0 18px rgba(139, 108, 255, .16);
+  --pixel-display: "Silkscreen", "Oxanium", ui-monospace, monospace;
+  --tech-display: "Oxanium", Inter, ui-sans-serif, sans-serif;
+  --body-font: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --technical-font: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+
+  /* Map the existing component token contract. */
+  --bg: var(--bg-canvas);
+  --surface-0: var(--bg-sidebar);
+  --surface-1: var(--bg-surface);
+  --surface-2: var(--bg-surface-hover);
+  --surface-3: var(--bg-surface-active);
+  --border: var(--border-subtle);
+  --border-strong: var(--border-default);
+  --text: var(--text-primary);
+  --muted: var(--text-secondary);
+  --faint: var(--text-muted);
+  --danger: var(--error);
+  --danger-soft: var(--error-soft);
+  --font: var(--body-font);
+  --mono: var(--technical-font);
+  --radius-sm: 3px;
+  --radius-md: 5px;
+  --radius-lg: 7px;
+}
+
+html[data-theme="mecha"],
+html[data-theme="mecha"] body {
+  background-color: var(--bg-canvas);
+  color: var(--text-primary);
+}
+
+html[data-theme="mecha"] body {
+  background-image:
+    linear-gradient(rgba(8, 11, 26, .84), rgba(8, 11, 26, .88)),
+    url('/dashboard/assets/mecha/backgrounds/bg-app.webp');
+  background-position: center;
+  background-size: cover;
+  background-attachment: fixed;
+  font-family: var(--body-font);
+}
+
+html[data-theme="mecha"] body::before,
+html[data-theme="mecha"] body::after {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  pointer-events: none;
+  content: "";
+}
+
+html[data-theme="mecha"] body::before {
+  opacity: .22;
+  background-image:
+    url('/dashboard/assets/mecha/backgrounds/bg-grid-texture.png'),
+    url('/dashboard/assets/mecha/backgrounds/bg-stars-texture.png');
+  background-size: 64px 64px, 128px 128px;
+  mix-blend-mode: screen;
+}
+
+html[data-theme="mecha"] body::after {
+  opacity: .035;
+  background: repeating-linear-gradient(180deg, transparent 0 3px, rgba(255,255,255,.28) 4px, transparent 5px);
+}
+
+html[data-theme="mecha"] .pixel-art,
+html[data-theme="mecha"] [src*="/assets/mecha/"] {
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+html[data-theme="mecha"] .mecha-operator-figure,
+html[data-theme="mecha"] .mecha-unit-silhouette,
+html[data-theme="mecha"] .mecha-sidebar-drone,
+html[data-theme="mecha"] .mecha-simulation-drone,
+html[data-theme="mecha"] .login-aria-operator,
+html[data-theme="mecha"] .login-drone { display: block; }
+
+html[data-theme="mecha"] h1,
+html[data-theme="mecha"] h2,
+html[data-theme="mecha"] h3,
+html[data-theme="mecha"] .metric-card strong,
+html[data-theme="mecha"] .brand-copy strong,
+html[data-theme="mecha"] .eyebrow,
+html[data-theme="mecha"] .response-label,
+html[data-theme="mecha"] .metric-label {
+  font-family: var(--tech-display);
+}
+
+html[data-theme="mecha"] h1,
+html[data-theme="mecha"] .topbar-title h1 {
+  color: var(--text-primary);
+  letter-spacing: .035em;
+  text-shadow: 0 0 16px rgba(139, 108, 255, .2);
+}
+
+html[data-theme="mecha"] h2,
+html[data-theme="mecha"] h3 {
+  letter-spacing: .025em;
+}
+
+html[data-theme="mecha"] code,
+html[data-theme="mecha"] pre,
+html[data-theme="mecha"] .key-meta,
+html[data-theme="mecha"] .sidebar-version,
+html[data-theme="mecha"] .history-resource-id,
+html[data-theme="mecha"] .history-content-pane {
+  font-family: var(--technical-font);
+}
+
+html[data-theme="mecha"] button:focus-visible,
+html[data-theme="mecha"] input:focus-visible,
+html[data-theme="mecha"] select:focus-visible,
+html[data-theme="mecha"] textarea:focus-visible,
+html[data-theme="mecha"] summary:focus-visible,
+html[data-theme="mecha"] [tabindex]:focus-visible {
+  outline: 2px solid var(--cyber-cyan);
+  outline-offset: 3px;
+  box-shadow: 0 0 0 5px rgba(92, 203, 255, .12);
+}
+
+/* Deck shell */
+html[data-theme="mecha"] .app-shell {
+  background: rgba(8, 11, 26, .62);
+}
+
+html[data-theme="mecha"] .sidebar {
+  border-right: 1px solid rgba(92, 203, 255, .16);
+  background:
+    linear-gradient(180deg, rgba(13, 16, 37, .94), rgba(8, 11, 26, .97)),
+    url('/dashboard/assets/mecha/backgrounds/bg-sidebar.webp') center/cover;
+  box-shadow: 12px 0 42px rgba(2, 5, 18, .42), 1px 0 rgba(139,108,255,.18) inset;
+}
+
+html[data-theme="mecha"] .sidebar::before,
+html[data-theme="mecha"] .sidebar::after {
+  position: absolute;
+  z-index: 0;
+  width: 32px;
+  height: 32px;
+  pointer-events: none;
+  content: "";
+  background-size: contain;
+  opacity: .9;
+}
+
+html[data-theme="mecha"] .sidebar::before {
+  top: 4px;
+  left: 4px;
+  background-image: url('/dashboard/assets/mecha/frames/corner-decoration-tl.png');
+}
+
+html[data-theme="mecha"] .sidebar::after {
+  right: 4px;
+  bottom: 4px;
+  background-image: url('/dashboard/assets/mecha/frames/corner-decoration-br.png');
+}
+
+html[data-theme="mecha"] .sidebar > * {
+  position: relative;
+  z-index: 1;
+}
+
+html[data-theme="mecha"] .brand-row {
+  min-height: 60px;
+  border-bottom: 1px solid rgba(139, 108, 255, .16);
+}
+
+html[data-theme="mecha"] .brand-mark {
+  width: 48px;
+  height: 48px;
+  flex-basis: 48px;
+  filter: drop-shadow(0 0 10px rgba(139, 108, 255, .28));
+}
+
+html[data-theme="mecha"] .brand-copy strong {
+  font-size: 13px;
+  letter-spacing: .05em;
+}
+
+html[data-theme="mecha"] .brand-copy span {
+  color: var(--cyber-cyan);
+  font-family: var(--pixel-display);
+  font-size: 8px;
+  letter-spacing: .08em;
+  opacity: .78;
+}
+
+html[data-theme="mecha"] .nav-list {
+  gap: 7px;
+}
+
+html[data-theme="mecha"] .nav-item {
+  position: relative;
+  min-height: 46px;
+  padding-left: 14px;
+  border: 1px solid rgba(52, 57, 99, .65);
+  border-radius: 2px;
+  background: linear-gradient(180deg, rgba(20,24,47,.7), rgba(13,16,37,.72));
+  color: var(--text-secondary);
+  clip-path: polygon(0 0, calc(100% - 7px) 0, 100% 7px, 100% 100%, 7px 100%, 0 calc(100% - 7px));
+  transition: transform .12s ease, border-color .15s ease, color .15s ease, background .15s ease, box-shadow .15s ease;
+}
+
+html[data-theme="mecha"] .nav-item .icon {
+  display: none;
+}
+
+html[data-theme="mecha"] .nav-item::before {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  content: "";
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: 20px;
+  image-rendering: pixelated;
+}
+
+html[data-theme="mecha"] .nav-item[data-view="dashboard"]::before { background-image: url('/dashboard/assets/mecha/icons/dashboard/default-20.png'); }
+html[data-theme="mecha"] .nav-item[data-view="api"]::before { background-image: url('/dashboard/assets/mecha/icons/api-keys/default-20.png'); }
+html[data-theme="mecha"] .nav-item[data-view="models"]::before { background-image: url('/dashboard/assets/mecha/icons/models/default-20.png'); }
+html[data-theme="mecha"] .nav-item[data-view="history"]::before { background-image: url('/dashboard/assets/mecha/icons/history/default-20.png'); }
+html[data-theme="mecha"] .nav-item[data-view="system"]::before { background-image: url('/dashboard/assets/mecha/icons/system/default-20.png'); }
+
+html[data-theme="mecha"] .nav-item:hover {
+  transform: translateX(2px);
+  border-color: rgba(92, 203, 255, .55);
+  background: linear-gradient(90deg, rgba(92,203,255,.13), rgba(27,32,64,.88));
+  color: var(--text-primary);
+  box-shadow: 0 0 14px rgba(92, 203, 255, .09);
+}
+
+html[data-theme="mecha"] .nav-item.active {
+  border-color: rgba(139, 108, 255, .75);
+  background: linear-gradient(90deg, rgba(139,108,255,.24), rgba(36,41,87,.82));
+  color: #fff;
+  box-shadow: 0 0 18px rgba(139, 108, 255, .16), inset 3px 0 var(--anime-pink);
+}
+
+html[data-theme="mecha"] .nav-item.active::after {
+  position: absolute;
+  top: 8px;
+  right: 7px;
+  width: 4px;
+  height: calc(100% - 16px);
+  background: var(--cyber-cyan);
+  box-shadow: 0 0 10px rgba(92, 203, 255, .65);
+  content: "";
+}
+
+html[data-theme="mecha"] .nav-item.active[data-view="dashboard"]::before { background-image: url('/dashboard/assets/mecha/icons/dashboard/active-20.png'); }
+html[data-theme="mecha"] .nav-item.active[data-view="api"]::before { background-image: url('/dashboard/assets/mecha/icons/api-keys/active-20.png'); }
+html[data-theme="mecha"] .nav-item.active[data-view="models"]::before { background-image: url('/dashboard/assets/mecha/icons/models/active-20.png'); }
+html[data-theme="mecha"] .nav-item.active[data-view="history"]::before { background-image: url('/dashboard/assets/mecha/icons/history/active-20.png'); }
+html[data-theme="mecha"] .nav-item.active[data-view="system"]::before { background-image: url('/dashboard/assets/mecha/icons/system/active-20.png'); }
+
+html[data-theme="mecha"] .sidebar-footer {
+  position: relative;
+  padding-top: 18px;
+  border-top: 1px solid rgba(92, 203, 255, .13);
+  background: linear-gradient(180deg, transparent, rgba(20,24,47,.3));
+}
+
+html[data-theme="mecha"] .mecha-sidebar-drone {
+  position: absolute;
+  right: 4px;
+  bottom: 52px;
+  width: 54px;
+  height: 54px;
+  opacity: .72;
+  filter: drop-shadow(0 0 12px rgba(92,203,255,.22));
+}
+
+html[data-theme="mecha"] .sidebar-status-row {
+  color: var(--success);
+  font-family: var(--tech-display);
+  font-size: 12px;
+}
+
+html[data-theme="mecha"] .sidebar-model,
+html[data-theme="mecha"] .sidebar-version {
+  max-width: calc(100% - 58px);
+}
+
+html[data-theme="mecha"] .main-shell {
+  background:
+    linear-gradient(180deg, rgba(8,11,26,.74), rgba(8,11,26,.9)),
+    url('/dashboard/assets/mecha/backgrounds/bg-grid-texture.png');
+}
+
+html[data-theme="mecha"] .topbar {
+  border-bottom: 1px solid rgba(92, 203, 255, .15);
+  background:
+    linear-gradient(90deg, rgba(16,20,43,.96), rgba(13,16,37,.94)),
+    url('/dashboard/assets/mecha/backgrounds/bg-header.webp') center/cover;
+  box-shadow: 0 12px 30px rgba(2,5,18,.32), inset 0 -1px rgba(139,108,255,.12);
+  backdrop-filter: blur(16px);
+}
+
+html[data-theme="mecha"] .topbar::before {
+  position: absolute;
+  inset: auto 0 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--primary), var(--cyber-cyan), transparent);
+  opacity: .45;
+  content: "";
+}
+
+html[data-theme="mecha"] .mecha-mobile-avatar {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  border: 1px solid rgba(139,108,255,.45);
+  background: rgba(20,24,47,.8);
+  clip-path: polygon(5px 0, 100% 0, 100% calc(100% - 5px), calc(100% - 5px) 100%, 0 100%, 0 5px);
+  object-fit: cover;
+  object-position: center 22%;
+  filter: drop-shadow(0 0 10px rgba(139,108,255,.16));
+}
+
+html[data-theme="mecha"] .topbar-title p {
+  color: var(--text-secondary);
+}
+
+html[data-theme="mecha"] .content {
+  position: relative;
+}
+
+html[data-theme="mecha"] .content::before {
+  position: fixed;
+  right: 22px;
+  bottom: 16px;
+  z-index: 0;
+  width: min(30vw, 420px);
+  height: min(26vw, 330px);
+  pointer-events: none;
+  background: url('/dashboard/assets/mecha/mascot/mecha-silhouette.webp') right bottom/contain no-repeat;
+  opacity: .035;
+  filter: saturate(.75);
+  content: "";
+}
+
+html[data-theme="mecha"] .view {
+  position: relative;
+  z-index: 1;
+}
+
+/* Theme control */
+html[data-theme="mecha"] .theme-toggle {
+  display: inline-flex;
+  min-width: 86px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  color: var(--cyber-cyan);
+  font-family: var(--pixel-display);
+  font-size: 8px;
+  letter-spacing: .05em;
+}
+
+html[data-theme="mecha"] .theme-toggle::before {
+  width: 18px;
+  height: 18px;
+  content: "";
+  background: url('/dashboard/assets/mecha/icons/settings/active-20.png') center/contain no-repeat;
+  image-rendering: pixelated;
+}
+
+/* Shared HUD panels */
+html[data-theme="mecha"] .section-card,
+html[data-theme="mecha"] .metric-card,
+html[data-theme="mecha"] .current-model-card,
+html[data-theme="mecha"] .menu-popover,
+html[data-theme="mecha"] .notice,
+html[data-theme="mecha"] .inline-note,
+html[data-theme="mecha"] .login-panel {
+  position: relative;
+  border: 1px solid rgba(52, 57, 99, .82);
+  border-radius: 3px;
+  background:
+    linear-gradient(145deg, rgba(20,24,47,.93), rgba(13,16,37,.94)),
+    url('/dashboard/assets/mecha/backgrounds/bg-panel-noise.png');
+  box-shadow: var(--hud-shadow);
+  clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px));
+}
+
+html[data-theme="mecha"] .section-card::before,
+html[data-theme="mecha"] .metric-card::before,
+html[data-theme="mecha"] .login-panel::before {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border: 12px solid transparent;
+  border-image: url('/dashboard/assets/mecha/frames/frame-card-default.9.png') 16 fill / 12px / 0 stretch;
+  pointer-events: none;
+  content: "";
+  opacity: .55;
+}
+
+html[data-theme="mecha"] .section-card > *,
+html[data-theme="mecha"] .metric-card > *,
+html[data-theme="mecha"] .login-panel > * {
+  position: relative;
+  z-index: 1;
+}
+
+html[data-theme="mecha"] .section-card:hover,
+html[data-theme="mecha"] .metric-card:hover {
+  border-color: rgba(92, 203, 255, .38);
+  box-shadow: var(--hud-shadow), 0 0 22px rgba(92,203,255,.07);
+}
+
+html[data-theme="mecha"] .section-header {
+  border-bottom-color: rgba(183,184,220,.1);
+}
+
+html[data-theme="mecha"] .section-header h2,
+html[data-theme="mecha"] .section-header h3,
+html[data-theme="mecha"] .drawer-tabs button,
+html[data-theme="mecha"] .metric-label,
+html[data-theme="mecha"] .response-label,
+html[data-theme="mecha"] .eyebrow {
+  text-transform: uppercase;
+}
+
+html[data-theme="mecha"] .section-header h2::before,
+html[data-theme="mecha"] .section-header h3::before {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 8px;
+  background: var(--cyber-cyan);
+  box-shadow: 0 0 8px rgba(92,203,255,.7);
+  content: "";
+  transform: rotate(45deg);
+}
+
+html[data-theme="mecha"] .eyebrow,
+html[data-theme="mecha"] .metric-label,
+html[data-theme="mecha"] .response-label {
+  color: var(--cyber-cyan);
+  font-family: var(--pixel-display);
+  font-size: 8px;
+  letter-spacing: .04em;
+}
+
+html[data-theme="mecha"] .metric-grid {
+  gap: 12px;
+}
+
+html[data-theme="mecha"] .metric-card {
+  min-height: 106px;
+  border-color: rgba(52,57,99,.78);
+  background:
+    linear-gradient(120deg, rgba(20,24,47,.98), rgba(13,16,37,.92)),
+    url('/dashboard/assets/mecha/backgrounds/bg-panel-noise.png');
+}
+
+html[data-theme="mecha"] .metric-card::after {
+  position: absolute;
+  right: 10px;
+  bottom: 8px;
+  width: 34px;
+  height: 4px;
+  background: repeating-linear-gradient(90deg, var(--primary) 0 4px, transparent 4px 7px);
+  opacity: .5;
+  content: "";
+}
+
+html[data-theme="mecha"] .metric-icon {
+  width: 48px;
+  height: 48px;
+  border: 1px solid rgba(139,108,255,.42);
+  border-radius: 2px;
+  background-color: rgba(139,108,255,.1);
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: 36px;
+  box-shadow: inset 0 0 18px rgba(139,108,255,.08), 0 0 12px rgba(139,108,255,.06);
+}
+
+html[data-theme="mecha"] .metric-icon .icon {
+  display: none;
+}
+
+html[data-theme="mecha"] .metric-card:nth-child(1) .metric-icon { background-image: url('/dashboard/assets/mecha/metrics/service.png'); }
+html[data-theme="mecha"] .metric-card:nth-child(2) .metric-icon { background-image: url('/dashboard/assets/mecha/metrics/model-core.png'); }
+html[data-theme="mecha"] .metric-card:nth-child(3) .metric-icon { background-image: url('/dashboard/assets/mecha/metrics/requests.png'); }
+html[data-theme="mecha"] .metric-card:nth-child(4) .metric-icon { background-image: url('/dashboard/assets/mecha/metrics/uptime.png'); }
+html[data-theme="mecha"] .history-metric-grid .metric-card:nth-child(1) .metric-icon { background-image: url('/dashboard/assets/mecha/metrics/requests.png'); }
+html[data-theme="mecha"] .history-metric-grid .metric-card:nth-child(2) .metric-icon { background-image: url('/dashboard/assets/mecha/metrics/success-rate.png'); }
+html[data-theme="mecha"] .history-metric-grid .metric-card:nth-child(3) .metric-icon { background-image: url('/dashboard/assets/mecha/metrics/latency.png'); }
+html[data-theme="mecha"] .history-metric-grid .metric-card:nth-child(4) .metric-icon { background-image: url('/dashboard/assets/mecha/metrics/memory.png'); }
+
+html[data-theme="mecha"] .metric-card strong {
+  color: var(--text-primary);
+  letter-spacing: .02em;
+}
+
+html[data-theme="mecha"] .metric-card small {
+  color: var(--text-muted);
+}
+
+/* Controls */
+html[data-theme="mecha"] .button,
+html[data-theme="mecha"] .compact-button,
+html[data-theme="mecha"] .icon-button,
+html[data-theme="mecha"] .text-button,
+html[data-theme="mecha"] .drawer-tabs button,
+html[data-theme="mecha"] .menu-popover button {
+  position: relative;
+  border-radius: 2px;
+  color: var(--text-secondary);
+  font-family: var(--tech-display);
+  letter-spacing: .015em;
+  transition: transform .09s ease, color .15s ease, border-color .15s ease, box-shadow .15s ease, background .15s ease;
+}
+
+html[data-theme="mecha"] .button,
+html[data-theme="mecha"] .compact-button,
+html[data-theme="mecha"] .icon-button {
+  border: 1px solid rgba(52,57,99,.9);
+  background:
+    linear-gradient(180deg, rgba(27,32,64,.94), rgba(13,16,37,.98)),
+    url('/dashboard/assets/mecha/buttons/button-secondary-bg.png') center/100% 100% no-repeat;
+  clip-path: polygon(5px 0, calc(100% - 5px) 0, 100% 5px, 100% calc(100% - 5px), calc(100% - 5px) 100%, 5px 100%, 0 calc(100% - 5px), 0 5px);
+}
+
+html[data-theme="mecha"] .button:hover,
+html[data-theme="mecha"] .compact-button:hover,
+html[data-theme="mecha"] .icon-button:hover {
+  transform: translateY(-1px);
+  border-color: rgba(92,203,255,.62);
+  background-image:
+    linear-gradient(180deg, rgba(36,41,87,.98), rgba(20,24,47,.98)),
+    url('/dashboard/assets/mecha/buttons/button-secondary-hover-bg.png');
+  color: #fff;
+  box-shadow: 0 0 16px rgba(92,203,255,.11);
+}
+
+html[data-theme="mecha"] .button:active,
+html[data-theme="mecha"] .compact-button:active,
+html[data-theme="mecha"] .icon-button:active {
+  transform: translateY(1px);
+}
+
+html[data-theme="mecha"] .button.primary {
+  border-color: rgba(139,108,255,.8);
+  background-image:
+    linear-gradient(180deg, rgba(91,67,201,.92), rgba(44,35,107,.96)),
+    url('/dashboard/assets/mecha/buttons/button-primary-bg.png');
+  color: #fff;
+  box-shadow: inset 0 0 16px rgba(161,139,255,.1), 0 0 18px rgba(139,108,255,.14);
+}
+
+html[data-theme="mecha"] .button.primary:hover {
+  background-image:
+    linear-gradient(180deg, rgba(139,108,255,.96), rgba(91,67,201,.98)),
+    url('/dashboard/assets/mecha/buttons/button-primary-hover-bg.png');
+  box-shadow: 0 0 24px rgba(139,108,255,.24);
+}
+
+html[data-theme="mecha"] .button.danger {
+  border-color: rgba(255,111,145,.72);
+  background-image:
+    linear-gradient(180deg, rgba(112,34,59,.9), rgba(60,22,42,.96)),
+    url('/dashboard/assets/mecha/buttons/button-danger-bg.png');
+  color: #FFDDE7;
+}
+
+html[data-theme="mecha"] .button.danger:hover {
+  background-image:
+    linear-gradient(180deg, rgba(163,51,84,.95), rgba(88,27,52,.98)),
+    url('/dashboard/assets/mecha/buttons/button-danger-hover-bg.png');
+  box-shadow: 0 0 22px rgba(255,111,145,.2);
+}
+
+html[data-theme="mecha"] .button:disabled,
+html[data-theme="mecha"] .compact-button:disabled,
+html[data-theme="mecha"] .icon-button:disabled {
+  filter: grayscale(.7);
+  opacity: .46;
+}
+
+html[data-theme="mecha"] .text-button {
+  color: var(--cyber-cyan);
+}
+
+html[data-theme="mecha"] .text-button:hover {
+  color: var(--primary-hover);
+  text-shadow: 0 0 10px rgba(139,108,255,.5);
+}
+
+html[data-theme="mecha"] input,
+html[data-theme="mecha"] select,
+html[data-theme="mecha"] textarea {
+  border: 1px solid rgba(52,57,99,.9);
+  border-radius: 2px;
+  background: rgba(8,11,26,.9);
+  color: var(--text-primary);
+  box-shadow: inset 0 0 18px rgba(92,203,255,.025);
+}
+
+html[data-theme="mecha"] input:hover,
+html[data-theme="mecha"] select:hover,
+html[data-theme="mecha"] textarea:hover {
+  border-color: rgba(92,203,255,.38);
+}
+
+html[data-theme="mecha"] input:focus,
+html[data-theme="mecha"] select:focus,
+html[data-theme="mecha"] textarea:focus {
+  border-color: var(--cyber-cyan);
+  box-shadow: inset 0 0 18px rgba(92,203,255,.04), 0 0 0 3px rgba(92,203,255,.08);
+}
+
+html[data-theme="mecha"] input::placeholder,
+html[data-theme="mecha"] textarea::placeholder {
+  color: var(--text-muted);
+}
+
+html[data-theme="mecha"] label > span:first-child {
+  color: var(--text-secondary);
+}
+
+html[data-theme="mecha"] input[type="checkbox"] {
+  accent-color: var(--primary);
+}
+
+html[data-theme="mecha"] .switch-track {
+  border-color: rgba(52,57,99,.9);
+  border-radius: 2px;
+  background: rgba(8,11,26,.95);
+}
+
+html[data-theme="mecha"] .switch-control input:checked + .switch-track {
+  border-color: rgba(139,108,255,.8);
+  background: rgba(139,108,255,.22);
+  box-shadow: 0 0 12px rgba(139,108,255,.12);
+}
+
+/* Badges and status */
+html[data-theme="mecha"] .status-tag,
+html[data-theme="mecha"] .count-badge,
+html[data-theme="mecha"] .connection-pill,
+html[data-theme="mecha"] .environment-badge {
+  border-radius: 2px;
+  font-family: var(--tech-display);
+  letter-spacing: .02em;
+  clip-path: polygon(4px 0, 100% 0, 100% calc(100% - 4px), calc(100% - 4px) 100%, 0 100%, 0 4px);
+}
+
+html[data-theme="mecha"] .status-tag.ok,
+html[data-theme="mecha"] .status-tag.healthy,
+html[data-theme="mecha"] .status-tag.completed,
+html[data-theme="mecha"] .connection-pill.ok {
+  border-color: rgba(85,230,165,.42);
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+html[data-theme="mecha"] .status-tag.warn,
+html[data-theme="mecha"] .status-tag.warning,
+html[data-theme="mecha"] .connection-pill.warn {
+  border-color: rgba(255,189,104,.45);
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+html[data-theme="mecha"] .status-tag.error,
+html[data-theme="mecha"] .status-tag.failed,
+html[data-theme="mecha"] .connection-pill.error {
+  border-color: rgba(255,111,145,.48);
+  background: var(--error-soft);
+  color: var(--error);
+}
+
+html[data-theme="mecha"] .status-dot.ok,
+html[data-theme="mecha"] .status-dot.healthy,
+html[data-theme="mecha"] .status-dot.completed {
+  box-shadow: 0 0 10px rgba(85,230,165,.65);
+}
+
+html[data-theme="mecha"] .status-dot.warn,
+html[data-theme="mecha"] .status-dot.warning {
+  box-shadow: 0 0 10px rgba(255,189,104,.55);
+}
+
+html[data-theme="mecha"] .status-dot.error,
+html[data-theme="mecha"] .status-dot.failed {
+  box-shadow: 0 0 10px rgba(255,111,145,.55);
+}
+
+html[data-theme="mecha"] .count-badge {
+  border-color: rgba(139,108,255,.35);
+  background: rgba(139,108,255,.1);
+  color: var(--primary-hover);
+}
+
+html[data-theme="mecha"] .environment-badge,
+html[data-theme="mecha"] [class*="production"] .environment-badge {
+  border-color: rgba(255,143,207,.32);
+  background: var(--anime-pink-soft);
+  color: var(--anime-pink);
+}
+
+/* Tables, lists and command logs */
+html[data-theme="mecha"] .data-table,
+html[data-theme="mecha"] .table-card,
+html[data-theme="mecha"] .resource-list,
+html[data-theme="mecha"] .event-list,
+html[data-theme="mecha"] .history-content-pane,
+html[data-theme="mecha"] .log-output,
+html[data-theme="mecha"] .code-block,
+html[data-theme="mecha"] .config-editor {
+  border-color: rgba(52,57,99,.72);
+  background: rgba(7,10,24,.76);
+}
+
+html[data-theme="mecha"] .data-table thead,
+html[data-theme="mecha"] .data-table th {
+  background: rgba(16,20,43,.96);
+  color: var(--cyber-cyan);
+  font-family: var(--pixel-display);
+  font-size: 8px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+html[data-theme="mecha"] .data-table tr,
+html[data-theme="mecha"] .resource-item,
+html[data-theme="mecha"] .event-item,
+html[data-theme="mecha"] .diagnostic-item,
+html[data-theme="mecha"] .history-event,
+html[data-theme="mecha"] .history-attempt {
+  border-color: rgba(52,57,99,.5);
+}
+
+html[data-theme="mecha"] .data-table tbody tr:hover,
+html[data-theme="mecha"] .resource-item:hover,
+html[data-theme="mecha"] .event-item:hover {
+  background: linear-gradient(90deg, rgba(92,203,255,.06), rgba(139,108,255,.045));
+}
+
+html[data-theme="mecha"] .resource-item.selected,
+html[data-theme="mecha"] .model-row.selected,
+html[data-theme="mecha"] [data-selected="true"] {
+  border-color: rgba(139,108,255,.7);
+  background: linear-gradient(90deg, rgba(139,108,255,.14), rgba(92,203,255,.035));
+  box-shadow: inset 3px 0 var(--anime-pink), 0 0 18px rgba(139,108,255,.08);
+}
+
+html[data-theme="mecha"] .api-key-resource-list .resource-item {
+  position: relative;
+  padding-left: 54px;
+}
+
+html[data-theme="mecha"] .api-key-resource-list .resource-item::before {
+  position: absolute;
+  top: 50%;
+  left: 14px;
+  width: 28px;
+  height: 28px;
+  background: url('/dashboard/assets/mecha/icons/api-keys/active-24.png') center/24px no-repeat;
+  content: "";
+  transform: translateY(-50%);
+  image-rendering: pixelated;
+}
+
+html[data-theme="mecha"] .model-list .model-row,
+html[data-theme="mecha"] .model-list > button,
+html[data-theme="mecha"] .model-list > div {
+  position: relative;
+}
+
+html[data-theme="mecha"] .model-row::before {
+  width: 26px;
+  height: 26px;
+  flex: 0 0 26px;
+  background: url('/dashboard/assets/mecha/metrics/model-core.png') center/contain no-repeat;
+  content: "";
+  image-rendering: pixelated;
+}
+
+html[data-theme="mecha"] .history-resource-list .resource-item::before {
+  border-left-color: var(--primary);
+}
+
+html[data-theme="mecha"] .history-resource-id,
+html[data-theme="mecha"] .history-content-pane,
+html[data-theme="mecha"] .response-grid pre,
+html[data-theme="mecha"] .log-output,
+html[data-theme="mecha"] .config-editor {
+  color: #D5E7FF;
+  text-shadow: 0 0 10px rgba(92,203,255,.04);
+}
+
+html[data-theme="mecha"] .history-detail-tabs {
+  background: rgba(8,11,26,.64);
+}
+
+html[data-theme="mecha"] .drawer-tabs button.active {
+  color: var(--cyber-cyan);
+  box-shadow: inset 0 -2px var(--cyber-cyan), 0 0 12px rgba(92,203,255,.07);
+}
+
+/* Dashboard identity */
+html[data-theme="mecha"] [data-view-panel="dashboard"] {
+  isolation: isolate;
+}
+
+html[data-theme="mecha"] .dashboard-grid .section-card:first-child {
+  border-color: rgba(92,203,255,.28);
+}
+
+html[data-theme="mecha"] .dashboard-grid .section-card:nth-child(2) {
+  border-color: rgba(139,108,255,.3);
+}
+
+html[data-theme="mecha"] .status-list button {
+  border-color: rgba(52,57,99,.52);
+  background: linear-gradient(90deg, rgba(8,11,26,.66), rgba(20,24,47,.38));
+}
+
+html[data-theme="mecha"] .status-list button:hover {
+  border-color: rgba(92,203,255,.34);
+  background: linear-gradient(90deg, rgba(92,203,255,.07), rgba(139,108,255,.05));
+}
+
+html[data-theme="mecha"] .event-list {
+  background-image: linear-gradient(180deg, rgba(8,11,26,.28), rgba(8,11,26,.56));
+}
+
+html[data-theme="mecha"] .quick-actions {
+  min-height: 116px;
+  padding-right: 172px;
+  border-color: rgba(255,143,207,.28);
+  background:
+    linear-gradient(90deg, rgba(20,24,47,.96), rgba(36,41,87,.58)),
+    url('/dashboard/assets/mecha/backgrounds/bg-control-room.webp') right center/cover;
+  overflow: hidden;
+}
+
+html[data-theme="mecha"] .quick-actions::after {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background: linear-gradient(90deg, rgba(20,24,47,.98) 0 60%, transparent 88%);
+  pointer-events: none;
+  content: "";
+}
+
+html[data-theme="mecha"] .quick-actions > *:not(.mecha-operator-figure) {
+  position: relative;
+  z-index: 2;
+}
+
+html[data-theme="mecha"] .mecha-operator-figure {
+  position: absolute;
+  right: 26px;
+  bottom: -56px;
+  z-index: 1;
+  width: 150px;
+  height: auto;
+  opacity: .84;
+  filter: drop-shadow(0 0 18px rgba(139,108,255,.18));
+}
+
+html[data-theme="mecha"] .mecha-unit-silhouette {
+  position: fixed;
+  right: 38px;
+  bottom: 18px;
+  z-index: -1;
+  width: min(34vw, 520px);
+  max-height: 52vh;
+  opacity: .045;
+  pointer-events: none;
+  filter: drop-shadow(0 0 18px rgba(92,203,255,.15));
+}
+
+/* Models — AI cores and simulation chamber */
+html[data-theme="mecha"] .current-model-card {
+  border-color: rgba(139,108,255,.48);
+  background:
+    radial-gradient(circle at 12% 50%, rgba(139,108,255,.14), transparent 24%),
+    linear-gradient(120deg, rgba(20,24,47,.98), rgba(13,16,37,.94));
+}
+
+html[data-theme="mecha"] .current-model-card .metric-icon {
+  background-image: url('/dashboard/assets/mecha/metrics/model-core.png');
+}
+
+html[data-theme="mecha"] .model-catalog-card {
+  border-color: rgba(92,203,255,.2);
+}
+
+html[data-theme="mecha"] #modelTesterPanel {
+  overflow: hidden;
+  border-color: rgba(255,143,207,.24);
+  background:
+    linear-gradient(160deg, rgba(20,24,47,.97), rgba(13,16,37,.96)),
+    url('/dashboard/assets/mecha/backgrounds/bg-control-room.webp') center/cover;
+}
+
+html[data-theme="mecha"] #modelTesterPanel::after {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 72px;
+  height: 72px;
+  background: radial-gradient(circle, rgba(92,203,255,.16), transparent 68%);
+  content: "";
+}
+
+html[data-theme="mecha"] .mecha-simulation-drone {
+  position: absolute;
+  top: 14px;
+  right: 86px;
+  width: 50px;
+  height: 50px;
+  opacity: .72;
+}
+
+html[data-theme="mecha"] .response-grid pre {
+  border: 1px solid rgba(52,57,99,.72);
+  background: rgba(5,7,19,.86);
+}
+
+html[data-theme="mecha"] #testerReasoning {
+  border-color: rgba(139,108,255,.3);
+}
+
+html[data-theme="mecha"] #testerOutput {
+  border-color: rgba(92,203,255,.3);
+}
+
+/* History — mission records */
+html[data-theme="mecha"] .history-list-pane {
+  border-color: rgba(92,203,255,.22);
+}
+
+html[data-theme="mecha"] .history-inline-detail {
+  border-color: rgba(139,108,255,.28);
+}
+
+html[data-theme="mecha"] .history-content-pane {
+  background:
+    linear-gradient(rgba(5,7,19,.9), rgba(5,7,19,.9)),
+    url('/dashboard/assets/mecha/backgrounds/bg-grid-texture.png');
+}
+
+html[data-theme="mecha"] .history-overview-item {
+  border-color: rgba(52,57,99,.56);
+  background: rgba(8,11,26,.55);
+}
+
+html[data-theme="mecha"] .history-event,
+html[data-theme="mecha"] .history-attempt {
+  background: rgba(8,11,26,.52);
+}
+
+/* System — reactor, defense and unit network */
+html[data-theme="mecha"] [data-view-panel="system"] .section-card:first-child,
+html[data-theme="mecha"] .server-card {
+  border-color: rgba(92,203,255,.3);
+}
+
+html[data-theme="mecha"] .security-card,
+html[data-theme="mecha"] [class*="security"] .section-card {
+  border-color: rgba(85,230,165,.24);
+}
+
+html[data-theme="mecha"] .maintenance-card,
+html[data-theme="mecha"] .maintenance-button {
+  border-color: rgba(139,108,255,.24);
+  background: linear-gradient(145deg, rgba(20,24,47,.94), rgba(13,16,37,.96));
+}
+
+html[data-theme="mecha"] .maintenance-icon {
+  border-radius: 2px;
+  background-color: rgba(92,203,255,.08);
+  color: var(--cyber-cyan);
+}
+
+html[data-theme="mecha"] .proxy-action-grid {
+  font-family: var(--tech-display);
+}
+
+/* Dialogs, drawers and popovers */
+html[data-theme="mecha"] dialog,
+html[data-theme="mecha"] .drawer-backdrop {
+  background: rgba(2,4,13,.72);
+  backdrop-filter: blur(8px);
+}
+
+html[data-theme="mecha"] dialog::backdrop {
+  background: rgba(2,4,13,.72);
+  backdrop-filter: blur(8px);
+}
+
+html[data-theme="mecha"] .modal-shell,
+html[data-theme="mecha"] .drawer-shell,
+html[data-theme="mecha"] .drawer-panel {
+  position: relative;
+  border: 1px solid rgba(92,203,255,.28);
+  border-radius: 3px;
+  background:
+    linear-gradient(150deg, rgba(20,24,47,.98), rgba(8,11,26,.99)),
+    url('/dashboard/assets/mecha/backgrounds/bg-panel-noise.png');
+  box-shadow: 0 28px 90px rgba(0,0,0,.62), 0 0 35px rgba(139,108,255,.1);
+  clip-path: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 12px 100%, 0 calc(100% - 12px));
+}
+
+html[data-theme="mecha"] .modal-shell::before,
+html[data-theme="mecha"] .drawer-shell::before,
+html[data-theme="mecha"] .drawer-panel::before {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border: 16px solid transparent;
+  border-image: url('/dashboard/assets/mecha/frames/frame-modal.9.png') 16 fill / 16px / 0 stretch;
+  pointer-events: none;
+  content: "";
+  opacity: .55;
+}
+
+html[data-theme="mecha"] .modal-shell > *,
+html[data-theme="mecha"] .drawer-shell > *,
+html[data-theme="mecha"] .drawer-panel > * {
+  position: relative;
+  z-index: 1;
+}
+
+html[data-theme="mecha"] .modal-header,
+html[data-theme="mecha"] .drawer-header {
+  border-bottom-color: rgba(92,203,255,.14);
+  background: linear-gradient(90deg, rgba(16,20,43,.96), rgba(20,24,47,.68));
+}
+
+html[data-theme="mecha"] .modal-footer,
+html[data-theme="mecha"] .drawer-footer,
+html[data-theme="mecha"] .split-detail-footer {
+  border-top-color: rgba(139,108,255,.14);
+  background: rgba(8,11,26,.48);
+}
+
+html[data-theme="mecha"] .menu-popover {
+  border-color: rgba(92,203,255,.24);
+  box-shadow: 0 24px 50px rgba(0,0,0,.5), 0 0 20px rgba(92,203,255,.06);
+}
+
+html[data-theme="mecha"] .toast {
+  border-radius: 3px;
+  border-color: rgba(139,108,255,.4);
+  background: rgba(16,20,43,.97);
+  box-shadow: 0 18px 50px rgba(0,0,0,.48), 0 0 18px rgba(139,108,255,.12);
+}
+
+/* Empty and loading states */
+html[data-theme="mecha"] .empty-state {
+  position: relative;
+  min-height: 116px;
+  padding: 22px 22px 22px 126px;
+  align-content: center;
+  border: 1px dashed rgba(52,57,99,.72);
+  background:
+    linear-gradient(90deg, rgba(8,11,26,.86), rgba(20,24,47,.54)),
+    url('/dashboard/assets/mecha/backgrounds/bg-empty-state.webp') center/cover;
+  color: var(--text-secondary);
+  text-align: left;
+  overflow: hidden;
+}
+
+html[data-theme="mecha"] .empty-state::before {
+  position: absolute;
+  left: 12px;
+  bottom: -8px;
+  width: 104px;
+  height: 104px;
+  background-position: center bottom;
+  background-repeat: no-repeat;
+  background-size: contain;
+  content: "";
+  image-rendering: pixelated;
+}
+
+html[data-theme="mecha"] .empty-state[data-mecha-state="empty-api-keys"]::before { background-image: url('/dashboard/assets/mecha/mascot/aria-empty-api-key.png'); }
+html[data-theme="mecha"] .empty-state[data-mecha-state="empty-models"]::before { background-image: url('/dashboard/assets/mecha/mascot/mecha-silhouette.webp'); }
+html[data-theme="mecha"] .empty-state[data-mecha-state="empty-history"]::before { background-image: url('/dashboard/assets/mecha/mascot/aria-empty-history.png'); }
+html[data-theme="mecha"] .empty-state[data-mecha-state="empty-proxy"]::before { background-image: url('/dashboard/assets/mecha/mascot/drone-error.png'); }
+html[data-theme="mecha"] .empty-state[data-mecha-state="server-error"]::before { background-image: url('/dashboard/assets/mecha/mascot/aria-error.png'); }
+html[data-theme="mecha"] .empty-state[data-mecha-state="loading-core"]::before { background-image: url('/dashboard/assets/mecha/states/loading-core.webp'); }
+
+/* Login access gate */
+html[data-theme="mecha"] body.login-page {
+  background:
+    linear-gradient(rgba(8,11,26,.76), rgba(8,11,26,.9)),
+    url('/dashboard/assets/mecha/backgrounds/bg-control-room.webp') center/cover fixed;
+}
+
+html[data-theme="mecha"] .login-panel {
+  width: min(100%, 500px);
+  min-height: 430px;
+  padding: 34px 34px 30px;
+  border-color: rgba(139,108,255,.4);
+  overflow: hidden;
+}
+
+html[data-theme="mecha"] .login-panel::after {
+  position: absolute;
+  right: -18px;
+  bottom: -18px;
+  z-index: 0;
+  width: 220px;
+  height: 240px;
+  background: radial-gradient(circle at 70% 70%, rgba(139,108,255,.12), transparent 64%);
+  content: "";
+}
+
+html[data-theme="mecha"] .login-panel > *:not(.login-aria-operator):not(.login-drone) {
+  position: relative;
+  z-index: 2;
+}
+
+html[data-theme="mecha"] .login-brand {
+  width: 72px;
+  height: 72px;
+  margin-bottom: 22px;
+}
+
+html[data-theme="mecha"] .login-copy {
+  max-width: 320px;
+}
+
+html[data-theme="mecha"] .login-copy h1 {
+  font-family: var(--tech-display);
+  letter-spacing: .06em;
+}
+
+html[data-theme="mecha"] .login-copy .eyebrow {
+  color: var(--cyber-cyan);
+}
+
+html[data-theme="mecha"] .login-copy > p:last-child {
+  color: var(--text-secondary);
+}
+
+html[data-theme="mecha"] .login-form {
+  max-width: 360px;
+}
+
+html[data-theme="mecha"] .login-aria-operator {
+  position: absolute;
+  right: 22px;
+  bottom: 18px;
+  z-index: 1;
+  width: 112px;
+  opacity: .86;
+  filter: drop-shadow(0 0 16px rgba(139,108,255,.16));
+}
+
+html[data-theme="mecha"] .login-drone {
+  position: absolute;
+  top: 24px;
+  right: 28px;
+  width: 52px;
+  opacity: .78;
+}
+
+html[data-theme="mecha"] .login-theme-toggle {
+  position: fixed;
+  top: 18px;
+  right: 18px;
+  z-index: 20;
+}
+
+html[data-theme="mecha"] .login-footer {
+  max-width: 360px;
+  border-top-color: rgba(92,203,255,.14);
+  color: var(--success);
+}
+
+/* Motion */
+@keyframes mecha-status-pulse {
+  0%, 100% { opacity: .55; transform: scale(.9); }
+  50% { opacity: 1; transform: scale(1.08); }
+}
+
+@keyframes mecha-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}
+
+html[data-theme="mecha"] .status-dot.neutral,
+html[data-theme="mecha"] .status-dot.connecting,
+html[data-theme="mecha"] .connection-pill.warn .status-dot {
+  animation: mecha-status-pulse 1.8s steps(2, end) infinite;
+}
+
+html[data-theme="mecha"] .mecha-sidebar-drone,
+html[data-theme="mecha"] .mecha-simulation-drone,
+html[data-theme="mecha"] .login-drone {
+  animation: mecha-float 2.8s steps(4, end) infinite;
+}
+
+/* Tablet */
+@media (max-width: 1180px) {
+  html[data-theme="mecha"] .content::before,
+  html[data-theme="mecha"] .mecha-unit-silhouette { display: none; }
+  html[data-theme="mecha"] .quick-actions { padding-right: 120px; }
+  html[data-theme="mecha"] .mecha-operator-figure { right: 10px; width: 112px; }
+  html[data-theme="mecha"] .metric-card { min-height: 96px; }
+}
+
+@media (max-width: 900px) {
+  html[data-theme="mecha"] .mecha-mobile-avatar { display: block; }
+  html[data-theme="mecha"] body {
+    background-image:
+      linear-gradient(rgba(8,11,26,.88), rgba(8,11,26,.92)),
+      url('/dashboard/assets/mecha/backgrounds/bg-app-mobile.webp');
+    background-size: cover;
+  }
+  html[data-theme="mecha"] .sidebar {
+    background-image:
+      linear-gradient(180deg, rgba(13,16,37,.98), rgba(8,11,26,.99)),
+      url('/dashboard/assets/mecha/backgrounds/bg-sidebar.webp');
+  }
+  html[data-theme="mecha"] .topbar {
+    background-image: linear-gradient(90deg, rgba(16,20,43,.98), rgba(13,16,37,.97));
+  }
+  html[data-theme="mecha"] .theme-toggle [data-theme-label] { display: none; }
+  html[data-theme="mecha"] .theme-toggle { min-width: 42px; }
+}
+
+/* Mobile */
+@media (max-width: 640px) {
+  html[data-theme="mecha"] body::before { opacity: .1; }
+  html[data-theme="mecha"] body::after { display: none; }
+  html[data-theme="mecha"] .section-card,
+  html[data-theme="mecha"] .metric-card,
+  html[data-theme="mecha"] .login-panel {
+    clip-path: polygon(0 0, calc(100% - 7px) 0, 100% 7px, 100% 100%, 7px 100%, 0 calc(100% - 7px));
+  }
+  html[data-theme="mecha"] .metric-card { min-height: 88px; }
+  html[data-theme="mecha"] .metric-icon { width: 42px; height: 42px; background-size: 32px; }
+  html[data-theme="mecha"] .quick-actions { min-height: auto; padding-right: 18px; }
+  html[data-theme="mecha"] .mecha-operator-figure,
+  html[data-theme="mecha"] .mecha-simulation-drone { display: none; }
+  html[data-theme="mecha"] .empty-state {
+    min-height: 92px;
+    padding: 18px 16px 18px 88px;
+  }
+  html[data-theme="mecha"] .empty-state::before {
+    left: 4px;
+    width: 78px;
+    height: 78px;
+  }
+  html[data-theme="mecha"] .login-panel {
+    width: min(100%, 430px);
+    min-height: 0;
+    padding: 26px 22px;
+  }
+  html[data-theme="mecha"] .login-aria-operator,
+  html[data-theme="mecha"] .login-drone { display: none; }
+  html[data-theme="mecha"] .login-copy,
+  html[data-theme="mecha"] .login-form,
+  html[data-theme="mecha"] .login-footer { max-width: none; }
+  html[data-theme="mecha"] .login-theme-toggle { top: 10px; right: 10px; }
+  html[data-theme="mecha"] .mecha-sidebar-drone { width: 44px; height: 44px; }
+}
+
+@media (min-width: 921px) and (min-height: 680px) {
+  html[data-theme="mecha"] .metric-card {
+    min-height: 84px;
+    height: 84px;
+    padding: 10px 12px;
+  }
+  html[data-theme="mecha"] .history-metric-grid .metric-card {
+    min-height: 88px;
+    height: 88px;
+  }
+  html[data-theme="mecha"] .metric-icon {
+    width: 36px;
+    height: 36px;
+    background-size: 30px;
+  }
+  html[data-theme="mecha"] .quick-actions {
+    min-height: 66px;
+    height: 66px;
+    padding: 8px 88px 8px 14px;
+    contain: layout paint;
+  }
+  html[data-theme="mecha"] .quick-actions .mecha-operator-figure {
+    right: 18px;
+    bottom: 0;
+    width: auto;
+    height: 64px;
+  }
+  html[data-theme="mecha"] #modelTesterPanel {
+    contain: layout paint;
+  }
+}
+
+@media (max-width: 920px), (max-height: 679px) {
+  html[data-theme="mecha"] .tester-panel textarea {
+    height: 104px;
+    min-height: 104px;
+    max-height: 104px;
+    resize: none;
+  }
+  html[data-theme="mecha"] #modelTesterPanel {
+    min-height: 0;
+    overflow: hidden;
+  }
+  html[data-theme="mecha"] .compact-response-grid {
+    display: grid;
+    min-height: 0;
+    flex: 0 0 auto;
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+  html[data-theme="mecha"] .compact-response-grid pre,
+  html[data-theme="mecha"] .compact-response-grid #testerReasoning {
+    height: 190px;
+    min-height: 190px;
+    max-height: 190px;
+    flex: 0 0 190px;
+    overflow: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-theme="mecha"] *,
+  html[data-theme="mecha"] *::before,
+  html[data-theme="mecha"] *::after {
+    scroll-behavior: auto !important;
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+}
+
+
+/* Manual visual review tuning — 2026-07-23
+   Keep the Mecha Control Deck identity, but make dense dashboard screens feel
+   more like a professional control room than a fully framed game menu. */
+html[data-theme="mecha"] {
+  --text-secondary: #C6C7E4;
+  --text-muted: #9EA2C8;
+  --hud-shadow: 0 12px 30px rgba(2, 5, 18, .36), 0 0 0 1px rgba(92, 203, 255, .022) inset;
+  --hud-glow: 0 0 12px rgba(139, 108, 255, .1);
+}
+
+html[data-theme="mecha"] body {
+  background-image:
+    linear-gradient(rgba(8, 11, 26, .9), rgba(8, 11, 26, .94)),
+    url('/dashboard/assets/mecha/backgrounds/bg-app.webp');
+}
+
+html[data-theme="mecha"] body::before { opacity: .12; }
+html[data-theme="mecha"] body::after { opacity: .02; }
+
+html[data-theme="mecha"] .section-card,
+html[data-theme="mecha"] .current-model-card,
+html[data-theme="mecha"] .menu-popover,
+html[data-theme="mecha"] .notice,
+html[data-theme="mecha"] .inline-note {
+  border-color: rgba(58, 63, 108, .68);
+  background:
+    linear-gradient(145deg, rgba(18,22,44,.96), rgba(10,13,31,.97)),
+    url('/dashboard/assets/mecha/backgrounds/bg-panel-noise.png');
+}
+
+/* Reserve the heavy pixel frame for key readouts and access gates. */
+html[data-theme="mecha"] .section-card::before {
+  opacity: .24;
+  border-width: 8px;
+  border-image-slice: 16;
+  border-image-width: 8px;
+}
+
+html[data-theme="mecha"] .metric-card::before,
+html[data-theme="mecha"] .login-panel::before {
+  opacity: .42;
+  border-width: 10px;
+  border-image-width: 10px;
+}
+
+html[data-theme="mecha"] .section-card:hover,
+html[data-theme="mecha"] .metric-card:hover {
+  border-color: rgba(92, 203, 255, .3);
+  box-shadow: var(--hud-shadow), 0 0 14px rgba(92,203,255,.045);
+}
+
+html[data-theme="mecha"] .section-header {
+  border-bottom-color: rgba(183,184,220,.14);
+}
+
+html[data-theme="mecha"] .section-header h2,
+html[data-theme="mecha"] .section-header h3,
+html[data-theme="mecha"] .drawer-tabs button,
+html[data-theme="mecha"] .metric-label,
+html[data-theme="mecha"] .response-label,
+html[data-theme="mecha"] .eyebrow,
+html[data-theme="mecha"] .data-table th {
+  letter-spacing: .025em;
+}
+
+html[data-theme="mecha"] .metric-card {
+  border-color: rgba(58,63,108,.66);
+  background:
+    linear-gradient(120deg, rgba(18,22,44,.98), rgba(10,13,31,.95)),
+    url('/dashboard/assets/mecha/backgrounds/bg-panel-noise.png');
+}
+
+html[data-theme="mecha"] .metric-card::after {
+  opacity: .28;
+}
+
+html[data-theme="mecha"] .metric-icon {
+  width: 40px;
+  height: 40px;
+  background-size: 30px;
+  box-shadow: inset 0 0 12px rgba(139,108,255,.055), 0 0 8px rgba(139,108,255,.04);
+}
+
+html[data-theme="mecha"] .history-metric-grid .metric-icon {
+  width: 36px;
+  height: 36px;
+  background-size: 28px;
+}
+
+html[data-theme="mecha"] .metric-card strong {
+  font-weight: 760;
+  text-shadow: 0 0 12px rgba(139,108,255,.11);
+}
+
+html[data-theme="mecha"] .metric-card small,
+html[data-theme="mecha"] input::placeholder,
+html[data-theme="mecha"] textarea::placeholder {
+  color: var(--text-muted);
+}
+
+html[data-theme="mecha"] .nav-item {
+  min-height: 42px;
+  border-color: rgba(58,63,108,.52);
+  background: linear-gradient(180deg, rgba(18,22,44,.62), rgba(10,13,31,.7));
+}
+
+html[data-theme="mecha"] .nav-item.active {
+  border-color: rgba(139,108,255,.58);
+  background: linear-gradient(90deg, rgba(139,108,255,.18), rgba(36,41,87,.68));
+  box-shadow: inset 3px 0 var(--anime-pink), 0 0 12px rgba(139,108,255,.09);
+}
+
+html[data-theme="mecha"] .nav-item.active::after {
+  opacity: .68;
+  box-shadow: 0 0 7px rgba(92,203,255,.42);
+}
+
+html[data-theme="mecha"] .brand-mark {
+  width: 42px;
+  height: 42px;
+  flex-basis: 42px;
+  filter: drop-shadow(0 0 8px rgba(139,108,255,.2));
+}
+
+html[data-theme="mecha"] .topbar {
+  box-shadow: 0 10px 24px rgba(2,5,18,.26), inset 0 -1px rgba(139,108,255,.08);
+}
+
+html[data-theme="mecha"] .connection-pill,
+html[data-theme="mecha"] .environment-badge,
+html[data-theme="mecha"] .status-tag,
+html[data-theme="mecha"] .count-badge {
+  letter-spacing: .012em;
+}
+
+html[data-theme="mecha"] .quick-actions {
+  border-color: rgba(255,143,207,.2);
+  background:
+    linear-gradient(90deg, rgba(18,22,44,.98), rgba(30,35,75,.5)),
+    url('/dashboard/assets/mecha/backgrounds/bg-control-room.webp') right center/cover;
+}
+
+html[data-theme="mecha"] .quick-actions::after {
+  background: linear-gradient(90deg, rgba(18,22,44,.99) 0 64%, rgba(18,22,44,.74) 82%, transparent 100%);
+}
+
+html[data-theme="mecha"] .mecha-operator-figure {
+  opacity: .66;
+  filter: drop-shadow(0 0 12px rgba(139,108,255,.12));
+}
+
+html[data-theme="mecha"] .mecha-sidebar-drone,
+html[data-theme="mecha"] .mecha-simulation-drone,
+html[data-theme="mecha"] .login-drone {
+  opacity: .54;
+  filter: drop-shadow(0 0 8px rgba(92,203,255,.14));
+}
+
+html[data-theme="mecha"] .data-table,
+html[data-theme="mecha"] .table-card,
+html[data-theme="mecha"] .resource-list,
+html[data-theme="mecha"] .event-list,
+html[data-theme="mecha"] .history-content-pane,
+html[data-theme="mecha"] .log-output,
+html[data-theme="mecha"] .code-block,
+html[data-theme="mecha"] .config-editor {
+  border-color: rgba(58,63,108,.58);
+  background: rgba(5,7,19,.82);
+}
+
+html[data-theme="mecha"] .data-table tr,
+html[data-theme="mecha"] .resource-item,
+html[data-theme="mecha"] .event-item,
+html[data-theme="mecha"] .diagnostic-item,
+html[data-theme="mecha"] .history-event,
+html[data-theme="mecha"] .history-attempt {
+  border-color: rgba(58,63,108,.36);
+}
+
+html[data-theme="mecha"] .modal-shell::before,
+html[data-theme="mecha"] .drawer-shell::before,
+html[data-theme="mecha"] .drawer-panel::before {
+  opacity: .36;
+  border-width: 12px;
+  border-image-width: 12px;
+}
+
+html[data-theme="mecha"] .empty-state {
+  background:
+    linear-gradient(90deg, rgba(8,11,26,.9), rgba(18,22,44,.62)),
+    url('/dashboard/assets/mecha/backgrounds/bg-empty-state.webp') center/cover;
+}
+
+html[data-theme="mecha"] .empty-state::before {
+  opacity: .82;
+}
+
+@media (max-width: 900px) {
+  html[data-theme="mecha"] .mecha-mobile-avatar {
+    width: 30px;
+    height: 30px;
+    flex-basis: 30px;
+    opacity: .72;
+  }
+
+  html[data-theme="mecha"] .topbar-title h1 {
+    letter-spacing: .018em;
+  }
+}
+
+@media (max-width: 640px) {
+  html[data-theme="mecha"] .section-card::before,
+  html[data-theme="mecha"] .metric-card::before,
+  html[data-theme="mecha"] .login-panel::before {
+    opacity: .22;
+    border-width: 6px;
+    border-image-width: 6px;
+  }
+
+  html[data-theme="mecha"] .metric-card {
+    min-height: 82px;
+  }
+
+  html[data-theme="mecha"] .metric-icon {
+    width: 34px;
+    height: 34px;
+    background-size: 26px;
+  }
+
+  html[data-theme="mecha"] .button,
+  html[data-theme="mecha"] .compact-button,
+  html[data-theme="mecha"] .icon-button,
+  html[data-theme="mecha"] .nav-item {
+    min-height: 42px;
+  }
+
+  html[data-theme="mecha"] .quick-actions {
+    padding-right: 14px;
+    background-image: linear-gradient(160deg, rgba(18,22,44,.98), rgba(10,13,31,.97));
+  }
+
+  html[data-theme="mecha"] .quick-actions::after {
+    display: none;
+  }
+
+  html[data-theme="mecha"] .mecha-mobile-avatar {
+    display: block;
+    width: 26px;
+    height: 26px;
+    flex-basis: 26px;
+    opacity: .62;
+  }
+
+  html[data-theme="mecha"] .empty-state {
+    padding-left: 74px;
+  }
+
+  html[data-theme="mecha"] .empty-state::before {
+    width: 66px;
+    height: 66px;
+  }
+}
+
+/* Regression alignment: mobile nav keeps comfortable touch height, but login
+   submit and dialog icon buttons remain exactly 40px as verified by the UI gate. */
+@media (max-width: 640px) {
+  html[data-theme="mecha"] .login-panel .button,
+  html[data-theme="mecha"] .login-panel button {
+    min-height: 40px;
+    height: 40px;
+  }
+
+  html[data-theme="mecha"] .modal-shell .icon-button,
+  html[data-theme="mecha"] .drawer-shell .icon-button,
+  html[data-theme="mecha"] .drawer-panel .icon-button {
+    width: 40px;
+    min-width: 40px;
+    height: 40px;
+    min-height: 40px;
+  }
+}
+
+
+/* Manual live screenshot review — 2026-07-30
+   Professional control-room pass: preserve the mecha identity while reducing
+   decorative competition, equal-weight neon frames, and mobile density. */
+html[data-theme="mecha"] {
+  --topbar-height: 64px;
+  --sidebar-width: clamp(220px, 14vw, 238px);
+  --bg-canvas: #080c1a;
+  --bg-sidebar: #0c1224;
+  --bg-header: #10172b;
+  --bg-surface: #131a31;
+  --bg-surface-hover: #19223d;
+  --bg-surface-active: #202b4a;
+  --text-secondary: #d0d2e8;
+  --text-muted: #aeb2cf;
+  --text-disabled: #69708f;
+  --border-subtle: #2a3152;
+  --border-default: #3a436a;
+  --hud-shadow: 0 10px 26px rgba(2, 5, 18, .3), 0 0 0 1px rgba(92, 203, 255, .018) inset;
+  --hud-glow: 0 0 8px rgba(139, 108, 255, .07);
+}
+
+html[data-theme="mecha"] body {
+  background-image:
+    linear-gradient(rgba(8, 12, 26, .86), rgba(8, 12, 26, .91)),
+    url('/dashboard/assets/mecha/backgrounds/bg-app.webp');
+}
+
+html[data-theme="mecha"] body::before { opacity: .075; }
+html[data-theme="mecha"] body::after { opacity: .01; }
+
+html[data-theme="mecha"] .sidebar {
+  padding: 12px 10px;
+  border-right-color: rgba(92, 203, 255, .1);
+  box-shadow: 8px 0 26px rgba(2, 5, 18, .3), 1px 0 rgba(139,108,255,.08) inset;
+}
+
+html[data-theme="mecha"] .sidebar::before,
+html[data-theme="mecha"] .sidebar::after {
+  width: 24px;
+  height: 24px;
+  opacity: .38;
+}
+
+html[data-theme="mecha"] .brand-row {
+  min-height: 52px;
+  padding-inline: 6px;
+  border-bottom-color: rgba(139, 108, 255, .1);
+}
+
+html[data-theme="mecha"] .brand-mark {
+  width: 36px;
+  height: 36px;
+  flex-basis: 36px;
+  filter: drop-shadow(0 0 5px rgba(139, 108, 255, .14));
+}
+
+html[data-theme="mecha"] .brand-copy strong {
+  font-size: 12.5px;
+  letter-spacing: .025em;
+}
+
+html[data-theme="mecha"] .brand-copy span {
+  color: var(--text-muted);
+  font-size: 8px;
+  letter-spacing: .04em;
+}
+
+html[data-theme="mecha"] .nav-list {
+  gap: 5px;
+  margin-top: 16px;
+}
+
+html[data-theme="mecha"] .nav-item {
+  min-height: 40px;
+  padding: 8px 11px;
+  border-color: transparent;
+  border-radius: 5px;
+  background: transparent;
+  clip-path: none;
+  color: var(--text-secondary);
+}
+
+html[data-theme="mecha"] .nav-item:hover {
+  transform: none;
+  border-color: rgba(92, 203, 255, .12);
+  background: rgba(92, 203, 255, .055);
+  box-shadow: none;
+}
+
+html[data-theme="mecha"] .nav-item.active {
+  border-color: rgba(139, 108, 255, .28);
+  background: linear-gradient(90deg, rgba(139,108,255,.14), rgba(92,203,255,.035));
+  box-shadow: inset 2px 0 var(--primary), 0 6px 18px rgba(2,5,18,.14);
+}
+
+html[data-theme="mecha"] .nav-item.active::after {
+  opacity: .35;
+  box-shadow: none;
+}
+
+html[data-theme="mecha"] .sidebar-footer {
+  gap: 6px;
+  padding: 10px 6px 2px;
+  border-top-color: rgba(183,184,220,.1);
+}
+
+html[data-theme="mecha"] .topbar {
+  min-height: var(--topbar-height);
+  padding-block: 8px;
+  border-bottom-color: rgba(92,203,255,.09);
+  background: rgba(11, 16, 35, .9);
+  box-shadow: 0 8px 20px rgba(2,5,18,.22), inset 0 -1px rgba(139,108,255,.045);
+  backdrop-filter: blur(12px);
+}
+
+html[data-theme="mecha"] .topbar-title h1 {
+  letter-spacing: .018em;
+  text-shadow: none;
+}
+
+html[data-theme="mecha"] .topbar-title p { color: var(--text-muted); }
+
+html[data-theme="mecha"] .section-card,
+html[data-theme="mecha"] .metric-card,
+html[data-theme="mecha"] .current-model-card,
+html[data-theme="mecha"] .menu-popover,
+html[data-theme="mecha"] .notice,
+html[data-theme="mecha"] .inline-note,
+html[data-theme="mecha"] .login-panel {
+  border-color: rgba(58, 67, 106, .72);
+  border-radius: 6px;
+  background:
+    linear-gradient(145deg, rgba(19,26,49,.97), rgba(11,16,34,.98)),
+    url('/dashboard/assets/mecha/backgrounds/bg-panel-noise.png');
+  box-shadow: var(--hud-shadow);
+  clip-path: none;
+}
+
+html[data-theme="mecha"] .section-card::before {
+  inset: 1px;
+  border-width: 4px;
+  border-image-width: 4px;
+  opacity: .075;
+}
+
+html[data-theme="mecha"] .metric-card::before,
+html[data-theme="mecha"] .login-panel::before {
+  inset: 1px;
+  border-width: 6px;
+  border-image-width: 6px;
+  opacity: .15;
+}
+
+html[data-theme="mecha"] .section-card:hover,
+html[data-theme="mecha"] .metric-card:hover {
+  border-color: rgba(92, 203, 255, .24);
+  box-shadow: 0 12px 30px rgba(2,5,18,.32);
+}
+
+html[data-theme="mecha"] .section-header {
+  border-bottom-color: rgba(183,184,220,.11);
+}
+
+html[data-theme="mecha"] .section-header h2,
+html[data-theme="mecha"] .section-header h3 {
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+html[data-theme="mecha"] .section-header h2::before,
+html[data-theme="mecha"] .section-header h3::before {
+  width: 5px;
+  height: 5px;
+  margin-right: 7px;
+  box-shadow: none;
+}
+
+html[data-theme="mecha"] .eyebrow,
+html[data-theme="mecha"] .metric-label,
+html[data-theme="mecha"] .response-label,
+html[data-theme="mecha"] .data-table th {
+  color: #8fd8fa;
+  letter-spacing: .035em;
+}
+
+html[data-theme="mecha"] .metric-card {
+  border-color: rgba(58,67,106,.64);
+  background: linear-gradient(120deg, rgba(19,26,49,.98), rgba(11,16,34,.97));
+}
+
+html[data-theme="mecha"] .metric-card::after { opacity: .13; }
+
+html[data-theme="mecha"] .metric-icon {
+  width: 34px;
+  height: 34px;
+  border-color: rgba(139,108,255,.24);
+  border-radius: 5px;
+  background-color: rgba(139,108,255,.065);
+  background-size: 25px;
+  box-shadow: inset 0 0 8px rgba(139,108,255,.04);
+}
+
+html[data-theme="mecha"] .history-metric-grid .metric-icon {
+  width: 32px;
+  height: 32px;
+  background-size: 24px;
+}
+
+html[data-theme="mecha"] .metric-card strong {
+  font-weight: 720;
+  text-shadow: none;
+}
+
+html[data-theme="mecha"] .metric-card small,
+html[data-theme="mecha"] input::placeholder,
+html[data-theme="mecha"] textarea::placeholder { color: var(--text-muted); }
+
+html[data-theme="mecha"] .button,
+html[data-theme="mecha"] .compact-button,
+html[data-theme="mecha"] .icon-button {
+  border-color: rgba(58,67,106,.78);
+  border-radius: 5px;
+  background: linear-gradient(180deg, rgba(28,37,66,.94), rgba(16,22,43,.98));
+  clip-path: none;
+  box-shadow: none;
+}
+
+html[data-theme="mecha"] .button:hover,
+html[data-theme="mecha"] .compact-button:hover,
+html[data-theme="mecha"] .icon-button:hover {
+  transform: none;
+  border-color: rgba(92,203,255,.4);
+  background: rgba(35,47,79,.98);
+  box-shadow: none;
+}
+
+html[data-theme="mecha"] .button.primary {
+  border-color: rgba(161,139,255,.55);
+  background: linear-gradient(135deg, #7e66e8, #8c75ef);
+  color: #0a0d1a;
+  box-shadow: 0 8px 18px rgba(76,54,170,.18);
+}
+
+html[data-theme="mecha"] .button.primary:hover {
+  background: linear-gradient(135deg, #927cf2, #9a86f3);
+  box-shadow: 0 8px 22px rgba(76,54,170,.24);
+}
+
+html[data-theme="mecha"] .connection-pill,
+html[data-theme="mecha"] .environment-badge,
+html[data-theme="mecha"] .status-tag,
+html[data-theme="mecha"] .count-badge {
+  letter-spacing: .01em;
+  box-shadow: none;
+}
+
+html[data-theme="mecha"] .data-table,
+html[data-theme="mecha"] .table-card,
+html[data-theme="mecha"] .resource-list,
+html[data-theme="mecha"] .event-list,
+html[data-theme="mecha"] .history-content-pane,
+html[data-theme="mecha"] .log-output,
+html[data-theme="mecha"] .code-block,
+html[data-theme="mecha"] .config-editor {
+  border-color: rgba(58,67,106,.5);
+  background: rgba(7,11,25,.78);
+}
+
+html[data-theme="mecha"] .data-table tr,
+html[data-theme="mecha"] .resource-item,
+html[data-theme="mecha"] .event-item,
+html[data-theme="mecha"] .diagnostic-item,
+html[data-theme="mecha"] .history-event,
+html[data-theme="mecha"] .history-attempt {
+  border-color: rgba(58,67,106,.32);
+}
+
+html[data-theme="mecha"] .resource-item.selected,
+html[data-theme="mecha"] .model-row.selected,
+html[data-theme="mecha"] [data-selected="true"] {
+  border-color: rgba(139,108,255,.42);
+  background: linear-gradient(90deg, rgba(139,108,255,.105), rgba(92,203,255,.025));
+  box-shadow: inset 2px 0 var(--primary);
+}
+
+html[data-theme="mecha"] .history-content-pane {
+  background: rgba(5,9,21,.88);
+}
+
+html[data-theme="mecha"] .history-overview-item,
+html[data-theme="mecha"] .history-event,
+html[data-theme="mecha"] .history-attempt {
+  background: rgba(12,17,34,.72);
+}
+
+html[data-theme="mecha"] .quick-actions {
+  border-color: rgba(139,108,255,.17);
+  background:
+    linear-gradient(90deg, rgba(19,26,49,.99), rgba(23,31,58,.76)),
+    url('/dashboard/assets/mecha/backgrounds/bg-control-room.webp') right center/cover;
+}
+
+html[data-theme="mecha"] .quick-actions::after {
+  background: linear-gradient(90deg, rgba(19,26,49,.99) 0 74%, rgba(19,26,49,.82) 90%, transparent 100%);
+}
+
+html[data-theme="mecha"] .mecha-operator-figure,
+html[data-theme="mecha"] .mecha-sidebar-drone,
+html[data-theme="mecha"] .mecha-simulation-drone,
+html[data-theme="mecha"] .mecha-mobile-avatar,
+html[data-theme="mecha"] .login-drone { display: none; }
+
+html[data-theme="mecha"] .mecha-unit-silhouette { opacity: .018; }
+
+html[data-theme="mecha"] dialog,
+html[data-theme="mecha"] dialog::backdrop,
+html[data-theme="mecha"] .drawer-backdrop {
+  background: rgba(2,4,13,.76);
+  backdrop-filter: blur(6px);
+}
+
+html[data-theme="mecha"] .modal-shell,
+html[data-theme="mecha"] .drawer-shell,
+html[data-theme="mecha"] .drawer-panel {
+  border-color: rgba(92,203,255,.2);
+  border-radius: 8px;
+  background: linear-gradient(150deg, rgba(20,27,50,.99), rgba(9,14,30,.995));
+  box-shadow: 0 28px 80px rgba(0,0,0,.58), 0 0 22px rgba(139,108,255,.055);
+  clip-path: none;
+}
+
+html[data-theme="mecha"] .modal-shell::before,
+html[data-theme="mecha"] .drawer-shell::before,
+html[data-theme="mecha"] .drawer-panel::before {
+  inset: 1px;
+  border-width: 6px;
+  border-image-width: 6px;
+  opacity: .12;
+}
+
+html[data-theme="mecha"] .modal-header,
+html[data-theme="mecha"] .drawer-header {
+  border-bottom-color: rgba(92,203,255,.1);
+  background: rgba(17,24,45,.94);
+}
+
+html[data-theme="mecha"] .modal-footer,
+html[data-theme="mecha"] .drawer-footer,
+html[data-theme="mecha"] .split-detail-footer {
+  border-top-color: rgba(139,108,255,.1);
+  background: rgba(9,14,29,.72);
+}
+
+html[data-theme="mecha"] #logsDialog,
+html[data-theme="mecha"] #configDialog { width: min(920px, calc(100vw - 24px)); }
+
+html[data-theme="mecha"] #diagnosticsDialog { width: min(720px, calc(100vw - 24px)); }
+
+html[data-theme="mecha"] .empty-state {
+  border-color: rgba(58,67,106,.5);
+  background: linear-gradient(90deg, rgba(9,14,29,.94), rgba(19,26,49,.76));
+}
+
+html[data-theme="mecha"] .empty-state::before { opacity: .58; }
+
+html[data-theme="mecha"] body.login-page {
+  background:
+    linear-gradient(rgba(8,12,26,.72), rgba(8,12,26,.86)),
+    url('/dashboard/assets/mecha/backgrounds/bg-control-room.webp') center/cover fixed;
+}
+
+html[data-theme="mecha"] .login-panel {
+  width: min(100%, 560px);
+  min-height: 460px;
+  padding: 38px 40px 34px;
+  border-color: rgba(139,108,255,.3);
+}
+
+html[data-theme="mecha"] .login-panel::after {
+  width: 180px;
+  height: 180px;
+  opacity: .55;
+}
+
+html[data-theme="mecha"] .login-brand {
+  width: 64px;
+  height: 64px;
+  margin-bottom: 18px;
+}
+
+html[data-theme="mecha"] .login-copy,
+html[data-theme="mecha"] .login-form,
+html[data-theme="mecha"] .login-footer { max-width: 400px; }
+
+html[data-theme="mecha"] .login-copy h1 { letter-spacing: .025em; }
+html[data-theme="mecha"] .login-aria-operator { width: 88px; opacity: .28; }
+
+@media (max-width: 920px), (max-height: 679px) {
+  html[data-theme="mecha"] {
+    --sidebar-width: min(84vw, 270px);
+    --topbar-height: 58px;
+  }
+
+  html[data-theme="mecha"] .content {
+    width: min(100% - 22px, 1220px);
+    padding-top: 14px;
+    padding-bottom: 36px;
+  }
+
+  html[data-theme="mecha"] .api-overview-pane,
+  html[data-theme="mecha"] .history-inline-detail,
+  html[data-theme="mecha"] .tester-panel.split-detail-pane,
+  html[data-theme="mecha"] .proxy-pool-pane {
+    min-height: 460px;
+  }
+
+  html[data-theme="mecha"] .section-card::before,
+  html[data-theme="mecha"] .metric-card::before { opacity: .055; }
+}
+
+@media (max-width: 640px) {
+  html[data-theme="mecha"] {
+    --topbar-height: 56px;
+  }
+
+  html[data-theme="mecha"] .topbar {
+    gap: 8px;
+    padding-inline: 10px;
+  }
+
+  html[data-theme="mecha"] .topbar-title h1 {
+    font-size: 16px;
+    letter-spacing: 0;
+  }
+
+  html[data-theme="mecha"] .topbar-actions { gap: 4px; }
+
+  html[data-theme="mecha"] .content {
+    width: calc(100% - 18px);
+    padding-top: 10px;
+    padding-bottom: 28px;
+  }
+
+  html[data-theme="mecha"] .metric-grid { gap: 8px; }
+
+  html[data-theme="mecha"] .metric-card {
+    min-height: 88px;
+    gap: 9px;
+    padding: 12px;
+  }
+
+  html[data-theme="mecha"] .metric-icon {
+    width: 32px;
+    height: 32px;
+    background-size: 23px;
+  }
+
+  html[data-theme="mecha"] .metric-label {
+    margin-bottom: 4px;
+    font-size: 9px;
+  }
+
+  html[data-theme="mecha"] .metric-card strong { font-size: 18px; }
+  html[data-theme="mecha"] .metric-card small { font-size: 11px; }
+
+  html[data-theme="mecha"] .section-card {
+    padding: 14px;
+    border-radius: 6px;
+  }
+
+  html[data-theme="mecha"] .section-header {
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+
+  html[data-theme="mecha"] .status-list button,
+  html[data-theme="mecha"] .status-list.static-list > div {
+    min-height: 44px;
+  }
+
+  html[data-theme="mecha"] .button,
+  html[data-theme="mecha"] .compact-button,
+  html[data-theme="mecha"] .icon-button,
+  html[data-theme="mecha"] .nav-item {
+    min-height: 44px;
+  }
+
+  html[data-theme="mecha"] .quick-actions {
+    min-height: auto;
+    padding: 14px;
+    background: rgba(19,26,49,.98);
+  }
+
+  html[data-theme="mecha"] .api-overview-pane,
+  html[data-theme="mecha"] .history-inline-detail,
+  html[data-theme="mecha"] .tester-panel.split-detail-pane,
+  html[data-theme="mecha"] .proxy-pool-pane {
+    min-height: 420px;
+  }
+
+  html[data-theme="mecha"] .api-key-resource-list,
+  html[data-theme="mecha"] .model-catalog-card .model-list,
+  html[data-theme="mecha"] .history-resource-list,
+  html[data-theme="mecha"] .proxy-table-wrap {
+    max-height: 360px;
+  }
+
+  html[data-theme="mecha"] .modal,
+  html[data-theme="mecha"] .compact-modal,
+  html[data-theme="mecha"] .large-modal,
+  html[data-theme="mecha"] .wide-modal,
+  html[data-theme="mecha"] #logsDialog,
+  html[data-theme="mecha"] #configDialog,
+  html[data-theme="mecha"] #diagnosticsDialog {
+    width: calc(100vw - 16px);
+    max-height: calc(100dvh - 16px);
+  }
+
+  html[data-theme="mecha"] .modal-header,
+  html[data-theme="mecha"] .drawer-header,
+  html[data-theme="mecha"] .modal-body,
+  html[data-theme="mecha"] .drawer-body {
+    padding-inline: 14px;
+  }
+
+  html[data-theme="mecha"] .login-panel {
+    min-height: auto;
+    padding: 28px 22px 24px;
+  }
+
+  html[data-theme="mecha"] .login-aria-operator { display: none; }
+}
+
+@media (max-width: 360px) {
+  html[data-theme="mecha"] .metric-grid { grid-template-columns: 1fr; }
+  html[data-theme="mecha"] .metric-card { min-height: 82px; }
+  html[data-theme="mecha"] .topbar-title h1 { font-size: 15px; }
+}

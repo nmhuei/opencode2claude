@@ -5,6 +5,7 @@ mod exa;
 mod searxng;
 mod serper;
 mod tavily;
+mod yahoo;
 
 use super::types::{SearchError, SearchErrorKind, SearchProviderKind};
 use futures_util::StreamExt;
@@ -16,6 +17,7 @@ pub(super) use exa::search as exa;
 pub(super) use searxng::search as searxng;
 pub(super) use serper::search as serper;
 pub(super) use tavily::search as tavily;
+pub(super) use yahoo::search as yahoo;
 
 async fn read_json_response(
     provider: SearchProviderKind,

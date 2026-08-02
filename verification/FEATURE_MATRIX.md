@@ -70,7 +70,7 @@ This matrix is the authoritative inventory of public contracts. `status` is one 
 | EGR-009 | Circuit breaker | open/half-open/closed transitions are bounded | egress circuit | table tests | fault fixture | retry guide | yes | verified |
 | EGR-010 | Worker lifecycle | health/restart workers cancel, join and report health | `src/workers.rs`, proxy workers | cancel/join/panic/readiness tests | shutdown and Tier C soak | `docs/observability.md` | yes | verified |
 | INF-001 | Container runtime adapter | one canonical Docker/WARP spec and injectable runtime | infrastructure/docker | adapter tests | fake/real runtime | deployment guide | yes | verified |
-| INF-002 | Process manager | spawn/probe/terminate validates process identity | infrastructure/supervisor | process tests | Linux lifecycle fixture; macOS CI pending | `docs/deployment.md` | yes | implemented |
+| INF-002 | Process manager | spawn/probe/terminate validates process identity | infrastructure/supervisor | process tests | Linux lifecycle fixture PASS | `docs/deployment.md` | yes | verified |
 | INF-003 | Atomic file store | config/runtime/update writes are atomic and permissioned | infrastructure/files | file tests | disposable FS | security/upgrade docs | yes | verified |
 | INS-001 | Install/uninstall | scripts work in disposable prefix with no leftovers | install scripts | ShellCheck plus transaction assertions | `tests/install_e2e.sh` | README, upgrade guide | yes | verified |
 | INS-002 | Update/rollback | checksum-verified atomic update restores prior binary on failure | update module | update tests | candidate/checksum/rollback fixtures | `docs/upgrade-rollback.md` | yes | verified |
@@ -79,8 +79,8 @@ This matrix is the authoritative inventory of public contracts. `status` is one 
 | SEC-002 | Secret scanning | repository and generated evidence pass secret scan | `scripts/check_secrets.py` | scanner synthetic self-test | tracked-file scan | `docs/security.md` | yes | verified |
 | SEC-003 | Dependency/license policy | audit and deny pass | `deny.toml`, Tier B | n/a | local Tier B; protected CI pending only for tier row | security/release docs | yes | verified |
 | SEC-004 | Parser fuzzing | JSON/SSE/DSML/search/config parsers have fuzz smoke | `tests/parser_fuzz_smoke.rs` | 2,256 deterministic corpus cases | debug and release test runs | `docs/testing.md` | yes | verified |
-| REL-001 | Tier A tests | deterministic per-commit test tier is mandatory | `scripts/tier-a.sh`, CI matrix | n/a | local Tier A PASS; Linux/macOS workflow | `docs/testing.md` | yes | verified |
-| REL-002 | Tier B tests | protected Docker/install/OS/schema/security tier | `scripts/tier-b.sh`, CI matrix | n/a | local `scripts/tier-b.sh` PASS; Linux/macOS CI matrix configured | `docs/testing.md` | yes | verified |
+| REL-001 | Tier A tests | deterministic per-commit test tier is mandatory | `scripts/tier-a.sh`, Linux CI | n/a | local Tier A PASS; Linux workflow configured | `docs/testing.md` | yes | verified |
+| REL-002 | Tier B tests | protected Docker/install/OS/schema/security tier | `scripts/tier-b.sh`, Linux CI | n/a | local `scripts/tier-b.sh` PASS; Linux workflow configured | `docs/testing.md` | yes | verified |
 | REL-003 | Tier C tests | real WARP, external canary, soak and release smoke | `scripts/tier-c.sh`, `system.yml` | n/a | real WARP, duplicate suppression, soak and external canary PASS | testing/release docs | yes | verified |
 | REL-004 | Release artifacts | checksums, SBOM, provenance and clean install smoke | `.github/workflows/release.yml` | n/a | actionlint + local checksum/SPDX/install bundle PASS; publish workflow configured | `docs/release-checklist.md` | yes | verified |
 | DOC-001 | Documentation set | required architecture/config/CLI/API/security/ops guides match code | `docs/`, `scripts/check_docs.py` | required-doc/env coverage checker | docs-check PASS | README index | yes | verified |

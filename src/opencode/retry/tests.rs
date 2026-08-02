@@ -3,21 +3,7 @@ use super::policy::{
     parse_retry_after, FailureClass,
 };
 use crate::config::RetryConfig;
-use crate::opencode::types::OpenAiRequest;
 use std::time::{Duration, SystemTime};
-
-fn request(model: &str, stream: bool) -> OpenAiRequest {
-    OpenAiRequest {
-        model: model.to_string(),
-        messages: vec![],
-        tools: None,
-        tool_choice: None,
-        stream,
-        temperature: None,
-        max_tokens: Some(32),
-        include_reasoning: None,
-    }
-}
 
 fn retry_config() -> RetryConfig {
     crate::config::BridgeConfig::default().retry
@@ -25,7 +11,7 @@ fn retry_config() -> RetryConfig {
 
 #[test]
 fn streaming_reasoning_model_has_no_implicit_non_reasoning_fallback() {
-    let models = build_model_retry_list(&request("deepseek-v4-flash-free", true), &retry_config());
+    let models = build_model_retry_list("deepseek-v4-flash-free", true, &retry_config());
     assert_eq!(models, vec!["deepseek-v4-flash-free"]);
 }
 
@@ -33,7 +19,7 @@ fn streaming_reasoning_model_has_no_implicit_non_reasoning_fallback() {
 fn explicit_fallbacks_are_respected_for_reasoning_stream() {
     let mut retry = retry_config();
     retry.model_fallbacks = vec!["opencode/deepseek-v4-flash-free".to_string()];
-    let models = build_model_retry_list(&request("deepseek-v4-flash-free", true), &retry);
+    let models = build_model_retry_list("deepseek-v4-flash-free", true, &retry);
     assert_eq!(models, vec!["deepseek-v4-flash-free"]);
 }
 
@@ -41,7 +27,7 @@ fn explicit_fallbacks_are_respected_for_reasoning_stream() {
 fn default_fallbacks_can_be_enabled_for_non_reasoning_requests() {
     let mut retry = retry_config();
     retry.default_fallbacks_enabled = true;
-    let models = build_model_retry_list(&request("nemotron-3-ultra-free", false), &retry);
+    let models = build_model_retry_list("nemotron-3-ultra-free", false, &retry);
     assert!(models.contains(&"nemotron-3-ultra-free".to_string()));
     assert!(models.contains(&"deepseek-v4-flash-free".to_string()));
 }

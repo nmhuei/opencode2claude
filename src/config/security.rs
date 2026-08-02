@@ -42,6 +42,7 @@ pub(super) fn validate(config: &BridgeConfig) -> Result<(), String> {
         ("Exa", config.search.exa_url.as_str()),
         ("Serper", config.search.serper_url.as_str()),
         ("DuckDuckGo", config.search.duckduckgo_url.as_str()),
+        ("Yahoo", config.search.yahoo_url.as_str()),
     ] {
         validate_http_url(name, endpoint)?;
     }

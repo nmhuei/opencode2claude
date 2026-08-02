@@ -1553,3 +1553,255 @@ async fn test_tc074_content_type_validation() {
     );
     env::remove_var("DASHBOARD_ADMIN_TOKEN");
 }
+
+// ──────────────────────────────────────────────────────────
+// Dashboard redesign control-plane contract
+// ──────────────────────────────────────────────────────────
+
+fn dashboard_control_config(name: &str) -> opencode2api::config::BridgeConfig {
+    let mut config = opencode2api::config::BridgeConfig {
+        host: "127.0.0.1".parse().unwrap(),
+        bridge_port: 0,
+        primary_proxies: None,
+        warm_standby_proxies: None,
+        ..Default::default()
+    };
+    config.egress.identity_endpoints.clear();
+    config.management.dashboard_token = Some("dashboard-control-secret".into());
+    config.management.rest_api_token = Some("dashboard-control-rest".into());
+    config.management.config_path = std::env::temp_dir().join(format!(
+        "opencode2api-dashboard-control-{name}-{}-{}.toml",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    config
+}
+
+fn dashboard_cookie() -> &'static str {
+    "bridge_admin_session=dashboard-control-secret"
+}
+
+fn dashboard_mutation_cookie() -> &'static str {
+    "bridge_admin_session=dashboard-control-secret; bridge_csrf_token=csrf-control"
+}
+
+#[tokio::test]
+async fn dashboard_control_models_requires_session_and_returns_free_catalog() {
+    let base = spawn_test_server(dashboard_control_config("models")).await;
+    let client = reqwest::Client::new();
+    let unauthorized = client
+        .get(format!("{base}/api/dashboard/control/models"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), 401);
+
+    let response = client
+        .get(format!("{base}/api/dashboard/control/models"))
+        .header("Cookie", dashboard_cookie())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["models"].as_array().unwrap().len(), 5);
+    assert!(body["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["id"] == "opencode/deepseek-v4-flash-free"));
+}
+
+#[tokio::test]
+async fn dashboard_control_completion_and_template_are_text_responses() {
+    let base = spawn_test_server(dashboard_control_config("text")).await;
+    let client = reqwest::Client::new();
+    let completion = client
+        .get(format!("{base}/api/dashboard/control/completions/bash"))
+        .header("Cookie", dashboard_cookie())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(completion.status(), 200);
+    assert!(completion.text().await.unwrap().contains("opencode2api"));
+
+    let template = client
+        .get(format!("{base}/api/dashboard/control/config/template"))
+        .header("Cookie", dashboard_cookie())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(template.status(), 200);
+    let text = template.text().await.unwrap();
+    assert!(text.contains("schema_version = 1"));
+    assert!(text.contains("auth_tokens"));
+}
+
+#[tokio::test]
+async fn dashboard_control_key_generation_requires_csrf_and_can_avoid_persistence() {
+    let config = dashboard_control_config("keys");
+    let path = config.management.config_path.clone();
+    let base = spawn_test_server(config).await;
+    let client = reqwest::Client::new();
+    let payload = json!({
+        "count": 2,
+        "bytes": 16,
+        "prefix": "sk-oc2-",
+        "save": false,
+        "replace": false
+    });
+
+    let forbidden = client
+        .post(format!("{base}/api/dashboard/control/api-keys"))
+        .header("Cookie", dashboard_cookie())
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forbidden.status(), 403);
+
+    let response = client
+        .post(format!("{base}/api/dashboard/control/api-keys"))
+        .header("Cookie", dashboard_mutation_cookie())
+        .header("X-CSRF-Token", "csrf-control")
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body: Value = response.json().await.unwrap();
+    let keys = body["keys"].as_array().unwrap();
+    assert_eq!(keys.len(), 2);
+    assert!(keys
+        .iter()
+        .all(|key| key.as_str().unwrap().starts_with("sk-oc2-")));
+    assert!(!path.exists(), "save=false must leave config untouched");
+}
+
+#[tokio::test]
+async fn dashboard_config_preview_validates_without_writing() {
+    let config = dashboard_control_config("preview");
+    let path = config.management.config_path.clone();
+    let base = spawn_test_server(config).await;
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("{base}/api/dashboard/config/preview"))
+        .header("Cookie", dashboard_cookie())
+        .json(&json!({
+            "content": "schema_version = 1\nmodel = \"opencode/deepseek-v4-flash-free\"\n"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["valid"], true);
+    assert_eq!(body["restart_required"], true);
+    assert!(!path.exists(), "preview must never create the config file");
+}
+
+#[tokio::test]
+async fn dashboard_api_key_inventory_is_fingerprinted_and_revoke_preserves_one_key() {
+    let mut config = dashboard_control_config("api-key-inventory");
+    let path = config.management.config_path.clone();
+    let first = "sk-oc2-11111111111111111111111111111111"; // EXAMPLE_SECRET_SCAN_ALLOW
+    let second = "sk-oc2-22222222222222222222222222222222"; // EXAMPLE_SECRET_SCAN_ALLOW
+    config.auth_tokens = Some(vec![first.into(), second.into()]);
+    std::fs::write(
+        &path,
+        format!(
+            "# preserve inventory comment\nschema_version = 1\nauth_tokens = [\"{first}\", \"{second}\"]\n"
+        ),
+    )
+    .unwrap();
+    let base = spawn_test_server(config).await;
+    let client = reqwest::Client::new();
+
+    let response = client
+        .get(format!("{base}/api/dashboard/control/api-keys"))
+        .header("Cookie", dashboard_cookie())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body_text = response.text().await.unwrap();
+    assert!(!body_text.contains(first));
+    assert!(!body_text.contains(second));
+    let body: Value = serde_json::from_str(&body_text).unwrap();
+    assert_eq!(body["keys"].as_array().unwrap().len(), 2);
+    assert_eq!(body["keys"][0]["active"], true);
+
+    let revoked = client
+        .post(format!("{base}/api/dashboard/control/api-keys/revoke"))
+        .header("Cookie", dashboard_mutation_cookie())
+        .header("X-CSRF-Token", "csrf-control")
+        .json(&json!({"indices":[1]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(revoked.status(), 200);
+    let updated = std::fs::read_to_string(&path).unwrap();
+    assert!(updated.contains("# preserve inventory comment"));
+    assert!(updated.contains(first));
+    assert!(!updated.contains(second));
+
+    let last_key = client
+        .post(format!("{base}/api/dashboard/control/api-keys/revoke"))
+        .header("Cookie", dashboard_mutation_cookie())
+        .header("X-CSRF-Token", "csrf-control")
+        .json(&json!({"indices":[0]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(last_key.status(), 409);
+}
+
+#[tokio::test]
+async fn dashboard_client_config_defaults_to_placeholder_and_supports_explicit_active_key() {
+    let mut config = dashboard_control_config("client-config");
+    let active = "sk-oc2-active-secret-that-must-be-explicit"; // EXAMPLE_SECRET_SCAN_ALLOW
+    config.auth_tokens = Some(vec![active.into()]);
+    config.bridge_port = 4567;
+    config.model = Some("opencode/deepseek-v4-flash-free".to_string());
+    let base = spawn_test_server(config).await;
+    let client = reqwest::Client::new();
+
+    let placeholder = client
+        .post(format!("{base}/api/dashboard/control/client-config"))
+        .header("Cookie", dashboard_mutation_cookie())
+        .header("X-CSRF-Token", "csrf-control")
+        .json(&json!({"format":"claude-code","key_source":"placeholder"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(placeholder.status(), 200);
+    let body: Value = placeholder.json().await.unwrap();
+    assert_eq!(body["contains_secret"], false);
+    assert_eq!(body["filename"], "claude-code-settings.json");
+    assert!(!body["content"].as_str().unwrap().contains(active));
+    let settings: Value = serde_json::from_str(body["content"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        settings["env"]["ANTHROPIC_BASE_URL"],
+        "http://127.0.0.1:4567"
+    );
+
+    let explicit = client
+        .post(format!("{base}/api/dashboard/control/client-config"))
+        .header("Cookie", dashboard_mutation_cookie())
+        .header("X-CSRF-Token", "csrf-control")
+        .json(&json!({"format":"env","key_source":"active"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(explicit.status(), 200);
+    let body: Value = explicit.json().await.unwrap();
+    assert_eq!(body["contains_secret"], true);
+    assert!(body["content"].as_str().unwrap().contains(active));
+    assert!(body["content"]
+        .as_str()
+        .unwrap()
+        .contains("OPENAI_BASE_URL=\"http://127.0.0.1:4567/v1\""));
+}

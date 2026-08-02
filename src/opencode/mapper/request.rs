@@ -2,11 +2,15 @@
 
 use super::helpers::{extract_system_prompt, map_model_name, tool_result_content_to_string};
 use super::policy::{
-    include_reasoning_for_stream, is_compact_request, normalize_upstream_max_tokens,
+    include_reasoning_for_stream, is_compact_request, is_deepseek_v4_model,
+    normalize_reasoning_effort, normalize_response_format, normalize_upstream_max_tokens,
+    normalize_upstream_thinking,
 };
 use crate::handlers::{ContentVal, MessagesRequest};
 use crate::opencode::types::*;
 use std::collections::HashMap;
+
+const DEEPSEEK_FREE_REASONING_HYGIENE: &str = "Reasoning hygiene: never restart, restate, or repeat the same plan or interpretation in the reasoning channel. State each plan once. After deciding the next action, perform it immediately. Do not repeatedly announce that you are about to use a tool.";
 
 /// Map Anthropic request values into a standard OpenAI payload using the
 /// default reasoning-stream token floor. Tests and compatibility callers use
@@ -25,6 +29,10 @@ pub fn map_anthropic_to_openai_with_policy(
     minimum_reasoning_stream_tokens: u32,
 ) -> OpenAiRequest {
     let mapped_model = map_model_name(&model);
+    let needs_reasoning_hygiene = payload.stream
+        && mapped_model.ends_with("-free")
+        && is_deepseek_v4_model(&mapped_model)
+        && payload.thinking_enabled() == Some(true);
     let mut openai_messages = Vec::new();
 
     // Build a map of tool_use_id -> name from previous assistant messages
@@ -44,18 +52,34 @@ pub fn map_anthropic_to_openai_with_policy(
     }
 
     // 1. System Prompt
-    if let Some(system_val) = &payload.system {
-        let system = extract_system_prompt(system_val);
+    let mut system = payload
+        .system
+        .as_ref()
+        .map(extract_system_prompt)
+        .unwrap_or_default();
+    if let Some(remaining_agents) = explicit_fanout_agents_remaining(payload) {
         if !system.is_empty() {
-            openai_messages.push(OpenAiMessage {
-                role: "system".to_string(),
-                content: Some(system),
-                reasoning_content: None,
-                tool_calls: None,
-                tool_call_id: None,
-                name: None,
-            });
+            system.push_str("\n\n");
         }
+        system.push_str(&format!(
+            "Claude Code compatibility requirement: the user explicitly requested a fan-out of subagents. Before giving a final answer, issue exactly {remaining_agents} additional Agent tool call(s) with distinct, non-overlapping research scopes, for a maximum of two Agent calls total. If more than one call remains, emit them in the same assistant turn so Claude Code can execute them concurrently. Set run_in_background=false so every Agent returns its full tool_result to this same Claude Code session. In every Agent prompt, require at most two WebSearch calls with distinct queries, real source URLs, and a direct structured final report; explicitly forbid that subagent from spawning Agent children or requesting Bash, Read, TaskOutput, or other unavailable tools. Do not replace the required Agent calls with parent-level WebSearch or WebFetch. A response with fewer than two total Agent calls is incomplete: after the first Agent tool_result, immediately call the remaining Agent before writing any final answer. After both Agent tool_result messages are available, synthesize the combined findings immediately without launching more agents."
+        ));
+    }
+    if needs_reasoning_hygiene {
+        if !system.is_empty() {
+            system.push_str("\n\n");
+        }
+        system.push_str(DEEPSEEK_FREE_REASONING_HYGIENE);
+    }
+    if !system.is_empty() {
+        openai_messages.push(OpenAiMessage {
+            role: "system".to_string(),
+            content: Some(system),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        });
     }
 
     // 2. Messages conversation turns
@@ -97,28 +121,14 @@ pub fn map_anthropic_to_openai_with_policy(
                                     .map(tool_result_content_to_string)
                                     .unwrap_or_default();
 
-                                let mapped_model =
-                                    map_model_name(&payload.model.clone().unwrap_or_default());
-                                if mapped_model.contains("-free") {
-                                    // Fallback: convert tool result into a standard user message prompt block
-                                    if !user_text.is_empty() {
-                                        user_text.push('\n');
-                                    }
-                                    user_text.push_str(&format!(
-                                        "[Tool Result for tool '{}']\n{}",
-                                        name.unwrap_or_else(|| "unknown".to_string()),
-                                        content_str
-                                    ));
-                                } else {
-                                    openai_messages.push(OpenAiMessage {
-                                        role: "tool".to_string(),
-                                        content: Some(content_str),
-                                        reasoning_content: None,
-                                        tool_calls: None,
-                                        tool_call_id: block.tool_use_id.clone(),
-                                        name,
-                                    });
-                                }
+                                openai_messages.push(OpenAiMessage {
+                                    role: "tool".to_string(),
+                                    content: Some(content_str),
+                                    reasoning_content: None,
+                                    tool_calls: None,
+                                    tool_call_id: block.tool_use_id.clone(),
+                                    name,
+                                });
                             }
                             _ => {}
                         }
@@ -140,8 +150,10 @@ pub fn map_anthropic_to_openai_with_policy(
                     for block in blocks {
                         match block.content_type.as_str() {
                             "thinking" => {
-                                if let Some(t) = &block.text {
-                                    reasoning_content.push_str(t);
+                                if let Some(thinking) =
+                                    block.thinking.as_ref().or(block.text.as_ref())
+                                {
+                                    reasoning_content.push_str(thinking);
                                 }
                             }
                             "text" => {
@@ -156,26 +168,15 @@ pub fn map_anthropic_to_openai_with_policy(
                                 if let (Some(id), Some(name), Some(input)) =
                                     (&block.id, &block.name, &block.input)
                                 {
-                                    if mapped_model.contains("-free") {
-                                        if !assistant_text.is_empty() {
-                                            assistant_text.push('\n');
-                                        }
-                                        assistant_text.push_str(&format!(
-                                            "[Requesting Tool execution: '{}' with arguments: {}]",
-                                            name,
-                                            serde_json::to_string(input).unwrap_or_default()
-                                        ));
-                                    } else {
-                                        tool_calls.push(OpenAiToolCall {
-                                            id: id.clone(),
-                                            tool_type: "function".to_string(),
-                                            function: OpenAiFunctionCall {
-                                                name: name.clone(),
-                                                arguments: serde_json::to_string(input)
-                                                    .unwrap_or_default(),
-                                            },
-                                        });
-                                    }
+                                    tool_calls.push(OpenAiToolCall {
+                                        id: id.clone(),
+                                        tool_type: "function".to_string(),
+                                        function: OpenAiFunctionCall {
+                                            name: name.clone(),
+                                            arguments: serde_json::to_string(input)
+                                                .unwrap_or_default(),
+                                        },
+                                    });
                                 }
                             }
                             _ => {}
@@ -251,6 +252,11 @@ pub fn map_anthropic_to_openai_with_policy(
     });
 
     let is_compact = is_compact_request(payload);
+    let upstream_thinking = normalize_upstream_thinking(payload, &mapped_model);
+    let effective_thinking = upstream_thinking
+        .as_ref()
+        .map(|config| config.thinking_type == "enabled")
+        .or_else(|| payload.thinking_enabled());
     let max_tokens = normalize_upstream_max_tokens(
         payload.max_tokens,
         payload.stream,
@@ -258,16 +264,109 @@ pub fn map_anthropic_to_openai_with_policy(
         is_compact,
         minimum_reasoning_stream_tokens,
     );
-    let include_reasoning = include_reasoning_for_stream(payload.stream, &mapped_model, is_compact);
+    let include_reasoning = include_reasoning_for_stream(
+        payload.stream,
+        &mapped_model,
+        is_compact,
+        effective_thinking,
+    );
+    let reasoning_effort =
+        normalize_reasoning_effort(payload, &mapped_model, upstream_thinking.as_ref());
+    let response_format = normalize_response_format(payload, &mapped_model);
+    let deepseek_thinking = is_deepseek_v4_model(&mapped_model) && effective_thinking == Some(true);
 
     OpenAiRequest {
         model: mapped_model,
         messages: openai_messages,
         tools,
-        tool_choice,
+        tool_choice: if deepseek_thinking { None } else { tool_choice },
         stream: payload.stream,
-        temperature: payload.temperature,
+        temperature: if deepseek_thinking {
+            None
+        } else {
+            payload.temperature
+        },
+        top_p: if deepseek_thinking {
+            None
+        } else {
+            payload.top_p
+        },
+        stop: payload.stop_sequences.clone(),
         max_tokens,
+        thinking: upstream_thinking,
+        reasoning_effort,
+        response_format,
         include_reasoning,
     }
+}
+
+fn explicit_fanout_agents_remaining(payload: &MessagesRequest) -> Option<usize> {
+    let agent_available = payload.tools.as_ref().is_some_and(|tools| {
+        tools
+            .iter()
+            .any(|tool| tool.name.eq_ignore_ascii_case("Agent"))
+    });
+    if !agent_available {
+        return None;
+    }
+
+    let mut user_text = String::new();
+    for message in &payload.messages {
+        if message.role != "user" {
+            continue;
+        }
+        match &message.content {
+            ContentVal::Single(text) => {
+                user_text.push_str(text);
+                user_text.push('\n');
+            }
+            ContentVal::Multiple(blocks) => {
+                for block in blocks {
+                    if block.content_type == "text" {
+                        if let Some(text) = &block.text {
+                            user_text.push_str(text);
+                            user_text.push('\n');
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let normalized = user_text.to_lowercase();
+    let explicit = [
+        "fan sub agent",
+        "fan subagent",
+        "fan-out subagent",
+        "fan out subagent",
+        "parallel subagent",
+        "multiple subagent",
+        "nhiều subagent",
+        "chia subagent",
+        "subagent song song",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle));
+    if !explicit {
+        return None;
+    }
+
+    let prior_agent_calls = payload
+        .messages
+        .iter()
+        .filter(|message| message.role == "assistant")
+        .filter_map(|message| match &message.content {
+            ContentVal::Multiple(blocks) => Some(blocks),
+            ContentVal::Single(_) => None,
+        })
+        .flatten()
+        .filter(|block| {
+            block.content_type == "tool_use"
+                && block
+                    .name
+                    .as_deref()
+                    .is_some_and(|name| name.eq_ignore_ascii_case("Agent"))
+        })
+        .count();
+
+    (prior_agent_calls < 2).then_some(2 - prior_agent_calls)
 }

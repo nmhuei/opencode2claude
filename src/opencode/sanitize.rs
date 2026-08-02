@@ -3,16 +3,26 @@
 //! Provides functions to strip system leakage tags from model responses.
 //! Extracted from `forward.rs` during module split.
 
+use crate::opencode::forward::common::{find_literal_marker_in_context, CompatMarkdownState};
+
 /// Strip system leakage tags (like `</think>`, `</parameter>`, etc.) from LLM outputs.
 ///
 /// Removes known tags that models sometimes leak from their system prompt context,
 /// including HTML-encoded variants. Also trims leading whitespace when tags were
 /// stripped from the beginning of the text.
 pub fn strip_system_tags(text: &str) -> String {
-    let mut cleaned = text.to_string();
-    let tags = [
+    strip_system_tags_with_context(text, &CompatMarkdownState::default())
+}
+
+pub(crate) fn strip_system_tags_with_context(
+    text: &str,
+    initial_state: &CompatMarkdownState,
+) -> String {
+    const TAGS: [&str; 16] = [
         "</think>",
         "<think>",
+        "</thinking>",
+        "<thinking>",
         "</parameter>",
         "<parameter>",
         "</｜DSML｜parameter>",
@@ -23,15 +33,50 @@ pub fn strip_system_tags(text: &str) -> String {
         "<｜DSML｜tool_calls>",
         "&lt;/think&gt;",
         "&lt;think&gt;",
+        "</tool_call>",
+        "<tool_call>",
     ];
-    for tag in &tags {
-        if cleaned.contains(tag) {
-            cleaned = cleaned.replace(tag, "");
+
+    let mut state = initial_state.clone();
+    let mut cleaned = String::with_capacity(text.len());
+    let mut cursor = 0;
+    let mut stripped_before_visible_text = false;
+    let mut has_visible_text = false;
+
+    while cursor < text.len() {
+        if state.is_executable_context() {
+            if let Some(tag) = TAGS.iter().find(|tag| text[cursor..].starts_with(**tag)) {
+                if !has_visible_text {
+                    stripped_before_visible_text = true;
+                }
+                cursor += tag.len();
+                continue;
+            }
         }
+
+        let ch = text[cursor..].chars().next().expect("valid UTF-8 boundary");
+        let next = if ch == '`' || ch == '~' {
+            cursor
+                + text[cursor..]
+                    .chars()
+                    .take_while(|value| *value == ch)
+                    .count()
+                    * ch.len_utf8()
+        } else {
+            cursor + ch.len_utf8()
+        };
+        let fragment = &text[cursor..next];
+        cleaned.push_str(fragment);
+        if !has_visible_text && fragment.chars().any(|value| !value.is_whitespace()) {
+            has_visible_text = true;
+        }
+        state.advance(fragment);
+        cursor = next;
     }
-    // Trim leading newlines and whitespace if we stripped tags from the beginning
-    if cleaned.trim_start() != text.trim_start() {
-        cleaned = cleaned.trim_start().to_string();
+
+    if stripped_before_visible_text {
+        let trim_bytes = cleaned.len() - cleaned.trim_start().len();
+        cleaned.drain(..trim_bytes);
     }
     cleaned
 }
@@ -43,9 +88,9 @@ pub struct ParsedDsmlCall {
 }
 
 fn extract_attribute(tag_content: &str, attr_name: &str) -> String {
-    let pattern = attr_name.to_string();
+    let pattern = attr_name;
     let mut pos = 0;
-    while let Some(match_pos) = tag_content[pos..].find(&pattern) {
+    while let Some(match_pos) = tag_content[pos..].find(pattern) {
         let abs_match_pos = pos + match_pos;
         let rem = &tag_content[abs_match_pos + pattern.len()..];
         let mut eq_found = false;
@@ -170,33 +215,75 @@ pub fn parse_dsml_tool_calls(text: &str) -> Vec<ParsedDsmlCall> {
     calls
 }
 
+pub fn parse_dsml_tool_calls_detailed(text: &str) -> (Vec<ParsedDsmlCall>, bool) {
+    let calls = parse_dsml_tool_calls(text);
+    let invoke_open = text.matches("<｜DSML｜invoke").count();
+    let invoke_close = text.matches("</｜DSML｜invoke>").count();
+    let parameter_open = text.matches("<｜DSML｜parameter").count();
+    let parameter_close = text.matches("</｜DSML｜parameter>").count();
+    let malformed = invoke_open != invoke_close
+        || parameter_open != parameter_close
+        || calls.len() != invoke_open;
+    (calls, malformed)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DsmlExtraction {
+    pub cleaned_text: String,
+    pub calls: Vec<ParsedDsmlCall>,
+    pub malformed_intent: bool,
+}
+
 pub fn extract_and_clean_dsml(text: &str) -> (String, Vec<ParsedDsmlCall>) {
-    let mut cleaned_text = String::new();
+    let extraction = extract_and_clean_dsml_detailed(text);
+    (extraction.cleaned_text, extraction.calls)
+}
+
+pub fn extract_and_clean_dsml_detailed(text: &str) -> DsmlExtraction {
+    const OPEN: &str = "<｜DSML｜tool_calls>";
+    const CLOSE: &str = "</｜DSML｜tool_calls>";
+
+    let mut cleaned_text = String::with_capacity(text.len());
     let mut calls = Vec::new();
-    let mut last_pos = 0;
+    let mut offset = 0;
+    let mut state = CompatMarkdownState::default();
+    let mut malformed_intent = false;
 
-    while let Some(start_pos) = text[last_pos..].find("<｜DSML｜tool_calls>") {
-        let abs_start = last_pos + start_pos;
-        cleaned_text.push_str(&text[last_pos..abs_start]);
+    while let Some(relative_start) = find_literal_marker_in_context(&text[offset..], OPEN, &state) {
+        let start = offset + relative_start;
+        let safe_prefix = &text[offset..start];
+        cleaned_text.push_str(safe_prefix);
+        state.advance(safe_prefix);
 
-        let rem = &text[abs_start..];
-        if let Some(end_pos) = rem.find("</｜DSML｜tool_calls>") {
-            let abs_end = abs_start + end_pos + "</｜DSML｜tool_calls>".len();
-            let dsml_block = &text[abs_start..abs_end];
-            let parsed_calls = parse_dsml_tool_calls(dsml_block);
-            calls.extend(parsed_calls);
-            last_pos = abs_end;
+        let remaining = &text[start..];
+        let Some(relative_end) = remaining.find(CLOSE) else {
+            malformed_intent = true;
+            cleaned_text.push_str(remaining);
+            offset = text.len();
+            break;
+        };
+        let end = start + relative_end + CLOSE.len();
+        let block = &text[start..end];
+        let (parsed, malformed) = parse_dsml_tool_calls_detailed(block);
+        if malformed {
+            malformed_intent = true;
+            cleaned_text.push_str(block);
         } else {
-            let dsml_block = &text[abs_start..];
-            let parsed_calls = parse_dsml_tool_calls(dsml_block);
-            calls.extend(parsed_calls);
-            last_pos = text.len();
+            calls.extend(parsed);
         }
+        offset = end;
     }
-    cleaned_text.push_str(&text[last_pos..]);
 
-    let final_cleaned = strip_system_tags(&cleaned_text);
-    (final_cleaned, calls)
+    cleaned_text.push_str(&text[offset..]);
+    DsmlExtraction {
+        cleaned_text: if malformed_intent {
+            cleaned_text
+        } else {
+            strip_system_tags(&cleaned_text)
+        },
+        calls,
+        malformed_intent,
+    }
 }
 
 #[cfg(test)]
@@ -208,6 +295,7 @@ mod tests {
         assert_eq!(strip_system_tags("</think>Hello"), "Hello");
         assert_eq!(strip_system_tags("</think>\n\nHello"), "Hello");
         assert_eq!(strip_system_tags("Hello</think>"), "Hello");
+        assert_eq!(strip_system_tags("Hello</thinking>"), "Hello");
         assert_eq!(strip_system_tags("Hello</parameter>World"), "HelloWorld");
         assert_eq!(strip_system_tags("</｜DSML｜parameter>\nHello"), "Hello");
         assert_eq!(strip_system_tags("</｜DSML｜invoke>\nHello"), "Hello");
@@ -264,5 +352,52 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "bash");
         assert_eq!(calls[0].arguments["command"], "git status");
+    }
+}
+
+#[cfg(test)]
+mod dsml_regression_tests {
+    use super::*;
+
+    #[test]
+    fn parses_multiple_invocations_and_typed_parameters() {
+        let sample = concat!(
+            "<｜DSML｜tool_calls>",
+            "<｜DSML｜invoke name=\"Bash\">",
+            "<｜DSML｜parameter name=\"command\">printf ONE</｜DSML｜parameter>",
+            "</｜DSML｜invoke>",
+            "<｜DSML｜invoke name=\"Edit\">",
+            "<｜DSML｜parameter name=\"path\">README.md</｜DSML｜parameter>",
+            "<｜DSML｜parameter name=\"replace_all\">true</｜DSML｜parameter>",
+            "<｜DSML｜parameter name=\"edits\">[{\"oldText\":\"a\",\"newText\":\"b\"}]</｜DSML｜parameter>",
+            "</｜DSML｜invoke>",
+            "</｜DSML｜tool_calls>"
+        );
+
+        let calls = parse_dsml_tool_calls(sample);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "Bash");
+        assert_eq!(calls[0].arguments["command"], "printf ONE");
+        assert_eq!(calls[1].name, "Edit");
+        assert_eq!(calls[1].arguments["path"], "README.md");
+        assert_eq!(calls[1].arguments["file"], "README.md");
+        assert_eq!(calls[1].arguments["replace_all"], "true");
+        assert_eq!(calls[1].arguments["edits"][0]["newText"], "b");
+    }
+
+    #[test]
+    fn unclosed_tool_calls_wrapper_is_fail_closed() {
+        let sample = concat!(
+            "before ",
+            "<｜DSML｜tool_calls>",
+            "<｜DSML｜invoke name=\"Read\">",
+            "<｜DSML｜parameter name=\"file_path\">src/lib.rs</｜DSML｜parameter>",
+            "</｜DSML｜invoke>"
+        );
+
+        let extraction = extract_and_clean_dsml_detailed(sample);
+        assert_eq!(extraction.cleaned_text, sample);
+        assert!(extraction.calls.is_empty());
+        assert!(extraction.malformed_intent);
     }
 }

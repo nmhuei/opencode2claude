@@ -89,12 +89,6 @@ jobs:
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             artifact_name: opencode2api-linux-arm64
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            artifact_name: opencode2api-macos-amd64
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            artifact_name: opencode2api-macos-arm64
     steps:
       - uses: actions/checkout@v5
 
@@ -143,7 +137,7 @@ jobs:
           output-file: staging/${{ matrix.artifact_name }}.spdx.json
 
       - name: Verify staged version
-        if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-apple-darwin'
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: python3 scripts/check_version_consistency.py --binary "staging/${{ matrix.artifact_name }}" --tag "${GITHUB_REF_NAME}"
 
       - name: Upload staged artifacts

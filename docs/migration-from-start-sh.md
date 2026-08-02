@@ -98,8 +98,8 @@ Replace `source start.sh` with:
 
 ```bash
 opencode2api start
-export ANTHROPIC_API_KEY="opencode-bridge"
-export ANTHROPIC_BASE_URL="http://127.0.0.1:4000/v1"
+eval "$(opencode2api --quiet env)"
+# Exports the configured bridge token and ANTHROPIC_BASE_URL=http://127.0.0.1:4000
 export OPENCODE_MODEL="opencode/deepseek-v4-flash-free"
 ```
 

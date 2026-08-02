@@ -325,7 +325,7 @@ Management endpoints may expose detailed state, but public liveness should not r
 - real Docker/WARP lifecycle;
 - exit-IP uniqueness;
 - failover under container loss;
-- macOS/Linux supervisor behavior;
+- Linux supervisor behavior;
 - release binary smoke tests.
 
 Heavy tests should be opt-in locally but mandatory in a scheduled or protected CI environment.

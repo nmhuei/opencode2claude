@@ -2,16 +2,37 @@
 
 use super::transport::send_sse;
 use crate::handlers::MessagesRequest;
-use crate::opencode::forward::common::get_correct_tool_name;
-use crate::opencode::mapper::is_web_search_tool;
-use crate::opencode::sanitize::{parse_dsml_tool_calls, strip_system_tags};
+use crate::opencode::forward::common::{
+    compat_tool_marker_pending_suffix_len, find_compat_tool_intent_marker_in_context,
+    find_literal_marker_in_context, looks_like_unverified_tool_success, matching_tool_name,
+    normalize_dsml_arguments, parse_compat_tool_requests_at_eof,
+    parse_compat_tool_requests_with_consumed, tool_call_fingerprint, CompatMarkdownState,
+    CompatToolCall,
+};
+use crate::opencode::mapper::is_bridge_search_tool;
+use crate::opencode::sanitize::{parse_dsml_tool_calls_detailed, strip_system_tags_with_context};
 use crate::opencode::types::*;
 use crate::sse::SseEventBuilder;
 use crate::stream_tracker::SseBlockTracker;
 use axum::response::sse::Event;
-use tracing::{error, warn};
+use std::collections::{BTreeMap, HashSet};
+use tracing::{trace, warn};
 
 const MAX_DSML_BUFFER_SIZE: usize = 256 * 1024;
+const MAX_COMPAT_TOOL_BUFFER_SIZE: usize = 64 * 1024;
+// Claude Code's interactive renderer keeps an open thinking block collapsed
+// until content_block_stop. Segment long reasoning into bounded blocks so the
+// user sees completed reasoning portions while the model is still working.
+const THINKING_RENDER_CHUNK_BYTES: usize = 384;
+const DSML_OPEN_TAG: &str = "<｜DSML｜tool_calls>";
+const DSML_CLOSE_TAG: &str = "</｜DSML｜tool_calls>";
+
+#[derive(Debug, Clone, Default)]
+struct PendingToolCall {
+    id: Option<String>,
+    name: Option<String>,
+    arguments: String,
+}
 
 /// Finalize the stream by emitting a fallback text block, message_delta, and message_stop.
 ///
@@ -72,6 +93,32 @@ pub(super) async fn finalize_stream(
     let _ = send_sse(tx, builder.message_stop()).await;
 }
 
+pub(super) async fn finalize_stream_with_text(
+    text: &str,
+    tx: &tokio::sync::mpsc::Sender<Event>,
+    builder: &SseEventBuilder,
+    tracker: &mut SseBlockTracker,
+    message_started: bool,
+) {
+    if !message_started {
+        let _ = send_sse(tx, builder.message_start(0)).await;
+    }
+    for (_, idx) in tracker.close_all() {
+        let _ = send_sse(tx, crate::sse::emit_block_stop(idx)).await;
+    }
+    tracker.reset();
+    let (text_idx, _, _) = tracker.ensure_text();
+    let _ = send_sse(
+        tx,
+        builder.content_block_start_at(text_idx, "text", None, None),
+    )
+    .await;
+    let _ = send_sse(tx, builder.text_delta_at(text_idx, text)).await;
+    let _ = send_sse(tx, crate::sse::emit_block_stop(text_idx)).await;
+    let _ = send_sse(tx, builder.message_delta_with_stop("end_turn", 1)).await;
+    let _ = send_sse(tx, builder.message_stop()).await;
+}
+
 pub(super) async fn process_openai_sse_line(
     line: &str,
     ctx: &mut StreamContext,
@@ -106,12 +153,24 @@ pub(super) async fn process_openai_sse_line(
     };
 
     if let Some(choice) = chunk.choices.first() {
+        trace!(
+            content_bytes = choice.delta.content.as_deref().map(str::len).unwrap_or(0),
+            reasoning_bytes = choice
+                .delta
+                .reasoning_content
+                .as_deref()
+                .map(str::len)
+                .unwrap_or(0),
+            tool_call_fragments = choice.delta.tool_calls.as_ref().map(Vec::len).unwrap_or(0),
+            finish_reason = ?choice.finish_reason,
+            "stream_timing upstream_delta_parsed"
+        );
         if let Some(reason) = &choice.finish_reason {
             ctx.update_stop_reason(reason);
         }
 
         if let Some(reasoning) = &choice.delta.reasoning_content {
-            ctx.process_reasoning_delta(reasoning, tracker, tx, builder)
+            ctx.process_reasoning_delta(reasoning, tracker, tx, builder, payload)
                 .await;
         }
 
@@ -121,7 +180,10 @@ pub(super) async fn process_openai_sse_line(
         }
 
         if let Some(tool_calls) = &choice.delta.tool_calls {
-            ctx.process_tool_calls(tool_calls, tracker, tx, builder, payload)
+            ctx.process_tool_calls(tool_calls);
+        }
+        if choice.finish_reason.is_some() {
+            ctx.finalize_pending_native_tool_calls(tracker, tx, builder, payload)
                 .await;
         }
     }
@@ -147,20 +209,47 @@ pub(super) struct StreamContext {
     pub(super) search_tc_name: String,
     /// Accumulated JSON arguments for the intercepted search tool call.
     pub(super) search_tc_args: String,
+    /// OpenAI tool-call index selected for search interception.
+    search_tc_index: Option<usize>,
+    /// Per-index fragments, including arguments received before the tool name.
+    pending_tool_calls: BTreeMap<usize, PendingToolCall>,
     /// Accumulated thinking text across all chunks in this response turn.
     pub(super) accumulated_thinking: String,
+    /// Rolling reasoning buffer used to detect compatibility tool markers that
+    /// free models occasionally place inside the reasoning channel.
+    reasoning_stream_buffer: String,
+    /// Markdown/code context carried across reasoning chunks.
+    reasoning_markdown_state: CompatMarkdownState,
+    /// Whether an oversized malformed compatibility marker in reasoning has
+    /// entered fail-closed discard mode for the rest of this response turn.
+    discarding_reasoning_compat: bool,
+    /// Bytes emitted in the currently open thinking block. Long blocks are
+    /// segmented so Claude Code's TUI can render progress before reasoning ends.
+    thinking_block_bytes: usize,
     /// Accumulated visible text across all chunks in this response turn.
     pub(super) accumulated_text: String,
     /// Whether the stream encountered a fatal read error.
     pub(super) stream_failed: bool,
     /// Whether any `tool_use` content block has been emitted.
     pub(super) has_emitted_tool_use: bool,
+    /// Semantic tool calls already emitted during this assistant turn. This
+    /// prevents a marker echoed in both thinking and visible text, or repeated
+    /// verbatim by the model, from executing twice.
+    emitted_tool_fingerprints: HashSet<String>,
     /// Whether we are currently inside a <｜DSML｜tool_calls> block.
     pub(super) dsml_mode: bool,
     /// Buffer for DSML content being accumulated inside a <｜DSML｜tool_calls> block.
     pub(super) dsml_stream_buffer: String,
     /// Buffer for text content before DSML tag detection or after DSML parsing.
     pub(super) text_stream_buffer: String,
+    /// Markdown/code context carried across visible-text chunks.
+    text_markdown_state: CompatMarkdownState,
+    /// Whether an oversized malformed compatibility marker in visible text has
+    /// entered fail-closed discard mode for the rest of this response turn.
+    discarding_text_compat: bool,
+    /// A prose-only or structurally incomplete tool marker was retained through
+    /// EOF. The outer execution loop can retry upstream with a correction.
+    pub(super) compat_retry_requested: bool,
     /// Determined from `finish_reason` in the last stream chunk.
     pub(super) final_stop_reason: String,
     /// Whether this is a compaction/summarization request.
@@ -175,13 +264,23 @@ impl StreamContext {
             search_tc_id: String::new(),
             search_tc_name: String::new(),
             search_tc_args: String::new(),
+            search_tc_index: None,
+            pending_tool_calls: BTreeMap::new(),
             accumulated_thinking: String::new(),
+            reasoning_stream_buffer: String::new(),
+            reasoning_markdown_state: CompatMarkdownState::default(),
+            discarding_reasoning_compat: false,
+            thinking_block_bytes: 0,
             accumulated_text: String::new(),
             stream_failed: false,
             has_emitted_tool_use: false,
+            emitted_tool_fingerprints: HashSet::new(),
             dsml_mode: false,
             dsml_stream_buffer: String::new(),
             text_stream_buffer: String::new(),
+            text_markdown_state: CompatMarkdownState::default(),
+            discarding_text_compat: false,
+            compat_retry_requested: false,
             final_stop_reason: "end_turn".to_string(),
             is_compact,
         }
@@ -191,32 +290,34 @@ impl StreamContext {
     fn update_stop_reason(&mut self, reason: &str) {
         self.final_stop_reason = match reason {
             "stop" => "end_turn".to_string(),
-            "tool_calls" => "tool_use".to_string(),
+            // An upstream model may hallucinate a tool that Claude Code did not
+            // provide. In that case no tool_use block is emitted, so returning
+            // tool_use would make Claude Code report malformed_tool_use.
+            "tool_calls" if self.has_emitted_tool_use || self.intercepting_search => {
+                "tool_use".to_string()
+            }
+            "tool_calls" => "end_turn".to_string(),
             "length" => "max_tokens".to_string(),
             _ => "end_turn".to_string(),
         };
     }
 
-    /// Process a reasoning/thinking delta from the upstream stream chunk.
-    ///
-    /// Appends the reasoning text to the accumulated buffer and, unless we are
-    /// currently intercepting a search tool call, emits SSE `thinking_delta`
-    /// events. Creates a new thinking content block if one is not already open.
-    async fn process_reasoning_delta(
+    async fn emit_thinking_fragment(
         &mut self,
-        reasoning: &str,
+        text: &str,
         tracker: &mut SseBlockTracker,
         tx: &tokio::sync::mpsc::Sender<Event>,
         builder: &SseEventBuilder,
     ) {
-        if reasoning.is_empty() {
+        let cleaned = strip_system_tags_with_context(text, &self.reasoning_markdown_state);
+        if cleaned.is_empty() {
             return;
         }
-        self.accumulated_thinking.push_str(reasoning);
+        self.reasoning_markdown_state.advance(&cleaned);
         if self.intercepting_search {
             return;
         }
-
+        self.accumulated_thinking.push_str(&cleaned);
         let (thinking_idx, thinking_is_new, closed_text) = tracker.ensure_thinking();
         if let Some(closed) = closed_text {
             let _ = tx.send(crate::sse::emit_block_stop(closed)).await;
@@ -227,17 +328,328 @@ impl StreamContext {
                 .await;
         }
         let _ = tx
-            .send(builder.thinking_delta(thinking_idx, reasoning))
+            .send(builder.thinking_delta(thinking_idx, &cleaned))
+            .await;
+        self.thinking_block_bytes = self.thinking_block_bytes.saturating_add(cleaned.len());
+        trace!(
+            block_index = thinking_idx,
+            bytes = cleaned.len(),
+            "stream_timing anthropic_thinking_delta_enqueued"
+        );
+        if self.thinking_block_bytes >= THINKING_RENDER_CHUNK_BYTES {
+            if let Some(closed) = tracker.close_thinking() {
+                let _ = tx.send(crate::sse::emit_block_stop(closed)).await;
+                trace!(
+                    block_index = closed,
+                    bytes = self.thinking_block_bytes,
+                    "stream_timing thinking_block_segment_closed"
+                );
+            }
+            self.thinking_block_bytes = 0;
+        }
+    }
+
+    /// Process a reasoning/thinking delta from the upstream stream chunk.
+    ///
+    /// Free models sometimes close their thinking XML and place a compatibility
+    /// tool marker in the same reasoning channel. Retain only a possible marker
+    /// suffix, stream safe reasoning immediately, and convert complete markers
+    /// into normal Claude Code tool_use blocks.
+    async fn process_reasoning_delta(
+        &mut self,
+        reasoning: &str,
+        tracker: &mut SseBlockTracker,
+        tx: &tokio::sync::mpsc::Sender<Event>,
+        builder: &SseEventBuilder,
+        payload: &MessagesRequest,
+    ) {
+        if self.intercepting_search
+            || self.discarding_reasoning_compat
+            || self.compat_retry_requested
+        {
+            return;
+        }
+        self.reasoning_stream_buffer.push_str(reasoning);
+
+        loop {
+            if self.intercepting_search
+                || self.compat_retry_requested
+                || self.reasoning_stream_buffer.is_empty()
+            {
+                return;
+            }
+
+            if let Some(marker_pos) = find_compat_tool_intent_marker_in_context(
+                &self.reasoning_stream_buffer,
+                &self.reasoning_markdown_state,
+            ) {
+                if marker_pos > 0 {
+                    let safe_prefix = self.reasoning_stream_buffer[..marker_pos].to_string();
+                    self.reasoning_stream_buffer.drain(..marker_pos);
+                    self.emit_thinking_fragment(&safe_prefix, tracker, tx, builder)
+                        .await;
+                    continue;
+                }
+
+                if let Some(parsed) =
+                    parse_compat_tool_requests_with_consumed(&self.reasoning_stream_buffer)
+                {
+                    let remaining = self.reasoning_stream_buffer[parsed.consumed..].to_string();
+                    self.reasoning_stream_buffer.clear();
+                    if !parsed.prefix.is_empty() {
+                        self.emit_thinking_fragment(&parsed.prefix, tracker, tx, builder)
+                            .await;
+                    }
+                    self.emit_compat_tool_calls(parsed.calls, tracker, tx, builder, payload)
+                        .await;
+                    if self.intercepting_search || self.compat_retry_requested {
+                        return;
+                    }
+                    self.reasoning_stream_buffer = remaining;
+                    continue;
+                }
+
+                if let Some(next_marker) = find_compat_tool_intent_marker_in_context(
+                    &self.reasoning_stream_buffer[1..],
+                    &self.reasoning_markdown_state,
+                ) {
+                    let recover_at = next_marker + 1;
+                    warn!(
+                        discarded_bytes = recover_at,
+                        "Discarding malformed reasoning marker and resynchronizing at a later valid marker"
+                    );
+                    self.reasoning_stream_buffer.drain(..recover_at);
+                    continue;
+                }
+
+                if self.reasoning_stream_buffer.len() > MAX_COMPAT_TOOL_BUFFER_SIZE {
+                    warn!(
+                        bytes = self.reasoning_stream_buffer.len(),
+                        "Reasoning compatibility marker exceeded limit; discarding marker remainder"
+                    );
+                    self.reasoning_stream_buffer.clear();
+                    self.discarding_reasoning_compat = true;
+                    self.emit_thinking_fragment(
+                        "[Oversized tool request omitted]",
+                        tracker,
+                        tx,
+                        builder,
+                    )
+                    .await;
+                    return;
+                }
+                return;
+            }
+
+            let (to_yield, pending) = split_pending_text_with_compat_prefixes(
+                &self.reasoning_stream_buffer,
+                &["</thinking>", "<thinking>", "</think>", "<think>"],
+                payload,
+                false,
+            );
+            self.reasoning_stream_buffer = pending;
+            if !to_yield.is_empty() {
+                self.emit_thinking_fragment(&to_yield, tracker, tx, builder)
+                    .await;
+            }
+            return;
+        }
+    }
+
+    async fn emit_text_fragment(
+        &mut self,
+        text: &str,
+        tracker: &mut SseBlockTracker,
+        tx: &tokio::sync::mpsc::Sender<Event>,
+        builder: &SseEventBuilder,
+    ) {
+        let cleaned = if self.is_compact {
+            text.to_string()
+        } else {
+            strip_system_tags_with_context(text, &self.text_markdown_state)
+        };
+        if cleaned.is_empty() {
+            return;
+        }
+        if self.has_emitted_tool_use && looks_like_unverified_tool_success(&cleaned) {
+            warn!("Suppressing unverified success claim after tool_use and before tool_result");
+            return;
+        }
+
+        self.text_markdown_state.advance(&cleaned);
+        self.accumulated_text.push_str(&cleaned);
+        if self.intercepting_search {
+            return;
+        }
+        if let Some(idx) = tracker.close_thinking() {
+            let _ = tx.send(crate::sse::emit_block_stop(idx)).await;
+        }
+        self.thinking_block_bytes = 0;
+        let (text_idx, text_is_new, _closed) = tracker.ensure_text();
+        if text_is_new {
+            let _ = tx
+                .send(builder.content_block_start_at(text_idx, "text", None, None))
+                .await;
+        }
+        let _ = tx.send(builder.text_delta_at(text_idx, &cleaned)).await;
+        trace!(
+            block_index = text_idx,
+            bytes = cleaned.len(),
+            "stream_timing anthropic_text_delta_enqueued"
+        );
+    }
+
+    async fn emit_compat_tool_calls(
+        &mut self,
+        calls: Vec<CompatToolCall>,
+        tracker: &mut SseBlockTracker,
+        tx: &tokio::sync::mpsc::Sender<Event>,
+        builder: &SseEventBuilder,
+        payload: &MessagesRequest,
+    ) {
+        if calls.is_empty() {
+            return;
+        }
+
+        let mut resolved = Vec::with_capacity(calls.len());
+        for call in calls {
+            let Some(correct_name) = matching_tool_name(&call.name, payload) else {
+                warn!(
+                    tool = call.name,
+                    "Compatibility marker requested an unavailable tool"
+                );
+                if !self.has_emitted_tool_use {
+                    self.compat_retry_requested = true;
+                }
+                return;
+            };
+            let arguments = normalize_dsml_arguments(&correct_name, call.arguments, payload);
+            resolved.push((correct_name, arguments));
+        }
+
+        let contains_search = resolved.iter().any(|(name, _)| is_bridge_search_tool(name));
+        if contains_search && resolved.len() > 1 {
+            warn!(
+                calls = resolved.len(),
+                "Rejecting compatibility batch containing search to avoid silently dropping calls"
+            );
+            if !self.has_emitted_tool_use {
+                self.compat_retry_requested = true;
+            }
+            return;
+        }
+
+        for (correct_name, arguments) in resolved {
+            self.emit_resolved_compat_tool_use(&correct_name, arguments, tracker, tx, builder)
+                .await;
+            if self.intercepting_search {
+                return;
+            }
+        }
+    }
+
+    async fn emit_resolved_compat_tool_use(
+        &mut self,
+        correct_name: &str,
+        arguments: serde_json::Value,
+        tracker: &mut SseBlockTracker,
+        tx: &tokio::sync::mpsc::Sender<Event>,
+        builder: &SseEventBuilder,
+    ) {
+        let fingerprint = tool_call_fingerprint(correct_name, &arguments);
+        if !self.emitted_tool_fingerprints.insert(fingerprint) {
+            warn!(
+                tool = correct_name,
+                "Suppressing duplicate compatibility tool invocation"
+            );
+            return;
+        }
+        let arguments_json = serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".into());
+
+        if is_bridge_search_tool(correct_name) {
+            self.intercepting_search = true;
+            self.search_tc_id = format!(
+                "toolu_compat_{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+            );
+            self.search_tc_name = correct_name.to_string();
+            self.search_tc_args = arguments_json;
+            return;
+        }
+
+        if let Some(idx) = tracker.close_thinking() {
+            let _ = tx.send(crate::sse::emit_block_stop(idx)).await;
+        }
+        self.thinking_block_bytes = 0;
+        if let Some(idx) = tracker.close_text() {
+            let _ = tx.send(crate::sse::emit_block_stop(idx)).await;
+        }
+
+        let call_idx = tracker.next_index();
+        let tool_id = format!(
+            "toolu_compat_{}_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            call_idx
+        );
+        let _ = tx
+            .send(builder.content_block_start_at(
+                call_idx,
+                "tool_use",
+                Some(&tool_id),
+                Some(correct_name),
+            ))
+            .await;
+        let _ = tx
+            .send(builder.input_json_delta(call_idx, &arguments_json))
+            .await;
+        let _ = tx.send(crate::sse::emit_block_stop(call_idx)).await;
+        self.has_emitted_tool_use = true;
+        self.final_stop_reason = "tool_use".to_string();
+    }
+
+    async fn process_complete_dsml_block(
+        &mut self,
+        dsml_block: &str,
+        tracker: &mut SseBlockTracker,
+        tx: &tokio::sync::mpsc::Sender<Event>,
+        builder: &SseEventBuilder,
+        payload: &MessagesRequest,
+    ) {
+        let (calls, malformed) = parse_dsml_tool_calls_detailed(dsml_block);
+        if malformed || calls.is_empty() {
+            warn!(
+                bytes = dsml_block.len(),
+                calls = calls.len(),
+                "Rejecting malformed or empty DSML tool block"
+            );
+            if !self.has_emitted_tool_use {
+                self.compat_retry_requested = true;
+            }
+            return;
+        }
+
+        let structured = calls
+            .into_iter()
+            .map(|call| CompatToolCall {
+                name: call.name,
+                arguments: call.arguments,
+            })
+            .collect();
+        self.emit_compat_tool_calls(structured, tracker, tx, builder, payload)
             .await;
     }
 
     /// Process a content/text delta from the upstream stream chunk.
     ///
-    /// Handles DSML mode detection and parsing: when not in DSML mode, text is
-    /// accumulated and checked for the <｜DSML｜tool_calls> opening tag. When in
-    /// DSML mode, content is buffered and checked for the closing tag. When the
-    /// closing tag is found, DSML tool calls are parsed and emitted as `tool_use`
-    /// content blocks. Emits `text_delta` events for non-DSML text content.
+    /// Only a suffix that can still become a DSML or compatibility marker is
+    /// retained. All other text is emitted immediately, so WebSearch-capable
+    /// subagents do not wait until the final upstream chunk before displaying.
     async fn process_content_delta(
         &mut self,
         content: &str,
@@ -246,132 +658,149 @@ impl StreamContext {
         builder: &SseEventBuilder,
         payload: &MessagesRequest,
     ) {
-        // Step 1: Accumulate into the appropriate buffer
+        if self.intercepting_search || self.discarding_text_compat || self.compat_retry_requested {
+            return;
+        }
         if self.dsml_mode {
             self.dsml_stream_buffer.push_str(content);
-            // Enforce DSML buffer cap — prevents OOM from long text prefix
-            if self.dsml_stream_buffer.len() > MAX_DSML_BUFFER_SIZE {
-                error!(
-                    "DSML stream buffer exceeded {} bytes — truncating",
-                    MAX_DSML_BUFFER_SIZE
-                );
-                self.dsml_stream_buffer = String::new();
-                self.dsml_mode = false;
-            }
-            // Check for closing DSML tag
-            if let Some(end_pos) = self
-                .dsml_stream_buffer
-                .find("</\u{ff5c}DSML\u{ff5c}tool_calls>")
-            {
-                let end_idx = end_pos + "</\u{ff5c}DSML\u{ff5c}tool_calls>".len();
-                let dsml_block = &self.dsml_stream_buffer[..end_idx];
-                let remaining = self.dsml_stream_buffer[end_idx..].to_string();
-
-                let calls = parse_dsml_tool_calls(dsml_block);
-                for call in calls {
-                    self.has_emitted_tool_use = true;
-                    let call_idx = tracker.next_index();
-                    let tool_id = format!(
-                        "toolu_dsml_{}_{}",
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis(),
-                        call_idx
-                    );
-
-                    if let Some(idx) = tracker.close_thinking() {
-                        let _ = tx.send(crate::sse::emit_block_stop(idx)).await;
-                    }
-                    if let Some(idx) = tracker.close_text() {
-                        let _ = tx.send(crate::sse::emit_block_stop(idx)).await;
-                    }
-
-                    let _ = tx
-                        .send(builder.content_block_start_at(
-                            call_idx,
-                            "tool_use",
-                            Some(&tool_id),
-                            Some(&get_correct_tool_name(&call.name, payload)),
-                        ))
-                        .await;
-
-                    let args_str = serde_json::to_string(&call.arguments).unwrap_or_default();
-                    let _ = tx.send(builder.input_json_delta(call_idx, &args_str)).await;
-
-                    let _ = tx.send(crate::sse::emit_block_stop(call_idx)).await;
-                }
-
-                self.dsml_stream_buffer = String::new();
-                self.dsml_mode = false;
-
-                if !remaining.is_empty() {
-                    self.text_stream_buffer.push_str(&remaining);
-                }
-            }
         } else {
             self.text_stream_buffer.push_str(content);
         }
 
-        // Step 2: If not in DSML mode, check text buffer for DSML opening tag
-        if !self.dsml_mode {
-            if let Some(start_pos) = self
-                .text_stream_buffer
-                .find("<\u{ff5c}DSML\u{ff5c}tool_calls>")
-            {
-                let text_to_yield = &self.text_stream_buffer[..start_pos];
-                let remainder = &self.text_stream_buffer[start_pos..];
-
-                let cleaned = if self.is_compact {
-                    text_to_yield.to_string()
-                } else {
-                    strip_system_tags(text_to_yield)
-                };
-                if !cleaned.is_empty() {
-                    self.accumulated_text.push_str(&cleaned);
-                    if !self.intercepting_search {
-                        if let Some(idx) = tracker.close_thinking() {
-                            let _ = tx.send(crate::sse::emit_block_stop(idx)).await;
-                        }
-
-                        let (text_idx, text_is_new, _closed) = tracker.ensure_text();
-                        if text_is_new {
-                            let _ = tx
-                                .send(builder.content_block_start_at(text_idx, "text", None, None))
-                                .await;
-                        }
-                        let _ = tx.send(builder.text_delta_at(text_idx, &cleaned)).await;
-                    }
-                }
-
-                self.dsml_mode = true;
-                self.dsml_stream_buffer = remainder.to_string();
-                self.text_stream_buffer = String::new();
-            } else {
-                let (to_yield, pending) = split_pending_text(&self.text_stream_buffer);
-                let cleaned = if self.is_compact {
-                    to_yield.to_string()
-                } else {
-                    strip_system_tags(&to_yield)
-                };
-                if !cleaned.is_empty() {
-                    self.accumulated_text.push_str(&cleaned);
-                    if !self.intercepting_search {
-                        if let Some(idx) = tracker.close_thinking() {
-                            let _ = tx.send(crate::sse::emit_block_stop(idx)).await;
-                        }
-
-                        let (text_idx, text_is_new, _closed) = tracker.ensure_text();
-                        if text_is_new {
-                            let _ = tx
-                                .send(builder.content_block_start_at(text_idx, "text", None, None))
-                                .await;
-                        }
-                        let _ = tx.send(builder.text_delta_at(text_idx, &cleaned)).await;
-                    }
-                }
-                self.text_stream_buffer = pending;
+        loop {
+            if self.intercepting_search || self.compat_retry_requested {
+                return;
             }
+
+            if self.dsml_mode {
+                if self.dsml_stream_buffer.len() > MAX_DSML_BUFFER_SIZE {
+                    warn!(
+                        bytes = self.dsml_stream_buffer.len(),
+                        "DSML stream buffer exceeded limit; emitting it as text"
+                    );
+                    self.dsml_stream_buffer.clear();
+                    self.dsml_mode = false;
+                    if !self.has_emitted_tool_use {
+                        self.compat_retry_requested = true;
+                    }
+                    return;
+                }
+
+                let Some(end_pos) = self.dsml_stream_buffer.find(DSML_CLOSE_TAG) else {
+                    return;
+                };
+                let end_idx = end_pos + DSML_CLOSE_TAG.len();
+                let dsml_block = self.dsml_stream_buffer[..end_idx].to_string();
+                let remaining = self.dsml_stream_buffer[end_idx..].to_string();
+                self.dsml_stream_buffer.clear();
+                self.dsml_mode = false;
+                self.process_complete_dsml_block(&dsml_block, tracker, tx, builder, payload)
+                    .await;
+                if self.intercepting_search || self.compat_retry_requested {
+                    return;
+                }
+                self.text_stream_buffer.push_str(&remaining);
+                continue;
+            }
+
+            if self.text_stream_buffer.is_empty() {
+                return;
+            }
+
+            let dsml_pos = find_literal_marker_in_context(
+                &self.text_stream_buffer,
+                DSML_OPEN_TAG,
+                &self.text_markdown_state,
+            );
+            let compat_pos = find_compat_tool_intent_marker_in_context(
+                &self.text_stream_buffer,
+                &self.text_markdown_state,
+            );
+            let next_marker = match (dsml_pos, compat_pos) {
+                (Some(dsml), Some(compat)) if dsml <= compat => Some((dsml, true)),
+                (Some(_), Some(compat)) => Some((compat, false)),
+                (Some(dsml), None) => Some((dsml, true)),
+                (None, Some(compat)) => Some((compat, false)),
+                (None, None) => None,
+            };
+
+            if let Some((marker_pos, is_dsml)) = next_marker {
+                if marker_pos > 0 {
+                    let safe_prefix = self.text_stream_buffer[..marker_pos].to_string();
+                    self.text_stream_buffer.drain(..marker_pos);
+                    if looks_like_unverified_tool_success(&safe_prefix) {
+                        warn!("Suppressing unverified success claim before tool_use");
+                    } else {
+                        self.emit_text_fragment(&safe_prefix, tracker, tx, builder)
+                            .await;
+                    }
+                    continue;
+                }
+
+                if is_dsml {
+                    self.dsml_mode = true;
+                    self.dsml_stream_buffer = std::mem::take(&mut self.text_stream_buffer);
+                    continue;
+                }
+
+                if let Some(parsed) =
+                    parse_compat_tool_requests_with_consumed(&self.text_stream_buffer)
+                {
+                    let remaining = self.text_stream_buffer[parsed.consumed..].to_string();
+                    self.text_stream_buffer.clear();
+                    if !parsed.prefix.is_empty() {
+                        self.emit_text_fragment(&parsed.prefix, tracker, tx, builder)
+                            .await;
+                    }
+                    self.emit_compat_tool_calls(parsed.calls, tracker, tx, builder, payload)
+                        .await;
+                    if self.intercepting_search || self.compat_retry_requested {
+                        return;
+                    }
+                    self.text_stream_buffer = remaining;
+                    continue;
+                }
+
+                if let Some(next_marker) = find_compat_tool_intent_marker_in_context(
+                    &self.text_stream_buffer[1..],
+                    &self.text_markdown_state,
+                ) {
+                    let recover_at = next_marker + 1;
+                    warn!(
+                        discarded_bytes = recover_at,
+                        "Discarding malformed text marker and resynchronizing at a later valid marker"
+                    );
+                    self.text_stream_buffer.drain(..recover_at);
+                    continue;
+                }
+
+                if self.text_stream_buffer.len() > MAX_COMPAT_TOOL_BUFFER_SIZE {
+                    warn!(
+                        bytes = self.text_stream_buffer.len(),
+                        "Compatibility marker exceeded limit; discarding marker remainder"
+                    );
+                    self.text_stream_buffer.clear();
+                    self.discarding_text_compat = true;
+                    self.emit_text_fragment(
+                        "[Oversized tool request omitted]",
+                        tracker,
+                        tx,
+                        builder,
+                    )
+                    .await;
+                    return;
+                }
+                return;
+            }
+
+            let (to_yield, pending) =
+                split_pending_text_for_markers(&self.text_stream_buffer, payload);
+            self.text_stream_buffer = pending;
+            if !to_yield.is_empty() {
+                self.emit_text_fragment(&to_yield, tracker, tx, builder)
+                    .await;
+            }
+            return;
         }
     }
 
@@ -380,80 +809,174 @@ impl StreamContext {
     /// For web search tools, sets `intercepting_search` flags and accumulates
     /// JSON arguments. For regular tool calls, opens a `tool_use` content block
     /// and emits `input_json_delta` events for the streaming arguments.
-    async fn process_tool_calls(
+    fn process_tool_calls(&mut self, tool_calls: &[OpenAiStreamToolCall]) {
+        if self.compat_retry_requested {
+            return;
+        }
+        for tc in tool_calls {
+            let pending = self.pending_tool_calls.entry(tc.index).or_default();
+            if let Some(id) = &tc.id {
+                pending.id = Some(id.clone());
+            }
+            if let Some(name) = tc
+                .function
+                .as_ref()
+                .and_then(|function| function.name.as_ref())
+            {
+                pending.name = Some(name.clone());
+            }
+            if let Some(arguments) = tc
+                .function
+                .as_ref()
+                .and_then(|function| function.arguments.as_ref())
+            {
+                pending.arguments.push_str(arguments);
+            }
+        }
+    }
+
+    async fn finalize_pending_native_tool_calls(
         &mut self,
-        tool_calls: &[OpenAiStreamToolCall],
         tracker: &mut SseBlockTracker,
         tx: &tokio::sync::mpsc::Sender<Event>,
         builder: &SseEventBuilder,
         payload: &MessagesRequest,
     ) {
-        for tc in tool_calls {
-            let call_idx = tc.index;
+        if self.pending_tool_calls.is_empty() || self.compat_retry_requested {
+            return;
+        }
 
-            // If not created yet and we have tool id & function name
-            #[allow(clippy::map_entry)]
-            if tracker.tool_idx(call_idx).is_none() {
-                if let (Some(id), Some(func)) = (&tc.id, &tc.function) {
-                    if let Some(name) = &func.name {
-                        if is_web_search_tool(name) {
-                            self.intercepting_search = true;
-                            self.search_tc_id = id.clone();
-                            self.search_tc_name = name.clone();
-                        } else {
-                            // Close thinking block if open
-                            if let Some(idx) = tracker.close_thinking() {
-                                let _ = tx.send(crate::sse::emit_block_stop(idx)).await;
-                            }
-                            if let Some(idx) = tracker.close_text() {
-                                let _ = tx.send(crate::sse::emit_block_stop(idx)).await;
-                            }
-
-                            let (_block_idx, _closed_t, _closed_x) = tracker.open_tool_use(
-                                call_idx,
-                                id.clone(),
-                                get_correct_tool_name(name, payload),
-                            );
-
-                            let _ = tx
-                                .send(builder.content_block_start_at(
-                                    _block_idx,
-                                    "tool_use",
-                                    Some(id),
-                                    Some(&get_correct_tool_name(name, payload)),
-                                ))
-                                .await;
-                            self.has_emitted_tool_use = true;
-                        }
-                    }
+        let pending = std::mem::take(&mut self.pending_tool_calls);
+        let mut resolved = Vec::with_capacity(pending.len());
+        for (source_index, call) in pending {
+            let Some(name) = call.name else {
+                warn!(source_index, "Native tool call ended without a name");
+                if !self.has_emitted_tool_use {
+                    self.compat_retry_requested = true;
+                    self.final_stop_reason = "end_turn".to_string();
                 }
+                return;
+            };
+            let Some(correct_name) = matching_tool_name(&name, payload) else {
+                warn!(
+                    tool = name,
+                    source_index, "Native stream requested an unavailable tool"
+                );
+                if !self.has_emitted_tool_use {
+                    self.compat_retry_requested = true;
+                    self.final_stop_reason = "end_turn".to_string();
+                }
+                return;
+            };
+            let Ok(arguments) = serde_json::from_str::<serde_json::Value>(&call.arguments) else {
+                warn!(
+                    tool = correct_name,
+                    source_index, "Native tool arguments were not valid JSON"
+                );
+                if !self.has_emitted_tool_use {
+                    self.compat_retry_requested = true;
+                    self.final_stop_reason = "end_turn".to_string();
+                }
+                return;
+            };
+            if !arguments.is_object() {
+                warn!(
+                    tool = correct_name,
+                    source_index, "Native tool arguments were not a JSON object"
+                );
+                if !self.has_emitted_tool_use {
+                    self.compat_retry_requested = true;
+                    self.final_stop_reason = "end_turn".to_string();
+                }
+                return;
             }
+            let arguments = normalize_dsml_arguments(&correct_name, arguments, payload);
+            let id = call
+                .id
+                .unwrap_or_else(|| format!("toolu_native_{source_index}"));
+            resolved.push((source_index, id, correct_name, arguments));
+        }
 
-            // Send arguments delta if present
-            if self.intercepting_search {
-                if let Some(func) = &tc.function {
-                    if let Some(args) = &func.arguments {
-                        self.search_tc_args.push_str(args);
-                    }
-                }
-            } else if let Some((idx, _, _)) = tracker.tool_idx(call_idx) {
-                if let Some(func) = &tc.function {
-                    if let Some(args) = &func.arguments {
-                        if !args.is_empty() {
-                            let _ = tx.send(builder.input_json_delta(*idx, args)).await;
-                        }
-                    }
-                }
+        let mut seen = self.emitted_tool_fingerprints.clone();
+        resolved.retain(|(_, _, name, arguments)| {
+            let unique = seen.insert(tool_call_fingerprint(name, arguments));
+            if !unique {
+                warn!(tool = name, "Suppressing duplicate native tool invocation");
             }
+            unique
+        });
+        if resolved.is_empty() {
+            return;
+        }
+
+        let search_count = resolved
+            .iter()
+            .filter(|(_, _, name, _)| is_bridge_search_tool(name))
+            .count();
+        if search_count > 0 && resolved.len() > 1 {
+            warn!(
+                calls = resolved.len(),
+                "Rejecting native tool batch containing search to avoid silently dropping calls"
+            );
+            if !self.has_emitted_tool_use {
+                self.compat_retry_requested = true;
+                self.final_stop_reason = "end_turn".to_string();
+            }
+            return;
+        }
+
+        if let Some((source_index, id, name, arguments)) = resolved
+            .first()
+            .filter(|(_, _, name, _)| is_bridge_search_tool(name))
+        {
+            self.emitted_tool_fingerprints
+                .insert(tool_call_fingerprint(name, arguments));
+            self.intercepting_search = true;
+            self.search_tc_index = Some(*source_index);
+            self.search_tc_id = id.clone();
+            self.search_tc_name = name.clone();
+            self.search_tc_args = serde_json::to_string(arguments).unwrap_or_else(|_| "{}".into());
+            self.final_stop_reason = "tool_use".to_string();
+            return;
+        }
+
+        if let Some(idx) = tracker.close_thinking() {
+            let _ = tx.send(crate::sse::emit_block_stop(idx)).await;
+        }
+        self.thinking_block_bytes = 0;
+        if let Some(idx) = tracker.close_text() {
+            let _ = tx.send(crate::sse::emit_block_stop(idx)).await;
+        }
+
+        for (source_index, id, correct_name, arguments) in resolved {
+            self.emitted_tool_fingerprints
+                .insert(tool_call_fingerprint(&correct_name, &arguments));
+            let args_json = serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".into());
+            let (block_idx, _, _) =
+                tracker.open_tool_use(source_index, id.clone(), correct_name.clone());
+            let _ = tx
+                .send(builder.content_block_start_at(
+                    block_idx,
+                    "tool_use",
+                    Some(&id),
+                    Some(&correct_name),
+                ))
+                .await;
+            let _ = tx
+                .send(builder.input_json_delta(block_idx, &args_json))
+                .await;
+            if let Some((closed_idx, _, _)) = tracker.close_tool_use(source_index) {
+                debug_assert_eq!(closed_idx, block_idx);
+                let _ = tx.send(crate::sse::emit_block_stop(closed_idx)).await;
+            }
+            self.has_emitted_tool_use = true;
+        }
+        if self.has_emitted_tool_use {
+            self.final_stop_reason = "tool_use".to_string();
         }
     }
 
-    /// Flush any remaining text and DSML buffers at the end of the stream.
-    ///
-    /// When the stream ends (either naturally or before a search-interception
-    /// loop), the text and DSML buffers may contain unprocessed content. This
-    /// method flushes the text buffer as a final `text_delta`, parses any
-    /// remaining DSML block for tool calls, and closes all active content blocks.
+    /// Flush any retained marker prefix or incomplete DSML buffer at stream end.
     pub(super) async fn flush_remaining(
         &mut self,
         tracker: &mut SseBlockTracker,
@@ -461,79 +984,169 @@ impl StreamContext {
         builder: &SseEventBuilder,
         payload: &MessagesRequest,
     ) {
-        // Flush any remaining text in text_stream_buffer
-        let cleaned = if self.is_compact {
-            self.text_stream_buffer.clone()
-        } else {
-            strip_system_tags(&self.text_stream_buffer)
-        };
-        if !cleaned.is_empty() {
-            self.accumulated_text.push_str(&cleaned);
-            if !self.intercepting_search {
-                if let Some(idx) = tracker.close_thinking() {
-                    let _ = tx.send(crate::sse::emit_block_stop(idx)).await;
-                }
+        self.finalize_pending_native_tool_calls(tracker, tx, builder, payload)
+            .await;
+        if self.intercepting_search || self.compat_retry_requested {
+            return;
+        }
 
-                let (text_idx, text_is_new, _closed) = tracker.ensure_text();
-                if text_is_new {
-                    let _ = tx
-                        .send(builder.content_block_start_at(text_idx, "text", None, None))
+        // First give both rolling parsers one final chance to consume complete
+        // compatibility markers already present in retained buffers.
+        self.process_reasoning_delta("", tracker, tx, builder, payload)
+            .await;
+        if self.intercepting_search {
+            return;
+        }
+        if !self.reasoning_stream_buffer.is_empty() {
+            let pending_reasoning = std::mem::take(&mut self.reasoning_stream_buffer);
+            if let Some(marker_pos) = find_compat_tool_intent_marker_in_context(
+                &pending_reasoning,
+                &self.reasoning_markdown_state,
+            ) {
+                let safe_prefix = &pending_reasoning[..marker_pos];
+                if !safe_prefix.is_empty() {
+                    self.emit_thinking_fragment(safe_prefix, tracker, tx, builder)
                         .await;
                 }
-                let _ = tx.send(builder.text_delta_at(text_idx, &cleaned)).await;
+                let marker = &pending_reasoning[marker_pos..];
+                if let Some(parsed) = parse_compat_tool_requests_at_eof(marker) {
+                    if !parsed.prefix.is_empty() {
+                        self.emit_thinking_fragment(&parsed.prefix, tracker, tx, builder)
+                            .await;
+                    }
+                    self.emit_compat_tool_calls(parsed.calls, tracker, tx, builder, payload)
+                        .await;
+                    if self.intercepting_search {
+                        return;
+                    }
+                } else {
+                    trace!(
+                        bytes = marker.len(),
+                        preview = ?marker.chars().take(1024).collect::<String>(),
+                        "Incomplete compatibility marker debug preview"
+                    );
+                    if self.has_emitted_tool_use {
+                        warn!("Malformed reasoning marker omitted after an emitted tool_use; upstream retry suppressed to prevent duplicate side effects");
+                    } else {
+                        warn!("Incomplete compatibility marker remained in reasoning at EOF; requesting retry");
+                        self.compat_retry_requested = true;
+                    }
+                }
+            } else {
+                self.emit_thinking_fragment(&pending_reasoning, tracker, tx, builder)
+                    .await;
             }
         }
 
-        // Flush/parse any remaining unclosed DSML block in dsml_stream_buffer
+        self.process_content_delta("", tracker, tx, builder, payload)
+            .await;
+        if self.intercepting_search {
+            return;
+        }
+
         if self.dsml_mode && !self.dsml_stream_buffer.is_empty() {
-            let calls = parse_dsml_tool_calls(&self.dsml_stream_buffer);
-            for call in calls {
-                self.has_emitted_tool_use = true;
-                let call_idx = tracker.next_index();
-                let tool_id = format!(
-                    "toolu_dsml_{}_{}",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis(),
-                    call_idx
-                );
+            let pending_dsml = std::mem::take(&mut self.dsml_stream_buffer);
+            self.dsml_mode = false;
+            self.process_complete_dsml_block(&pending_dsml, tracker, tx, builder, payload)
+                .await;
+            if self.intercepting_search {
+                return;
+            }
+            if self.compat_retry_requested {
+                return;
+            }
+        }
 
-                if let Some(idx) = tracker.close_thinking() {
-                    let _ = tx.send(crate::sse::emit_block_stop(idx)).await;
+        if !self.text_stream_buffer.is_empty() {
+            let pending_text = std::mem::take(&mut self.text_stream_buffer);
+            if let Some(marker_pos) =
+                find_compat_tool_intent_marker_in_context(&pending_text, &self.text_markdown_state)
+            {
+                let safe_prefix = &pending_text[..marker_pos];
+                if !safe_prefix.is_empty() {
+                    if looks_like_unverified_tool_success(safe_prefix) {
+                        warn!("Suppressing unverified success claim before EOF tool_use");
+                    } else {
+                        self.emit_text_fragment(safe_prefix, tracker, tx, builder)
+                            .await;
+                    }
                 }
-                if let Some(idx) = tracker.close_text() {
-                    let _ = tx.send(crate::sse::emit_block_stop(idx)).await;
+                let marker = &pending_text[marker_pos..];
+                if let Some(parsed) = parse_compat_tool_requests_at_eof(marker) {
+                    if !parsed.prefix.is_empty() {
+                        self.emit_text_fragment(&parsed.prefix, tracker, tx, builder)
+                            .await;
+                    }
+                    self.emit_compat_tool_calls(parsed.calls, tracker, tx, builder, payload)
+                        .await;
+                } else {
+                    trace!(
+                        bytes = marker.len(),
+                        preview = ?marker.chars().take(1024).collect::<String>(),
+                        "Incomplete compatibility marker debug preview"
+                    );
+                    if self.has_emitted_tool_use {
+                        warn!("Malformed text marker omitted after an emitted tool_use; upstream retry suppressed to prevent duplicate side effects");
+                    } else {
+                        warn!("Incomplete or malformed compatibility marker remained in text at EOF; requesting retry");
+                        self.compat_retry_requested = true;
+                    }
                 }
-
-                let _ = tx
-                    .send(builder.content_block_start_at(
-                        call_idx,
-                        "tool_use",
-                        Some(&tool_id),
-                        Some(&get_correct_tool_name(&call.name, payload)),
-                    ))
+            } else {
+                self.emit_text_fragment(&pending_text, tracker, tx, builder)
                     .await;
-
-                let args_str = serde_json::to_string(&call.arguments).unwrap_or_default();
-                let _ = tx.send(builder.input_json_delta(call_idx, &args_str)).await;
-
-                let _ = tx.send(crate::sse::emit_block_stop(call_idx)).await;
             }
         }
     }
 }
 
+#[cfg(test)]
 pub(super) fn split_pending_text(text: &str) -> (String, String) {
-    let tag = "<｜DSML｜tool_calls>";
-    for i in (1..=tag.len()).rev() {
-        if tag.is_char_boundary(i) {
-            let prefix = &tag[..i];
+    split_pending_text_for_prefixes(text, &[DSML_OPEN_TAG])
+}
+
+fn split_pending_text_for_markers(text: &str, payload: &MessagesRequest) -> (String, String) {
+    split_pending_text_with_compat_prefixes(text, &[DSML_OPEN_TAG], payload, true)
+}
+
+fn split_pending_text_with_compat_prefixes(
+    text: &str,
+    markers: &[&str],
+    payload: &MessagesRequest,
+    hold_unverified_success: bool,
+) -> (String, String) {
+    if hold_unverified_success
+        && payload
+            .tools
+            .as_ref()
+            .is_some_and(|tools| !tools.is_empty())
+        && looks_like_unverified_tool_success(text)
+    {
+        return (String::new(), text.to_string());
+    }
+    let (_, exact_pending) = split_pending_text_for_prefixes(text, markers);
+    let longest = exact_pending
+        .len()
+        .max(compat_tool_marker_pending_suffix_len(text, payload));
+    let split_idx = text.len().saturating_sub(longest);
+    (text[..split_idx].to_string(), text[split_idx..].to_string())
+}
+
+fn split_pending_text_for_prefixes(text: &str, markers: &[&str]) -> (String, String) {
+    let mut longest = 0;
+    for marker in markers {
+        for prefix_len in (1..=marker.len()).rev() {
+            if !marker.is_char_boundary(prefix_len) {
+                continue;
+            }
+            let prefix = &marker[..prefix_len];
             if text.ends_with(prefix) {
-                let split_idx = text.len() - prefix.len();
-                return (text[..split_idx].to_string(), prefix.to_string());
+                longest = longest.max(prefix.len());
+                break;
             }
         }
     }
-    (text.to_string(), String::new())
+
+    let split_idx = text.len().saturating_sub(longest);
+    (text[..split_idx].to_string(), text[split_idx..].to_string())
 }

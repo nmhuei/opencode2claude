@@ -1,10 +1,10 @@
 //! Deterministic configuration resolution.
 
 use super::{
-    BridgeConfig, CliOverrides, EgressMode, SecretString, TomlConfig, DEFAULT_BRIDGE_PORT,
-    DEFAULT_CHANNEL_CAPACITY, DEFAULT_HOST, DEFAULT_MAX_BODY_SIZE, DEFAULT_OPENCODE_PORT,
-    DEFAULT_PRIMARY_PROXIES, DEFAULT_SHELL_ALLOWLIST, DEFAULT_STREAM_BUFFER_SIZE,
-    DEFAULT_WARM_STANDBY_PROXIES,
+    BridgeConfig, CliOverrides, EgressMode, HistoryCaptureMode, SecretString, TomlConfig,
+    DEFAULT_BRIDGE_PORT, DEFAULT_CHANNEL_CAPACITY, DEFAULT_HOST, DEFAULT_MAX_BODY_SIZE,
+    DEFAULT_OPENCODE_PORT, DEFAULT_PRIMARY_PROXIES, DEFAULT_SHELL_ALLOWLIST,
+    DEFAULT_STREAM_BUFFER_SIZE, DEFAULT_WARM_STANDBY_PROXIES,
 };
 use crate::shell::ShellPolicy;
 use std::collections::HashSet;
@@ -166,6 +166,89 @@ pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
         .or_else(|| file.as_ref().and_then(|cfg| cfg.request_id_header.clone()))
         .unwrap_or_else(|| "x-request-id".to_string());
 
+    resolved.history.enabled = env_bool("BRIDGE_HISTORY_ENABLED")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.history_enabled))
+        .unwrap_or(false);
+    resolved.history.capture_mode = env_string("BRIDGE_HISTORY_CAPTURE_MODE")
+        .or_else(|| {
+            file.as_ref()
+                .and_then(|cfg| cfg.history_capture_mode.clone())
+        })
+        .as_deref()
+        .and_then(HistoryCaptureMode::parse)
+        .unwrap_or(HistoryCaptureMode::Redacted);
+    resolved.history.capture_inbound = env_bool("BRIDGE_HISTORY_CAPTURE_INBOUND")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.history_capture_inbound))
+        .unwrap_or(true);
+    resolved.history.capture_effective = env_bool("BRIDGE_HISTORY_CAPTURE_EFFECTIVE")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.history_capture_effective))
+        .unwrap_or(true);
+    resolved.history.capture_reasoning = env_bool("BRIDGE_HISTORY_CAPTURE_REASONING")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.history_capture_reasoning))
+        .unwrap_or(true);
+    resolved.history.capture_response = env_bool("BRIDGE_HISTORY_CAPTURE_RESPONSE")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.history_capture_response))
+        .unwrap_or(true);
+    resolved.history.capture_tools = env_bool("BRIDGE_HISTORY_CAPTURE_TOOLS")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.history_capture_tools))
+        .unwrap_or(true);
+    resolved.history.capture_search_queries = env_bool("BRIDGE_HISTORY_CAPTURE_SEARCH_QUERIES")
+        .or_else(|| {
+            file.as_ref()
+                .and_then(|cfg| cfg.history_capture_search_queries)
+        })
+        .unwrap_or(true);
+    resolved.history.capture_search_results = env_bool("BRIDGE_HISTORY_CAPTURE_SEARCH_RESULTS")
+        .or_else(|| {
+            file.as_ref()
+                .and_then(|cfg| cfg.history_capture_search_results)
+        })
+        .unwrap_or(false);
+    resolved.history.capture_shell_commands = env_bool("BRIDGE_HISTORY_CAPTURE_SHELL_COMMANDS")
+        .or_else(|| {
+            file.as_ref()
+                .and_then(|cfg| cfg.history_capture_shell_commands)
+        })
+        .unwrap_or(false);
+    resolved.history.retention_days = env_parse("BRIDGE_HISTORY_RETENTION_DAYS")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.history_retention_days))
+        .unwrap_or(30);
+    resolved.history.max_records = env_parse("BRIDGE_HISTORY_MAX_RECORDS")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.history_max_records))
+        .unwrap_or(10_000)
+        .max(1);
+    resolved.history.max_database_bytes = env_parse("BRIDGE_HISTORY_MAX_DATABASE_BYTES")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.history_max_database_bytes))
+        .unwrap_or(1024 * 1024 * 1024);
+    resolved.history.max_request_bytes = env_parse("BRIDGE_HISTORY_MAX_REQUEST_BYTES")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.history_max_request_bytes))
+        .unwrap_or(1024 * 1024);
+    resolved.history.max_reasoning_bytes = env_parse("BRIDGE_HISTORY_MAX_REASONING_BYTES")
+        .or_else(|| {
+            file.as_ref()
+                .and_then(|cfg| cfg.history_max_reasoning_bytes)
+        })
+        .unwrap_or(2 * 1024 * 1024);
+    resolved.history.max_response_bytes = env_parse("BRIDGE_HISTORY_MAX_RESPONSE_BYTES")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.history_max_response_bytes))
+        .unwrap_or(2 * 1024 * 1024);
+    resolved.history.max_tool_payload_bytes = env_parse("BRIDGE_HISTORY_MAX_TOOL_PAYLOAD_BYTES")
+        .or_else(|| {
+            file.as_ref()
+                .and_then(|cfg| cfg.history_max_tool_payload_bytes)
+        })
+        .unwrap_or(256 * 1024);
+    resolved.history.max_record_bytes = env_parse("BRIDGE_HISTORY_MAX_RECORD_BYTES")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.history_max_record_bytes))
+        .unwrap_or(6 * 1024 * 1024);
+    resolved.history.queue_capacity = env_parse("BRIDGE_HISTORY_QUEUE_CAPACITY")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.history_queue_capacity))
+        .unwrap_or(512)
+        .max(1);
+    resolved.history.path = env_string("BRIDGE_HISTORY_PATH")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.history_path.clone()))
+        .map(PathBuf::from);
+
     resolved.protocol.min_reasoning_stream_tokens =
         env_parse::<u32>("BRIDGE_MIN_REASONING_STREAM_TOKENS")
             .or_else(|| {
@@ -210,6 +293,9 @@ pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
     resolved.search.duckduckgo_url = env_string("DUCKDUCKGO_SEARCH_URL")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.duckduckgo_url.clone()))
         .unwrap_or_else(|| "https://html.duckduckgo.com/html/".to_string());
+    resolved.search.yahoo_url = env_string("YAHOO_SEARCH_URL")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.yahoo_url.clone()))
+        .unwrap_or_else(|| "https://search.yahoo.com/search".to_string());
 
     resolved.retry.upstream_base_url = env_string("OPENCODE_UPSTREAM_BASE_URL")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.upstream_base_url.clone()))
@@ -240,7 +326,9 @@ pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
             .unwrap_or(16_000),
     );
 
-    resolved.egress.mode = env_string("BRIDGE_EGRESS_MODE")
+    resolved.egress.mode = overrides
+        .egress_mode
+        .or_else(|| env_string("BRIDGE_EGRESS_MODE"))
         .or_else(|| file.as_ref().and_then(|cfg| cfg.egress_mode.clone()))
         .as_deref()
         .and_then(EgressMode::parse)
@@ -250,7 +338,7 @@ pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
         .unwrap_or(3);
     resolved.egress.require_verified_exit_ip = env_bool("BRIDGE_REQUIRE_VERIFIED_EXIT_IP")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.require_verified_exit_ip))
-        .unwrap_or(false);
+        .unwrap_or(true);
     resolved.egress.minimum_unique_exit_ips = env_parse("BRIDGE_MINIMUM_UNIQUE_EXIT_IPS")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.minimum_unique_exit_ips))
         .unwrap_or(1);
@@ -392,6 +480,6 @@ fn parse_csv(value: &str) -> Vec<String> {
         .split(',')
         .map(str::trim)
         .filter(|item| !item.is_empty())
-        .map(ToOwned::to_owned)
+        .map(super::normalize_proxy_url)
         .collect()
 }

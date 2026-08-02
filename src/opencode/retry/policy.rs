@@ -1,7 +1,6 @@
 //! Retry and model-fallback policy.
 
 use crate::config::RetryConfig;
-use crate::opencode::types::OpenAiRequest;
 use std::collections::HashSet;
 use std::time::{Duration, SystemTime};
 
@@ -37,7 +36,11 @@ pub(super) fn is_reasoning_heavy_model(model: &str) -> bool {
         || name.contains("-r1")
 }
 
-pub(super) fn build_model_retry_list(request: &OpenAiRequest, retry: &RetryConfig) -> Vec<String> {
+pub(super) fn build_model_retry_list(
+    model: &str,
+    stream: bool,
+    retry: &RetryConfig,
+) -> Vec<String> {
     let configured = retry
         .model_fallbacks
         .iter()
@@ -45,18 +48,16 @@ pub(super) fn build_model_retry_list(request: &OpenAiRequest, retry: &RetryConfi
         .filter(|model| !model.is_empty())
         .collect::<Vec<_>>();
 
-    let mut models = vec![request.model.clone()];
+    let mut models = vec![model.to_string()];
     if configured.is_empty() {
         if retry.default_fallbacks_enabled
-            && !(request.stream && is_reasoning_heavy_model(&request.model))
+            && !(stream && is_reasoning_heavy_model(model))
+            && (model.contains("deepseek-v4-flash-free") || model.contains("nemotron-3-ultra-free"))
         {
-            let model = request.model.as_str();
-            if model.contains("deepseek-v4-flash-free") || model.contains("nemotron-3-ultra-free") {
-                models.extend([
-                    "deepseek-v4-flash-free".to_string(),
-                    "nemotron-3-ultra-free".to_string(),
-                ]);
-            }
+            models.extend([
+                "deepseek-v4-flash-free".to_string(),
+                "nemotron-3-ultra-free".to_string(),
+            ]);
         }
     } else {
         models.extend(configured);

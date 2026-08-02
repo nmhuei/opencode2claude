@@ -5,7 +5,6 @@ use super::routes::build_router;
 use crate::config::{self, BridgeConfig};
 use crate::dashboard;
 use crate::state::AppState;
-use crate::tui;
 use crate::workers::WorkerShutdownError;
 use std::future::IntoFuture;
 use std::net::SocketAddr;
@@ -51,6 +50,7 @@ pub async fn run_server(args: ServeArgsBridge) -> Result<(), ServerError> {
         serper_api_key: args.serper_api_key,
         searxng_url: args.searxng_url,
         searxng_api_key: args.searxng_api_key,
+        egress_mode: args.egress_mode,
     };
     let config = BridgeConfig::from_env_and_cli(overrides);
     config
@@ -108,50 +108,24 @@ pub async fn run_server(args: ServeArgsBridge) -> Result<(), ServerError> {
 }
 
 fn log_startup(config: &BridgeConfig, address: SocketAddr) {
-    info!("╔══════════════════════════════════════════════╗");
     info!(
-        "║     OpenCode2API Bridge v{}             ║",
+        "◆ OpenCode2API v{} · gateway ready",
         env!("CARGO_PKG_VERSION")
     );
-    info!("╠══════════════════════════════════════════════╣");
+    info!("  Endpoint   http://{address}");
+    info!("  Dashboard  http://{address}/dashboard");
+    info!("  Model      {}", config.model.as_deref().unwrap_or("auto"));
+    info!("  Shell      {}", config.shell_policy.description());
     info!(
-        "{}",
-        tui::box_line("║  Bridge:  http://", &address.to_string(), 48)
+        "  Auth       {}",
+        if config.auth_enabled() {
+            "enabled"
+        } else {
+            "disabled"
+        }
     );
-    info!(
-        "║  Daemon:  port {}                          ║",
-        config.opencode_port
-    );
-    info!(
-        "{}",
-        tui::box_line(
-            "║  Model:   ",
-            config.model.as_deref().unwrap_or("(auto)"),
-            48
-        )
-    );
-    info!(
-        "{}",
-        tui::box_line("║  Shell:   ", &config.shell_policy.description(), 48)
-    );
-    info!(
-        "{}",
-        tui::box_line("║  Dashboard: ", &format!("http://{address}/dashboard"), 48)
-    );
-    info!(
-        "{}",
-        tui::box_line(
-            "║  Auth:    ",
-            if config.auth_enabled() {
-                "enabled"
-            } else {
-                "disabled"
-            },
-            48
-        )
-    );
-    info!("╚══════════════════════════════════════════════╝");
-    info!("To use: export ANTHROPIC_BASE_URL=\"http://{address}/v1\"");
+    info!("  Upstream   port {}", config.opencode_port);
+    info!(r#"  Claude Code: export ANTHROPIC_BASE_URL="http://{address}""#);
 }
 
 async fn shutdown_signal() {

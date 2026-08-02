@@ -1,6 +1,6 @@
 //! Upstream forwarding split by execution mode.
 
-mod common;
+pub(crate) mod common;
 mod stream;
 mod sync;
 

@@ -20,12 +20,22 @@ pub fn extract_system_prompt(system_val: &serde_json::Value) -> String {
     String::new()
 }
 
+/// Tools governed by the external-web permission policy.
 pub fn is_web_search_tool(name: &str) -> bool {
-    let name_lower = name.to_lowercase();
-    name_lower == "websearch"
-        || name_lower == "web_search"
-        || name_lower == "webfetch"
-        || name_lower == "web_fetch"
+    is_bridge_search_tool(name)
+        || matches!(name.to_ascii_lowercase().as_str(), "webfetch" | "web_fetch")
+}
+
+/// Search tools executed inside the bridge rather than by Claude Code.
+///
+/// `WebFetch` is deliberately excluded: it is a Claude Code client tool and
+/// must be forwarded as a normal `tool_use` block so the client can fetch the
+/// exact requested URL instead of receiving search-engine results.
+pub fn is_bridge_search_tool(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "websearch" | "web_search"
+    )
 }
 
 /// Extract the search query from tool call arguments.
@@ -33,22 +43,44 @@ pub fn is_web_search_tool(name: &str) -> bool {
 /// Parses the JSON tool arguments and looks for common query fields:
 /// "query" or "q", falling back to the first string field found.
 pub fn extract_search_query(tool_args: &str) -> String {
-    let input_val: serde_json::Value = serde_json::from_str(tool_args)
-        .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-    if let Some(obj) = input_val.as_object() {
-        if let Some(q_val) = obj.get("query").and_then(|v| v.as_str()) {
-            return q_val.to_string();
-        }
-        if let Some(q_val) = obj.get("q").and_then(|v| v.as_str()) {
-            return q_val.to_string();
-        }
-        for (_, v) in obj {
-            if let Some(s) = v.as_str() {
-                return s.to_string();
-            }
-        }
+    let raw = tool_args.trim();
+    if raw.is_empty() {
+        return String::new();
     }
-    String::new()
+    match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(value) => extract_query_value(&value).unwrap_or_default(),
+        Err(_) => String::new(),
+    }
+}
+
+fn extract_query_value(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(text) => non_empty(text),
+        serde_json::Value::Array(items) => items.iter().find_map(extract_query_value),
+        serde_json::Value::Object(object) => {
+            const PRIORITY_KEYS: &[&str] = &[
+                "query",
+                "q",
+                "search_query",
+                "searchQuery",
+                "text",
+                "prompt",
+                "url",
+            ];
+            for key in PRIORITY_KEYS {
+                if let Some(found) = object.get(*key).and_then(extract_query_value) {
+                    return Some(found);
+                }
+            }
+            object.values().find_map(extract_query_value)
+        }
+        _ => None,
+    }
+}
+
+fn non_empty(value: &str) -> Option<String> {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!normalized.is_empty()).then_some(normalized)
 }
 
 pub fn map_model_name(model: &str) -> String {

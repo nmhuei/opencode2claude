@@ -75,3 +75,11 @@ Native or DSML web-search calls can be intercepted. Results are fetched through 
 ## Conformance evidence
 
 `tests/protocol_conformance.rs` covers sync and SSE behavior through the production router and a controlled upstream server, including cancellation and overflow. `tests/parser_fuzz_smoke.rs` exercises malformed JSON, DSML, search, and config parser inputs.
+
+# OpenAI compatibility
+
+`POST /v1/chat/completions` accepts an OpenAI Chat Completions request and returns the upstream OpenAI JSON or SSE body without converting it through the Anthropic protocol. The configured bridge model overrides the client model when present, and the route shares bridge authentication, rate limiting, retry, model fallback, direct/proxy egress, and request-size limits.
+
+Verified request features include ordinary messages, streaming, function tools, `tool_choice`, tool-result history, response-format fields, and additional OpenAI-compatible fields preserved through a flattened request map. For DeepSeek V4, the bridge explicitly disables thinking unless reasoning was requested; reasoning mode removes sampling and forced-tool controls that conflict with the provider.
+
+When bridge auth is enabled, clients use `Authorization: Bearer <key>`. Authentication and validation failures use the OpenAI error object shape.

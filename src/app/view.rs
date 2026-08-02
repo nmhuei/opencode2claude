@@ -1,17 +1,16 @@
-//! CLI presentation helpers.
+//! Shared presentation helpers for the line-oriented CLI.
 //!
-//! Rendering is isolated from command orchestration so operational logic can be
-//! tested without parsing terminal output.
+//! Human output is intentionally simple: a two-line brand header, whitespace,
+//! borderless facts/tables, semantic status colors, and actionable hints.
 
 use crate::config::{self, BridgeConfig};
 use crate::docker;
 use crate::output::OutputFormat;
+use crate::presentation;
 use crate::proxy_pool;
 use crate::runtime::RuntimePaths;
 use crate::supervisor::SupervisorStatus;
-use comfy_table::{
-    modifiers, presets, Cell as CtCell, Color as CtColor, ContentArrangement, Table,
-};
+use comfy_table::{presets, Cell as CtCell, Color as CtColor, ContentArrangement, Table};
 use yansi::Paint;
 
 fn uptime_str(started_at: u64) -> String {
@@ -19,98 +18,165 @@ fn uptime_str(started_at: u64) -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
-    let elapsed_secs = (now.saturating_sub(started_at)) / 1000;
+    let elapsed_secs = now.saturating_sub(started_at) / 1000;
     let hours = elapsed_secs / 3600;
     let mins = (elapsed_secs % 3600) / 60;
     if hours > 0 {
-        format!("{}h {}m", hours, mins)
+        format!("{hours}h {mins}m")
     } else {
-        format!("{}m", mins)
+        format!("{mins}m")
     }
 }
 
+/// Print the product mark and one concise descriptor line.
 pub(super) fn print_brand_header(title: &str, subtitle: &str) {
     println!();
     println!(
-        "{}",
-        "╭────────────────────────────────────────────────────────────╮"
-            .cyan()
-            .bold()
+        "{} {}",
+        presentation::BRAND_SYMBOL.cyan().bold(),
+        "OpenCode2API".bold()
     );
-    println!(
-        "{} {} {} {}",
-        "│".cyan().bold(),
-        title.bold(),
-        subtitle.dim(),
-        "│".cyan().bold()
-    );
-    println!(
-        "{}",
-        "╰────────────────────────────────────────────────────────────╯"
-            .cyan()
-            .bold()
-    );
+
+    let descriptor = match (title.trim(), subtitle.trim()) {
+        ("", "") => String::new(),
+        (title, "") => title.to_string(),
+        ("", subtitle) => subtitle.to_string(),
+        (title, subtitle) => format!("{title} · {subtitle}"),
+    };
+    if !descriptor.is_empty() {
+        println!(
+            "{}{}",
+            " ".repeat(presentation::INDENT),
+            presentation::truncate(&descriptor, presentation::content_width()).dim()
+        );
+    }
+    println!();
 }
 
 pub(super) fn print_section(title: &str) {
     println!();
-    println!("{} {}", "◆".cyan().bold(), title.bold());
+    println!(
+        "{}{}",
+        " ".repeat(presentation::INDENT),
+        presentation::truncate(title, presentation::content_width()).bold()
+    );
 }
 
 pub(super) fn print_tip(message: &str) {
-    println!("{} {}", "➜".cyan().bold(), message.dim());
+    let width = presentation::content_width()
+        .saturating_sub(presentation::INDENT + 2)
+        .max(20);
+    for (index, line) in presentation::wrap(message, width).into_iter().enumerate() {
+        let prefix = if index == 0 { "›" } else { " " };
+        println!(
+            "{}{} {}",
+            " ".repeat(presentation::INDENT),
+            prefix.dim(),
+            line.dim()
+        );
+    }
 }
 
-fn status_cell(label: &str, color: CtColor) -> CtCell {
-    CtCell::new(label).fg(color)
+pub(super) fn print_success(message: &str) {
+    print_status_message("✓", message, |value| value.green().bold().to_string());
 }
 
-pub(super) fn key_value_table(headers: (&str, &str), rows: Vec<(&str, String)>) -> Table {
+pub(super) fn print_warning(message: &str) {
+    print_status_message("▲", message, |value| value.yellow().bold().to_string());
+}
+
+fn print_status_message<F>(symbol: &str, message: &str, style_symbol: F)
+where
+    F: Fn(&str) -> String,
+{
+    let width = presentation::content_width()
+        .saturating_sub(presentation::INDENT + 2)
+        .max(20);
+    for (index, line) in presentation::wrap(message, width).into_iter().enumerate() {
+        if index == 0 {
+            println!(
+                "{}{} {}",
+                " ".repeat(presentation::INDENT),
+                style_symbol(symbol),
+                line
+            );
+        } else {
+            println!("{}{}", " ".repeat(presentation::INDENT * 2), line);
+        }
+    }
+}
+
+pub(super) fn print_error(title: &str, cause: &str, suggestions: &[&str]) {
+    eprintln!();
+    eprintln!(
+        "{}{} {}",
+        " ".repeat(presentation::INDENT),
+        "×".red().bold(),
+        title.bold()
+    );
+    for line in presentation::wrap(
+        cause,
+        presentation::content_width().saturating_sub(presentation::INDENT * 2),
+    ) {
+        eprintln!("{}{}", " ".repeat(presentation::INDENT * 2), line.dim());
+    }
+    if !suggestions.is_empty() {
+        eprintln!();
+        eprintln!("{}Try:", " ".repeat(presentation::INDENT * 2));
+        for suggestion in suggestions {
+            eprintln!(
+                "{}{}",
+                " ".repeat(presentation::INDENT * 3),
+                suggestion.cyan()
+            );
+        }
+    }
+    eprintln!();
+}
+
+/// Borderless key/value table retained for command views that need a `Table`.
+pub(super) fn print_table(table: &Table) {
+    for line in table.to_string().lines() {
+        let line = line.trim();
+        if !line.is_empty() {
+            println!("{}{}", " ".repeat(presentation::INDENT), line);
+        }
+    }
+}
+
+pub(super) fn key_value_table(_headers: (&str, &str), rows: Vec<(&str, String)>) -> Table {
     let mut table = Table::new();
     table
-        .load_preset(presets::UTF8_FULL_CONDENSED)
-        .apply_modifier(modifiers::UTF8_ROUND_CORNERS)
+        .load_preset(presets::NOTHING)
         .set_content_arrangement(ContentArrangement::Dynamic)
-        .set_header(vec![
-            CtCell::new(headers.0).fg(CtColor::Cyan),
-            CtCell::new(headers.1).fg(CtColor::Cyan),
-        ]);
+        .set_width(presentation::content_width() as u16);
+
     for (key, value) in rows {
-        table.add_row(vec![CtCell::new(key).fg(CtColor::Blue), CtCell::new(value)]);
+        table.add_row(vec![
+            CtCell::new(key).fg(CtColor::DarkGrey),
+            CtCell::new(value),
+        ]);
     }
     table
 }
 
 pub(super) fn masked_configured_label(value: &str) -> String {
     if value.trim().is_empty() {
-        "not configured".yellow().bold().to_string()
+        "not configured".yellow().to_string()
     } else {
-        "configured".green().bold().to_string()
+        "configured".green().to_string()
     }
+}
+
+pub(super) fn claude_code_base_url(config: &BridgeConfig) -> String {
+    crate::application::integration::base_url(config)
 }
 
 pub(super) fn shell_export_lines(config: &BridgeConfig) -> Vec<String> {
-    let mut lines = vec![
-        "export ANTHROPIC_API_KEY=\"opencode-bridge\"".to_string(),
-        format!(
-            "export ANTHROPIC_BASE_URL=\"http://127.0.0.1:{}/v1\"",
-            config.bridge_port
-        ),
-    ];
-    if let Some(model) = config
-        .model
-        .as_deref()
-        .filter(|model| !model.trim().is_empty())
-    {
-        lines.push(format!(
-            "export OPENCODE_MODEL=\"{}\"",
-            model.replace('"', "\\\"")
-        ));
-    }
-    lines
+    crate::application::integration::environment(config).shell_exports
 }
 
-/// Print proxy pool status table (used by `server status` and `proxy ps`).
+/// Render the proxy pool using a borderless table.
 pub(super) async fn print_proxy_table() -> Table {
     let primary_ports = proxy_pool::get_primary_ports();
     let ws_ports = proxy_pool::get_warm_standby_ports();
@@ -123,50 +189,55 @@ pub(super) async fn print_proxy_table() -> Table {
 
     let mut table = Table::new();
     table
-        .load_preset(presets::UTF8_FULL_CONDENSED)
-        .apply_modifier(modifiers::UTF8_ROUND_CORNERS)
+        .load_preset(presets::NOTHING)
         .set_content_arrangement(ContentArrangement::Dynamic)
-        .set_header(vec![
-            CtCell::new("Node").fg(CtColor::Cyan),
-            CtCell::new("Role").fg(CtColor::Cyan),
-            CtCell::new("Status").fg(CtColor::Cyan),
-            CtCell::new("Port").fg(CtColor::Cyan),
+        .set_width(presentation::content_width() as u16);
+
+    if presentation::compact() {
+        table.set_header(vec![
+            CtCell::new("PORT").fg(CtColor::DarkGrey),
+            CtCell::new("ROLE").fg(CtColor::DarkGrey),
+            CtCell::new("STATE").fg(CtColor::DarkGrey),
         ]);
+    } else {
+        table.set_header(vec![
+            CtCell::new("PORT").fg(CtColor::DarkGrey),
+            CtCell::new("ROLE").fg(CtColor::DarkGrey),
+            CtCell::new("STATE").fg(CtColor::DarkGrey),
+            CtCell::new("CONTAINER").fg(CtColor::DarkGrey),
+        ]);
+    }
 
     for (port, name, running) in &containers {
-        let short_name = name.strip_prefix("opencode-warp-").unwrap_or(name);
         let role = if primary_ports.contains(port) {
-            "Primary"
+            "primary"
         } else {
-            "Standby"
+            "standby"
         };
-        let (status_str, status_color) = if *running {
-            ("● Alive", CtColor::Green)
+        let status = if *running {
+            CtCell::new("● healthy").fg(CtColor::Green)
         } else {
-            ("● Dead", CtColor::Red)
+            CtCell::new("○ offline").fg(CtColor::DarkGrey)
         };
 
-        table.add_row(vec![
-            CtCell::new(short_name).fg(CtColor::Blue),
-            CtCell::new(role),
-            status_cell(status_str, status_color),
-            CtCell::new(port.to_string()).fg(CtColor::Magenta),
-        ]);
+        let mut row = vec![CtCell::new(port.to_string()), CtCell::new(role), status];
+        if !presentation::compact() {
+            row.push(CtCell::new(name));
+        }
+        table.add_row(row);
     }
 
     table
 }
 
-/// Print proxy pool table in Human mode; no-op in Json/Quiet.
 pub(super) async fn maybe_print_proxy_table(fmt: OutputFormat) {
     if fmt == OutputFormat::Human {
-        print_section("Proxy pool");
-        let proxy_table = print_proxy_table().await;
-        println!("{}", proxy_table);
+        print_section("Proxies");
+        let table = print_proxy_table().await;
+        print_table(&table);
     }
 }
 
-/// Bridge status dashboard with uptime and proxy pool table.
 pub(super) async fn cmd_print_status(
     status: SupervisorStatus,
     fmt: OutputFormat,
@@ -187,86 +258,120 @@ pub(super) async fn cmd_print_status(
             started_at,
             managed,
         } => {
-            let uptime = uptime_str(started_at);
-            let model = config.model.clone().unwrap_or_else(|| "auto".into());
-            let bridge_auth = if config.auth_enabled() {
-                "enabled".green().bold().to_string()
-            } else {
-                "disabled".yellow().bold().to_string()
-            };
-            let dashboard_auth = if config.management.dashboard_token().is_some() {
-                "configured".green().bold().to_string()
-            } else {
-                "not configured".yellow().bold().to_string()
-            };
-            let managed_label = if managed {
-                "supervisor-managed".green().bold().to_string()
-            } else {
-                "unmanaged / recovered by health probe"
-                    .yellow()
-                    .bold()
-                    .to_string()
-            };
-
-            print_brand_header("OpenCode2API Bridge", "local Anthropic-compatible gateway");
-            println!("{} {}", "●".green().bold(), "ONLINE".green().bold());
-            let table = key_value_table(
-                ("Runtime", "Value"),
-                vec![
-                    ("Endpoint", format!("http://127.0.0.1:{}/v1", port)),
-                    ("Dashboard", format!("http://127.0.0.1:{}/dashboard/", port)),
-                    (
-                        "PID",
-                        pid.map(|p| p.to_string())
-                            .unwrap_or_else(|| "unmanaged".to_string()),
-                    ),
-                    ("Supervisor", managed_label),
-                    ("Uptime", uptime),
-                    ("Model", model),
-                    ("Bridge auth", bridge_auth),
-                    ("Dashboard auth", dashboard_auth),
-                ],
+            print_brand_header("Gateway status", "Anthropic and OpenAI-compatible bridge");
+            println!(
+                "{}{} {}",
+                " ".repeat(presentation::INDENT),
+                "●".green().bold(),
+                "Running".green().bold()
             );
-            println!("{}", table);
+            println!();
+
+            let model = config.model.clone().unwrap_or_else(|| "auto".into());
+            let facts = vec![
+                ("Endpoint", format!("http://127.0.0.1:{port}")),
+                ("Dashboard", format!("http://127.0.0.1:{port}/dashboard")),
+                ("Model", model),
+                (
+                    "Process",
+                    pid.map(|value| value.to_string())
+                        .unwrap_or_else(|| "unmanaged".to_string()),
+                ),
+                ("Uptime", uptime_str(started_at)),
+                (
+                    "Supervisor",
+                    if managed {
+                        "managed".green().to_string()
+                    } else {
+                        "unmanaged".yellow().to_string()
+                    },
+                ),
+            ];
+            println!("{}", presentation::facts(&facts));
+
+            print_section("Authentication");
+            println!(
+                "{}",
+                presentation::facts(&[
+                    (
+                        "Bridge API",
+                        if config.auth_enabled() {
+                            "enabled".green().to_string()
+                        } else {
+                            "disabled".yellow().to_string()
+                        },
+                    ),
+                    (
+                        "Dashboard",
+                        if config.management.dashboard_token().is_some() {
+                            "configured".green().to_string()
+                        } else {
+                            "not configured".yellow().to_string()
+                        },
+                    ),
+                ])
+            );
+
             maybe_print_proxy_table(fmt).await;
-            print_tip("Use `eval \"$(opencode2api --quiet env)\"` to configure Claude Code.");
+            println!();
+            print_tip("Run `opencode2api env` for Claude Code setup instructions.");
         }
         SupervisorStatus::Stopped => {
-            print_brand_header("OpenCode2API Bridge", "daemon status");
-            println!("{} {}", "●".red().bold(), "STOPPED".red().bold());
-            let table = key_value_table(
-                ("Check", "Value"),
-                vec![
-                    ("Bridge", "not running".red().bold().to_string()),
-                    ("Next step", "opencode2api server start".to_string()),
-                    ("Dashboard", "opencode2api dashboard start".to_string()),
-                ],
+            print_brand_header("Gateway status", "Anthropic and OpenAI-compatible bridge");
+            println!(
+                "{}{} {}",
+                " ".repeat(presentation::INDENT),
+                "○".dim(),
+                "Stopped".bold()
             );
-            println!("{}", table);
+            println!();
+            println!(
+                "{}",
+                presentation::facts(&[
+                    ("Gateway", "not running".to_string()),
+                    ("Start", "opencode2api server start".cyan().to_string()),
+                ])
+            );
         }
     }
     println!();
 }
-#[derive(serde::Serialize)]
+
+#[derive(Debug, serde::Serialize)]
 pub(super) struct ServerStatusInfo {
     status: String,
+    endpoint: Option<String>,
+    dashboard_url: Option<String>,
     pid: Option<u32>,
     uptime: Option<String>,
+    model: Option<String>,
+    managed: Option<bool>,
+    auth_enabled: bool,
+    dashboard_auth_configured: bool,
     message: Option<String>,
 }
 
-impl From<Result<SupervisorStatus, String>> for ServerStatusInfo {
-    fn from(result: Result<SupervisorStatus, String>) -> Self {
+impl ServerStatusInfo {
+    pub(super) fn from_status(
+        result: Result<SupervisorStatus, String>,
+        config: &BridgeConfig,
+    ) -> Self {
         match result {
             Ok(SupervisorStatus::Running {
                 pid,
+                port,
                 started_at,
                 managed,
-                ..
             }) => Self {
                 status: "running".to_string(),
+                endpoint: Some(format!("http://127.0.0.1:{port}")),
+                dashboard_url: Some(format!("http://127.0.0.1:{port}/dashboard")),
                 pid,
                 uptime: Some(uptime_str(started_at)),
+                model: config.model.clone(),
+                managed: Some(managed),
+                auth_enabled: config.auth_enabled(),
+                dashboard_auth_configured: config.management.dashboard_token().is_some(),
                 message: if managed {
                     None
                 } else {
@@ -275,169 +380,217 @@ impl From<Result<SupervisorStatus, String>> for ServerStatusInfo {
             },
             Ok(SupervisorStatus::Stopped) => Self {
                 status: "stopped".to_string(),
+                endpoint: None,
+                dashboard_url: None,
                 pid: None,
                 uptime: None,
+                model: config.model.clone(),
+                managed: None,
+                auth_enabled: config.auth_enabled(),
+                dashboard_auth_configured: config.management.dashboard_token().is_some(),
                 message: None,
             },
-            Err(e) => Self {
+            Err(error) => Self {
                 status: "error".to_string(),
+                endpoint: None,
+                dashboard_url: None,
                 pid: None,
                 uptime: None,
-                message: Some(e),
+                model: config.model.clone(),
+                managed: None,
+                auth_enabled: config.auth_enabled(),
+                dashboard_auth_configured: config.management.dashboard_token().is_some(),
+                message: Some(error),
             },
         }
     }
 }
 
 pub(super) fn cmd_print_env(config: &BridgeConfig) {
-    let port = config.bridge_port;
-    let model = config.model.clone().unwrap_or_else(|| "auto".to_string());
-
     print_brand_header(
-        "Claude Code Environment",
-        "copy these values into your shell session",
+        "Claude Code environment",
+        "Connection values and shell setup",
     );
-    let table = key_value_table(
-        ("Variable", "Value"),
-        vec![
+
+    let model = config.model.clone().unwrap_or_else(|| "auto".to_string());
+    let api_key_status = if config.auth_enabled() {
+        "configured; hidden in human output"
+    } else {
+        "compatibility key; authentication disabled"
+    };
+    let base_url = claude_code_base_url(config);
+    println!(
+        "{}",
+        presentation::facts(&[
+            ("ANTHROPIC_API_KEY", api_key_status.to_string()),
+            ("ANTHROPIC_BASE_URL", base_url.clone().cyan().to_string()),
+            ("OPENAI_API_KEY", api_key_status.to_string()),
             (
-                "ANTHROPIC_API_KEY",
-                "opencode-bridge".green().dim().to_string(),
+                "OPENAI_BASE_URL",
+                format!("{base_url}/v1").cyan().to_string()
             ),
-            (
-                "ANTHROPIC_BASE_URL",
-                format!("http://127.0.0.1:{}/v1", port)
-                    .cyan()
-                    .bold()
-                    .to_string(),
-            ),
-            ("OPENCODE_MODEL", model.yellow().bold().to_string()),
-        ],
+            ("OPENCODE_MODEL", model),
+        ])
     );
-    println!("{}", table);
+
     print_section("Shell setup");
-    println!("{}", "eval \"$(opencode2api --quiet env)\"".green().bold());
-    print_tip("Human mode is for reading; --quiet prints eval-safe export lines.");
+    println!(
+        "{}{}",
+        " ".repeat(presentation::INDENT),
+        "eval \"$(opencode2api --quiet env)\"".cyan()
+    );
+    println!();
+    print_tip("Human mode hides credentials. Quiet mode prints eval-safe exports.");
     println!();
 }
 
 pub(super) fn cmd_print_config() {
     let config = BridgeConfig::from_env_and_cli(config::CliOverrides::default());
-    let model = config
-        .model
-        .clone()
-        .unwrap_or_else(|| "auto (claude-3-5-sonnet)".to_string());
-    let auth = if config.auth_enabled() {
-        "enabled".green().bold().to_string()
-    } else {
-        "disabled".yellow().bold().to_string()
-    };
-
-    print_brand_header("Server Configuration", "effective runtime settings");
-    let table = key_value_table(
-        ("Setting", "Value"),
-        vec![
+    print_brand_header("Server configuration", "Effective runtime settings");
+    println!(
+        "{}",
+        presentation::facts(&[
+            ("Bridge host", config.host.to_string()),
+            ("Bridge port", config.bridge_port.to_string()),
             (
-                "Bridge host",
-                config.host.to_string().cyan().bold().to_string(),
+                "API auth",
+                if config.auth_enabled() {
+                    "enabled".green().to_string()
+                } else {
+                    "disabled".yellow().to_string()
+                },
             ),
-            (
-                "Bridge port",
-                config.bridge_port.to_string().cyan().bold().to_string(),
-            ),
-            ("API auth", auth),
             (
                 "Shell policy",
-                config.shell_policy.description().cyan().bold().to_string(),
+                config.shell_policy.description().to_string()
             ),
-            ("Model", model.yellow().bold().to_string()),
-            (
-                "Max body size",
-                format!("{} bytes", config.max_body_size)
-                    .cyan()
-                    .bold()
-                    .to_string(),
-            ),
-            (
-                "Search loops",
-                config
-                    .max_search_loops
-                    .to_string()
-                    .cyan()
-                    .bold()
-                    .to_string(),
-            ),
-        ],
+            ("Model", config.model.unwrap_or_else(|| "auto".to_string()),),
+            ("Max body size", format!("{} bytes", config.max_body_size)),
+            ("Search loops", config.max_search_loops.to_string()),
+        ])
     );
-    println!("{}", table);
-    print_tip("Use `opencode2api init --force` to regenerate a config template.");
+    println!();
+    print_tip("Regenerate a template with `opencode2api init --force`.");
     println!();
 }
 
 pub(super) fn show_logs(fmt: OutputFormat) {
-    let paths = RuntimePaths::new();
-    let log_path = paths.bridge_log();
-
+    let log_path = RuntimePaths::new().bridge_log();
     if !log_path.exists() {
-        eprintln!(
-            "{} No log file found. Start the daemon first: `oc2api server start`",
-            "✗".red().bold()
+        print_error(
+            "No bridge log file found",
+            "The daemon has not created its log file yet.",
+            &["opencode2api server start", "opencode2api server status"],
         );
         std::process::exit(1);
     }
 
     match std::fs::read_to_string(&log_path) {
         Ok(content) => {
-            let lines: Vec<&str> = content.lines().collect();
-            let tail = if lines.len() > 100 {
-                &lines[lines.len() - 100..]
-            } else {
-                &lines
-            };
+            let clean_lines: Vec<String> = content.lines().map(crate::tui::strip_ansi).collect();
+            let start = clean_lines.len().saturating_sub(100);
+            let tail = &clean_lines[start..];
 
             if fmt == OutputFormat::Json {
                 #[derive(serde::Serialize)]
-                struct LogEntry {
-                    line: String,
+                struct LogEntry<'a> {
+                    line: &'a str,
                     line_number: usize,
                 }
-                let entries: Vec<LogEntry> = tail
+                let entries: Vec<LogEntry<'_>> = tail
                     .iter()
                     .enumerate()
-                    .map(|(i, l)| LogEntry {
-                        line: l.to_string(),
-                        line_number: i + 1,
+                    .map(|(index, line)| LogEntry {
+                        line,
+                        line_number: start + index + 1,
                     })
                     .collect();
-                if let Ok(s) = serde_json::to_string_pretty(&entries) {
-                    println!("{s}");
+                match serde_json::to_string_pretty(&entries) {
+                    Ok(json) => println!("{json}"),
+                    Err(error) => print_error("Could not serialize logs", &error.to_string(), &[]),
                 }
                 return;
             }
 
             if fmt == OutputFormat::Human {
-                print_brand_header("Bridge Logs", "last 100 daemon lines");
-                println!("{} {}", "File".cyan().bold(), log_path.display());
+                print_brand_header("Bridge logs", "Last 100 daemon lines");
+                println!(
+                    "{}",
+                    presentation::facts(&[("File", log_path.display().to_string())])
+                );
                 println!();
             }
 
             for line in tail {
-                let colored = if line.contains("ERROR") {
+                if fmt == OutputFormat::Quiet {
+                    println!("{line}");
+                    continue;
+                }
+
+                let styled = if line.contains("ERROR") {
                     line.replace("ERROR", &"ERROR".red().bold().to_string())
                 } else if line.contains("WARN") {
                     line.replace("WARN", &"WARN".yellow().bold().to_string())
                 } else if line.contains("INFO") {
                     line.replace("INFO", &"INFO".cyan().bold().to_string())
                 } else {
-                    line.to_string()
+                    line.clone()
                 };
-                println!("{}", colored);
+                println!("{styled}");
             }
         }
-        Err(e) => {
-            eprintln!("{} log: {}", "✗".red().bold(), e);
-            eprintln!("   Hint: Is the daemon running? Try `oc2api server start`");
+        Err(error) => {
+            print_error(
+                "Could not read bridge logs",
+                &error.to_string(),
+                &["opencode2api server status"],
+            );
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_exports_use_resolved_token_and_root_base_url() {
+        let config = BridgeConfig {
+            bridge_port: 4010,
+            auth_tokens: Some(vec!["configured-secret".into()]),
+            model: Some("opencode/deepseek-v4-flash-free".to_string()),
+            ..Default::default()
+        };
+
+        let lines = shell_export_lines(&config);
+        assert_eq!(lines[0], "export ANTHROPIC_API_KEY='configured-secret'");
+        assert_eq!(
+            lines[1],
+            "export ANTHROPIC_BASE_URL='http://127.0.0.1:4010'"
+        );
+        assert!(!lines[1].ends_with("/v1'"));
+    }
+
+    #[test]
+    fn shell_exports_quote_single_quotes_safely() {
+        let config = BridgeConfig {
+            auth_tokens: Some(vec!["token'with-quote".into()]),
+            ..Default::default()
+        };
+
+        let lines = shell_export_lines(&config);
+        assert_eq!(
+            lines[0],
+            "export ANTHROPIC_API_KEY='token'\"'\"'with-quote'"
+        );
+    }
+
+    #[test]
+    fn key_value_table_has_no_box_borders() {
+        let table = key_value_table(("Key", "Value"), vec![("Port", "4000".into())]);
+        let rendered = table.to_string();
+        assert!(!rendered.contains('│'));
+        assert!(!rendered.contains('┌'));
     }
 }

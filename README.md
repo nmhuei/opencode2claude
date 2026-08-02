@@ -1,12 +1,12 @@
 # OpenCode2API
 
-OpenCode2API is a local Rust bridge that accepts a subset of the Anthropic Messages API and forwards requests to an OpenAI-compatible upstream. It supports synchronous and streaming responses, reasoning blocks, native tool calls, DSML tool calls, bounded web-search interception, model fallback, and an optional managed WARP/SOCKS egress pool.
+OpenCode2API is a local Rust bridge that accepts both Anthropic Messages and OpenAI Chat Completions requests and forwards them to an OpenAI-compatible upstream. It supports synchronous and streaming responses, reasoning blocks, native tool calls, DSML tool calls, bounded web-search interception, model fallback, and an optional managed WARP/SOCKS egress pool.
 
 The implementation is designed to fail closed: public binding requires strong authentication, proxy mode does not silently fall back to the host network, protected warm-standby nodes cannot be modified by normal lifecycle commands, and downloaded updates are checksum-verified before replacement.
 
 ## Supported platforms
 
-Release targets are Linux x86_64, Linux ARM64, macOS x86_64, and macOS ARM64. Runtime lifecycle tests run on Linux and macOS CI. Windows is not currently advertised as a supported release target.
+OpenCode2API supports Linux only. Official release targets are Linux x86_64 and Linux ARM64, and runtime lifecycle tests run on Linux CI. macOS and Windows are not supported release targets.
 
 ## Installation
 
@@ -52,6 +52,7 @@ Configure Claude Code or another Anthropic-compatible client using the values em
 
 ```bash
 opencode2api env
+opencode2api api-key generate [--save] [--config PATH]
 ```
 
 ## API surface
@@ -63,6 +64,12 @@ Anthropic-compatible routes:
 | `POST` | `/v1/messages` | Sync or SSE Messages response |
 | `POST` | `/v1/messages/count_tokens` | Explicit token estimate |
 | `GET` | `/v1/models` | Configured/default model metadata |
+
+OpenAI-compatible route:
+
+| Method | Route | Contract |
+|---|---|---|
+| `POST` | `/v1/chat/completions` | Transparent sync or SSE Chat Completions response |
 
 Public health routes:
 
@@ -88,6 +95,38 @@ Versioned management routes require `Authorization: Bearer <REST_API_TOKEN>` or 
 
 The browser dashboard is served at `/dashboard`. Cookie-authenticated mutations use a double-submit CSRF token.
 
+The dashboard ships with two presentation themes:
+
+- `mecha` — the default **Mecha Control Deck** visual system with original pixel-art assets;
+- `modern` — the previous neutral dashboard presentation.
+
+The topbar/login theme switch persists the selected theme in browser local storage. Production assets live under `src/webui/assets/mecha/`, are embedded by RustEmbed, and can be regenerated deterministically with:
+
+```bash
+python3 scripts/generate_mecha_assets.py
+```
+
+The typed asset inventory is documented in `src/assets/mecha/manifest.ts`, while design and implementation rules are recorded in `docs/design/MECHA_CONTROL_DECK_SYSTEM.md`.
+
+## Request history
+
+The dashboard includes a dedicated **History** page for inspecting:
+
+- the inbound Anthropic/OpenAI request;
+- the effective upstream payload after policy and model mapping;
+- reasoning and visible response content;
+- tool, search, retry and fallback events;
+- token usage, latency, finish status and capture completeness.
+
+History uses a local SQLite database at `~/.opencode2api/history/request-history.sqlite3`. Public/release defaults keep content capture disabled. A trusted local deployment can enable redacted persistence with:
+
+```bash
+BRIDGE_HISTORY_ENABLED=true
+BRIDGE_HISTORY_CAPTURE_MODE=redacted
+```
+
+Stored content is redacted and size-bounded before persistence. Authorization headers, cookies, dashboard tokens and raw API-key secrets are never intentionally stored. Dashboard history settings, delete, purge and export operations require admin authentication and CSRF protection.
+
 ## CLI
 
 ```text
@@ -95,6 +134,7 @@ opencode2api server start|stop|status|restart|logs|config
 opencode2api proxy ps|restart|purge|logs
 opencode2api dashboard start|status
 opencode2api env
+opencode2api api-key generate [--save] [--config PATH]
 opencode2api doctor
 opencode2api completion <shell>
 opencode2api update [--check] [--force]
