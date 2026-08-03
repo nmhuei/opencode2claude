@@ -37,7 +37,7 @@ Dashboard:     http://127.0.0.1:4000/dashboard
 Binary:        /home/light/.local/bin/opencode2api-serve  (deployment thật — supervisor spawn sibling của controller)
 Controller:    /home/light/.local/bin/opencode2api
 Port:          4000
-PID snapshot:  10427   (serve chạy từ target/release, binary build Aug 3 05:02 — hiện tại, không stale)
+PID snapshot:  101647   (serve chạy từ ~/.local/bin sau atomic restart 2026-08-03 — binary chứa 8 fix mới, đã verify marker)
 Status:        running
 Managed:       true
 Model runtime: opencode/deepseek-v4-flash-free
@@ -2994,6 +2994,44 @@ cargo fmt --check           PASS
 - Vẫn còn cắt giữa câu khi 1 fragment upstream >16KB (hiếm); chưa làm boundary-alignment theo câu.
 - Ngưỡng 16KB là đánh đổi: nếu Claude Code giới hạn hiển thị thinking theo block thì block 16KB có thể bị truncate ở UI (nhưng history vẫn đủ) — cần xác nhận trực tiếp trên terminal.
 
+### 2026-08-03 — Debug loop ITER-1: fix retry livelock + identity deadline clobber (loop session)
+
+**Mục tiêu**: debug-loop tự hành (15m cron) — tìm defect thật có bằng chứng tái hiện, fix tối thiểu, verify.
+
+**BUG-002 (High) — retry livelock khi provider 400 kéo dài về reasoning_content**
+
+- Root cause: `execute_retryable_request` (src/opencode/retry/execute.rs) có 2 sanitizer nghịch đảo trên cùng field — `repair_missing_tool_reasoning` chèn "Tool call continuation." vào assistant tool_use thiếu reasoning; `disable_reasoning_compatibility` strip reasoning_content khỏi mọi message (tái tạo precondition của repair). Nhánh 400-compat `continue` không có cap → hot-loop vô hạn, không backoff, `advance_model`/budget không với tới.
+- Fix: `MAX_COMPAT_SANITIZE_ROUNDS = 2`; sau cap, rơi vào retry budget + backoff bình thường.
+- Regression test: `tests/retry_compat_livelock.rs` (file riêng để tránh va chạm với session song song trên protocol_conformance.rs) — fake upstream luôn 400; assert kết thúc trong 10s và ≤6 request upstream. PASS 1/1 (1.34s, đúng 4 request: 2 sanitize + 1 budgeted + 1 terminal).
+
+**BUG-004 (Medium) — identity monitor phá deadline deferred rotation**
+
+- Root cause: nhánh exhausted của `finalize_identity_recovery` (src/proxy_pool/identity.rs) ghi đè circuit deadline (rate_limit_until) lên deadline gần hơn do `apply_restart_failure` (maintenance.rs) defer +30s đặt → requeue không bao giờ chạy → node chết cả quota.
+- Fix: giữ deadline gần hơn — `min(circuit Open.until, rate_limit_until)`.
+- Regression test: `rate_limit_exhausted_keeps_nearer_deferred_rotation_deadline` — PASS (proxy_pool 57/57).
+
+**Kiểm thử**
+
+```text
+cargo test --test retry_compat_livelock   PASS 1/1 (1.34s)
+cargo test --lib proxy_pool               PASS 57/57
+cargo test --lib opencode::retry          PASS 17/17
+cargo test --lib opencode::forward::sync  PASS 5/5 (fix của session song song)
+cargo test --test protocol_conformance    PASS 25/25
+```
+
+**Deploy & verify**
+
+- Live smoke qua bridge đang chạy (PID 10427): `claude -p "Reply with exactly: LIVE_SMOKE_OK"` → LIVE_SMOKE_OK, EXIT=0.
+- LƯU Ý: binary đang chạy cũ hơn source hiện tại — manual verification cho BUG-002/004 cần rebuild + restart atomic (v3) ở ITER kế.
+- Full clippy chain ở cuối ITER bị chặn bởi edit giữa chừng của session song song trên docker/* (E0599/E0425, không phải do fix của loop) — đang chờ tree ổn định để chạy lại toàn bộ.
+
+**Giới hạn đã biết**
+
+- BUG-003/005/006/007/008: REPRODUCED/CANDIDATE, đã ghi trong `.claude/debug-loop/findings.md` kèm patch đề xuất — file thuộc session song song (mtime mới), chờ tree ổn định mới integrate.
+- Independent verifier cho BUG-002/004 chưa chạy (chờ tree compile).
+- Manual verification BUG-002/004 chưa thực hiện trên binary mới.
+
 ### 2026-08-03 — Start 2 protected standby WARP proxies (40004-40005)
 
 **Mục tiêu**
@@ -3058,7 +3096,7 @@ cargo test --locked               593 passed, 0 failed
 
 **Deploy & verify**
 
-- CHƯA deploy — binary đang chạy (PID 10427) là bản trước 8 fix; cần build release + atomic restart (v3) khi người dùng xác nhận.
+- Đã deploy: build release (3m07s) → backup binary cũ vào /tmp/*.bak-20260803 → cp 2 binary mới vào ~/.local/bin → `~/.local/bin/opencode2api server restart` atomic (1 lệnh). PID mới 101647; verified: `strings /proc/PID/exe` chứa marker "Upstream stream ended before a pending tool call" và "Collapsing native batch"; /health ok; /health/ready ready (verified_unique_exit_ips=4, proxy 5/5). Backup: /tmp/oc2api-serve.inst.bak-20260803, /tmp/oc2api.inst.bak-20260803.
 - Working tree: thay đổi chưa commit, chờ yêu cầu user.
 
 **Giới hạn đã biết (SUSPECT — ngoài scope đã chọn, chưa fix)**
