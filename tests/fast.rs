@@ -804,7 +804,10 @@ async fn test_tc034_post_messages_missing_messages_field() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 422);
+    // Anthropic error shape (BridgeError::InvalidRequest), not axum's default 422.
+    assert_eq!(resp.status(), 400);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["type"], "error");
 }
 
 #[tokio::test]

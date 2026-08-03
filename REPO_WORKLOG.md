@@ -26,7 +26,7 @@
 
 ## Snapshot hiện tại
 
-Cập nhật gần nhất: **2026-07-22**
+Cập nhật gần nhất: **2026-08-03**
 
 ### Repo và service
 
@@ -34,13 +34,14 @@ Cập nhật gần nhất: **2026-07-22**
 Repo:          /home/light/GitHub/opencode2claude
 Service URL:   http://127.0.0.1:4000
 Dashboard:     http://127.0.0.1:4000/dashboard
-Binary:        target/release/opencode2api-serve
-Controller:    target/release/opencode2api
+Binary:        /home/light/.local/bin/opencode2api-serve  (deployment thật — supervisor spawn sibling của controller)
+Controller:    /home/light/.local/bin/opencode2api
 Port:          4000
-PID snapshot:  534392
+PID snapshot:  10427   (serve chạy từ target/release, binary build Aug 3 05:02 — hiện tại, không stale)
 Status:        running
 Managed:       true
 Model runtime: opencode/deepseek-v4-flash-free
+Proxy pool:    5/5 healthy — primaries 40001-40003 + standbys 40004-40005 online; verified unique exit IPs = 4
 Dashboard auth configured: true
 Client API auth snapshot:  false
 ```
@@ -2621,3 +2622,450 @@ Runtime logs attribute the HTTP 400/empty-stream cases to upstream DeepSeek/DFLA
 
 - No reset, checkout, clean, commit, or source edit was performed.
 - Only verification artifacts and this worklog entry were added.
+
+## 2026-08-02 — DFLASH HTTP 400/502 compatibility fix and restart
+
+### Objective
+
+Eliminate repeated Claude Code failures reported as `502 Upstream API error: Upstream returned HTTP 400 after 1 provider retry attempt(s)` and restart the deployed bridge only after reproducing and verifying the exact failing payloads.
+
+### Root causes reproduced from History
+
+1. `deepseek-v4-flash-free` rejected Claude structured-output requests because any forwarded `response_format` enabled grammar-constrained decoding. Upstream message: `DFLASH speculative decoding does not support grammar-constrained decoding`.
+2. DFLASH synchronous requests with thinking enabled rejected long tool histories when an historical assistant message contained `tool_calls` but no non-empty `reasoning_content`.
+
+Direct payload experiments established the second invariant:
+
+```text
+original long sync thinking request                  -> HTTP 502
+same request with missing tool reasoning synthesized -> HTTP 200
+same request with thinking disabled                  -> HTTP 200
+strip reasoning only while leaving thinking enabled  -> HTTP 502
+```
+
+### Files changed
+
+```text
+src/opencode/mapper/policy.rs
+src/opencode/mapper/request.rs
+src/opencode/mapper/tests.rs
+src/opencode/retry/execute.rs
+```
+
+### Implementation
+
+- Do not forward `response_format` to `deepseek-v4-flash-free`.
+- For DFLASH sync + thinking requests, synthesize `reasoning_content: "Tool call continuation."` only on historical assistant messages that contain tool calls but lack reasoning.
+- Preserve genuine historical reasoning.
+- On provider HTTP 400, detect reasoning/grammar compatibility errors and perform a bounded semantic repair before the ordinary provider retry:
+  - repair missing tool-call reasoning;
+  - if that cannot repair the payload, disable incompatible reasoning controls;
+  - remove unsupported response format.
+- The same defensive retry policy covers Anthropic-mapped and OpenAI passthrough requests.
+
+### Verification
+
+```text
+git diff --check                                      PASS
+cargo fmt --check                                     PASS
+cargo clippy --locked --all-targets -- -D warnings    PASS
+cargo build --release --locked --bins                 PASS
+cargo test --locked                                   PASS
+
+440 unit tests passed
+87 fast tests passed
+18 integration tests passed
+2 parser-fuzz tests passed
+21 protocol-conformance tests passed
+0 failed
+1 ignored (requires real WARP identity environment)
+```
+
+Manual deployed replay after restart:
+
+```text
+structured-output payload formerly returning 502 -> HTTP 200, valid JSON text
+exact 497812-byte historical failing request       -> HTTP 200, thinking/text/tool call
+```
+
+Claude Code 2.1.220 lifecycle matrix after the fix preserved one result per tool use, zero duplicate IDs, zero unmatched results, and zero raw `[Requesting`/`[Creating` markers. The aggregate script reported false only because Claude issued an additional harmless `ls` Bash before the prescribed Bash while the harness expected exactly one Bash; this was behavioral variance, not a parser or lifecycle failure.
+
+### Deployed service
+
+```text
+Endpoint: http://127.0.0.1:4000
+PID:      422998
+Model:    opencode/deepseek-v4-flash-free
+Managed:  true
+Primary WARP nodes 40001-40003: healthy
+```
+
+No new HTTP 400/502, grammar, malformed-marker, or raw-marker errors were observed after the final restart and replay.
+
+### Repository state
+
+The four source/test files above remain uncommitted. No reset, clean, checkout, or commit was performed.
+
+
+## 2026-08-02 — Host WARP isolation, managed proxy rotation, Claude Code 2.1.220 compatibility, and real ANSER workflow verification
+
+### Objective
+
+Fix the production runtime so `opencode2api` can never invoke the machine-wide `warp-cli`, repair managed-proxy recovery so a rate-limited WARP registration is actually rotated, restore the `:4000` connection, and then verify the deployed bridge with a real Claude Code 2.1.220 multi-agent workflow against the previously authorized local ANSER pentest workspace.
+
+### Root causes
+
+1. Direct-mode network/rate-limit retry paths called `reconnect_warp()`. The production `CliWarpController` implemented that operation by executing host `warp-cli disconnect` followed by `warp-cli connect`, interrupting unrelated host traffic.
+2. Managed rate-limit recovery used `docker restart`, which retained the named WARP registration volume and commonly returned the same rate-limited exit identity.
+3. After exhausting three rotation attempts, a rate-limited node stayed dormant until the original provider quota deadline instead of scheduling another bounded rotation attempt.
+4. Claude Code 2.1.220 sends `SessionStart hook additional context` as a `messages[].role == "system"` conversation entry. The bridge validator previously allowed only `user`/`assistant`, producing an immediate HTTP 400 before mapping.
+5. The protocol-conformance fixture for a post-content stream read error could deliver a visible chunk and terminal error in one poll, making the intended lifecycle assertion nondeterministic.
+
+### Implementation
+
+#### Host WARP safety
+
+- Added a production-safe `DisabledWarpController`.
+- `AppState` now uses `DisabledWarpController`; no production path constructs `CliWarpController`.
+- Direct network and rate-limit retry paths log the condition but never mutate host WARP.
+- Removed the retry module's automatic host-WARP reconnect path; `src/opencode/retry/warp.rs` is intentionally inert documentation.
+- Added regression coverage proving production state rejects host WARP reconnect and direct rate limits never call the controller.
+
+#### Managed Docker WARP recovery
+
+- Added `ContainerRuntime::rotate_managed`.
+- Docker rotation now removes only the managed primary container, removes its named registration volume, and recreates the canonical container.
+- Rate-limit recovery and `proxy purge -y` use true registration rotation instead of `docker restart`/volume reuse.
+- Protected standby ports `40004-40005` remain outside destructive lifecycle operations.
+- Exhausted rate-limit rotation schedules a short deferred retry while preserving fail-closed identity and duplicate-exit checks.
+
+#### Claude Code 2.1.220 request compatibility
+
+- Validator accepts a `system` message only when every block is text.
+- Mapper folds text from role-`system` messages into the top-level system prompt and excludes those messages from OpenAI conversation history.
+- Non-text tool/content blocks in a system message remain fail-closed.
+
+#### Stream lifecycle fixture
+
+- The post-content stream-reset fixture now yields across an async boundary between the visible SSE chunk and terminal read error so the test deterministically distinguishes pre-content retry from post-content no-replay behavior.
+
+### Automated verification
+
+Final quality gate on the exact deployed working tree:
+
+```text
+cargo fmt --all -- --check                         PASS
+cargo test --locked                                PASS
+cargo clippy --locked --all-targets -- -D warnings PASS
+cargo build --release --locked --bins              PASS
+
+448 unit tests passed
+87 fast tests passed
+18 integration tests passed
+2 parser-fuzz tests passed
+23 protocol-conformance tests passed
+1 WARP identity system test ignored by design
+0 failed
+```
+
+New/updated regression tests include:
+
+```text
+rotate_managed_replaces_container_and_registration_volume
+exhausted_rate_limit_rotation_is_requeued_after_short_delay
+direct_rate_limit_never_reconnects_host_warp
+production_state_forbids_host_warp_reconnect
+accepts_claude_code_system_message_with_text_only
+rejects_non_text_blocks_in_system_messages
+folds_claude_code_2_1_220_system_message_into_system_prompt
+pre_content_stream_read_error_retries_without_duplicate_lifecycle
+post_content_stream_read_error_is_not_replayed
+```
+
+### Practical host-WARP verification
+
+A real `strace -f -e execve` capture of managed pool rotation showed only:
+
+```text
+docker rm -f <managed-primary>
+docker volume rm -f <managed-registration-volume>
+docker run ...
+```
+
+No `warp-cli` exec occurred.
+
+The deployed service was then launched with a sentinel executable named `warp-cli` placed first in its `PATH`. Any attempted host invocation would append a timestamped record and return failure instead of touching host networking. The sentinel log remained absent through:
+
+- managed pool rotation;
+- raw Claude Code request replay;
+- the complete real Claude Code ANSER workflow;
+- provider retries and a rate-limit recovery cycle.
+
+Evidence:
+
+```text
+artifacts/manual-host-warp-verify-20260802/proxy-rotate.execve.log
+artifacts/manual-host-warp-verify-20260802/bin/warp-cli
+artifacts/manual-host-warp-verify-20260802/host-warp-cli-invocations.log  # absent
+```
+
+A host process check also found no active `warp-cli` process. Existing unrelated host services and Claude sessions were not stopped.
+
+### Raw Claude Code 2.1.220 replay
+
+A local capture proxy recorded the exact Claude Code request shape with roles `[user, system]`. Replaying that request against the patched release returned HTTP 200 with a complete Anthropic SSE lifecycle and final text `OK`; the former `messages[n].role must be user or assistant` error did not recur.
+
+Evidence:
+
+```text
+artifacts/manual-host-warp-verify-20260802/captured-request-latest.json
+artifacts/manual-host-warp-verify-20260802/replay.headers.txt
+artifacts/manual-host-warp-verify-20260802/replay.body.txt
+```
+
+### Real Claude Code multi-agent verification
+
+Claude Code 2.1.220 was run against `http://127.0.0.1:4000` in the authorized workspace `/home/light/Documents/anser_pentest`. It used two background subagents before final conclusions:
+
+1. independent static source/evidence reviewer;
+2. dynamic local regression verifier.
+
+The parent did not trust the dynamic verifier's initial session-invalid conclusion. It independently reproduced the cookie behavior, established that `curl -b <raw-value-file>` was the error, confirmed all five sessions authenticate when sent as `session=$(cat file)`, verified the local SQLite canary read-only, and wrote a correction artifact rather than silently rewriting the subagent transcript.
+
+Observed bridge/tool lifecycle for the complete workflow:
+
+```text
+134 tool_use blocks
+134 tool_result blocks
+0 duplicate tool IDs
+0 unmatched tool uses
+0 orphan tool results
+0 raw [Requesting ...] / [Creating ...] markers
+```
+
+One local Claude `TaskOutput` call occurred after Claude Code had already emitted `task_notification: completed` and removed that agent ID from its local task registry. It returned `No task found`; all surrounding bridge requests completed HTTP 200, and the parent consumed the already-delivered completion notification. This was classified as a Claude Code local post-completion race, not an `opencode2api` parser/mapping failure.
+
+One provider stream ended with an upstream read error. The bridge recorded it as `upstream_read_error`, emitted no partial tool use, did not replay or duplicate any lifecycle block, and subsequent requests completed normally. This matches the post-content fail-closed/no-replay contract.
+
+Evidence:
+
+```text
+artifacts/manual-host-warp-verify-20260802/claude-anser-after-fix.stream.jsonl
+artifacts/manual-host-warp-verify-20260802/claude-anser-after-fix.debug.log
+artifacts/manual-host-warp-verify-20260802/claude-anser-after-fix.stderr.log
+```
+
+### ANSER task outcome independently checked
+
+Claude Code completed successfully and produced/updated only pentest-workspace deliverables, including:
+
+```text
+09_retest/20260802_review/dynamic_recheck_20260802.json
+09_retest/20260802_review/dynamic_recheck_correction_20260802.json
+09_retest/results/pre_fix_recheck_20260802.json
+06_reports/final/ANSER_PENTEST_REPORT.md
+06_reports/final/ANSER_PENTEST_REPORT.sha256
+DELIVERABLES.md
+DELIVERABLES.sha256
+```
+
+Independent post-run checks confirmed:
+
+- `pre_fix_recheck_20260802.json` contains exactly 9 schema-complete records, F-001 through F-009, all verdict `OPEN`;
+- correction file contains five authenticated identities and explicitly supersedes the false session-invalidation inference;
+- F-002/F-005/F-006/F-001/Gunicorn/cleanup report passages now match source/evidence;
+- Markdown code fences are balanced;
+- report, Vietnamese report, and deliverables checksums all verify;
+- `/home/light/GitHub/ANSER` source remains unchanged; only the pre-existing untracked `dump.rdb` is present;
+- unrelated services and concurrent work under `10_impl_fanout` were not touched.
+
+### Deployed service
+
+```text
+Endpoint: http://127.0.0.1:4000
+PID:      1698227
+Model:    opencode/deepseek-v4-flash-free
+Managed:  true
+Primary Docker WARP nodes 40001-40003: running
+Protected standby nodes 40004-40005: offline/untouched
+```
+
+Cloudflare may still assign the same public exit IP after a true registration reset. The runtime therefore retains uniqueness/quarantine checks and deferred retries; it does not falsely claim that volume rotation guarantees a new IP.
+
+### Repository safety
+
+- No reset, checkout, clean, or commit was performed.
+- No unrelated Claude session/process was stopped.
+- No protected standby was mutated.
+- Current source/test changes remain uncommitted pending an explicit user request.
+
+### 2026-08-03 — Fix "incomplete tool request" terminal error: split native/compat search batches
+
+**Mục tiêu**
+
+- Chấm dứt lỗi terminal `The upstream model repeatedly emitted an incomplete tool request` khi DeepSeek free (opencode/deepseek-v4-flash-free) gửi batch nhiều tool call song song trong 1 response (2-4 calls, gồm cả bridge-search tools).
+- Đảm bảo bridge chịu được prompt nghiên cứu dài + Subagent fan-out (trước đó fail 16/18 lần).
+
+**Root cause (đã truy vết bằng evidence)**
+
+1. Upstream free-tier **bỏ qua `parallel_tool_calls: false`** — đã chứng minh bằng serialization test (param có trong request) + repro live (vẫn batch calls=4).
+2. Stream executor reject toàn bộ batch chứa search tool (`Rejecting native tool batch...`) → `compat_retry_requested` → hết MAX_COMPAT_TOOL_RETRIES=2 → terminal error, kèm stop_reason sai.
+3. **Phát hiện quan trọng:** `oc2api server restart` spawn serve là **sibling của controller** (`current_exe().parent()/opencode2api-serve`, supervisor.rs:157-161). Controller chạy từ `~/.local/bin` nên các lần "restart + verify" trước đây (bao gồm cả Fix A) đều chạy binary **stale Jul 29** — kết luận "Fix A ineffective" trước đây dựa trên binary cũ, không phải code mới.
+
+**File đã sửa**
+
+```text
+src/opencode/forward/stream/context.rs   # finalize_pending_native_tool_calls (native path)
+src/opencode/forward/stream/context.rs   # emit_compat_tool_calls (compat/DSML path)
+src/opencode/forward/stream/tests.rs     # 3 test cập nhật theo hành vi mới
+src/opencode/types.rs                    # (từ phiên trước) parallel_tool_calls field
+src/opencode/mapper/request.rs           # (từ phiên trước) map parallel_tool_calls:false
+src/opencode/mapper/tests.rs             # (từ phiên trước) serialization test
+```
+
+**Thay đổi kỹ thuật**
+
+- Bỏ reject batch; thay bằng split:
+  - **Pure-search batch** (2+ search): giữ nguyên → interception branch bắt call đầu tiên, các call còn lại không vào history (model tự re-issue ở turn sau, mỗi lần 1 call → interception bình thường). Log: `Collapsing native batch of search calls; intercepting the first`.
+  - **Mixed batch** (search + non-search): `retain` chỉ giữ non-search → emit thành tool_use bình thường cho client; search calls bị drop. Log: `Dropping search calls from mixed native batch; emitting non-search calls`.
+- Không còn đường nào set `compat_retry_requested` từ batch → terminal error không thể xảy ra từ lỗi này.
+
+**Kiểm thử**
+
+```text
+cargo test --lib            449 passed, 0 failed
+cargo clippy --lib          clean
+cargo fmt --check           PASS
+```
+
+**Deploy & verify**
+
+- `~/.local/bin` là deployment thật (controller spawn sibling serve). Script atomic `/tmp/restart_bridge3.sh`: stop → backup Jul 29 (`/tmp/oc2api-serve.inst.bak`, `/tmp/oc2api.inst.bak`) → cp binary mới → start → health poll 45s → verify `strings /proc/PID/exe` có marker fix → rollback + direct spawn fallback nếu fail.
+- PID hiện tại: 313216, running-marker=1 (fix đang chạy).
+- Repro `/tmp/repro_long.json`: `tool_use events: 2`, `terminal error: 0`, `stop_reason: tool_use`; log mới chỉ có `Collapsing native batch` (không còn `Rejecting`).
+- Live E2E: subagent research dài (2 WebSearch + WebFetch + synthesis) hoàn thành trong ~24s — lần đầu thành công sau 16/18 lần fail trước đó.
+
+**Giới hạn đã biết**
+
+- Search calls bị drop trong mixed batch có thể không được model re-issue (model-dependent); chưa có cơ chế nudge xuyên turn. Không ảnh hưởng tính đúng đắn protocol — chỉ có thể tốn thêm round-trip.
+- Trước đây kết luận "Fix A ineffective" là do binary stale; `parallel_tool_calls:false` chưa bao giờ được live-test riêng. Hiện Fix A + Fix B cùng chạy — cả hai đều an toàn.
+- `/tmp/restart_bridge.sh`, `/tmp/restart_bridge2.sh` (v1, v2) lỗi thời — chỉ dùng v3.
+
+### 2026-08-03 — Fix block index reuse + thinking segmentation (lỗi "cắt rất ngu" khi hiển thị reasoning)
+
+**Mục tiêu**
+
+- Người dùng báo: reasoning (thinking) của model hiện ra trong chat bị cắt vụn, mất chữ, lộn xộn ("cắt rất ngu", "ảnh hưởng xấu đến người xem") — nhìn thấy cả fragment reasoning nội bộ lẫn trong stream.
+
+**Root cause (2 bug, đã chứng minh bằng event dump)**
+
+1. **Index reuse (protocol violation — nguyên nhân chính):** `tracker.reset()` ở các vòng lặp search interception (execute.rs:536), compat retry (execute.rs:559), và `finalize_stream_with_text` (context.rs:109) reset `next_idx` về 0 trong khi client ĐÃ nhận block 0, 1 → block mới lại bắt đầu từ index 0. Bằng chứng: repro cũ emit index sequence `[0,1,0,0]`. Anthropic spec yêu cầu index tăng dần trong 1 message → Claude Code build block theo index → block bị overwrite/merge → thinking hiển thị vỡ, mất nội dung.
+2. **Segmentation 384 byte:** `THINKING_RENDER_CHUNK_BYTES = 384` (context.rs:26) đóng thinking block mỗi ~300-400 byte — cắt giữa câu/list, tạo hàng trăm block nhỏ khi thinking dài (127k tokens). Test cũ `long_reasoning_is_segmented_for_interactive_rendering` assert đúng hành vi này nhưng ngưỡng bệnh lý.
+
+**File đã sửa**
+
+```text
+src/opencode/forward/stream/execute.rs   # bỏ tracker.reset() ở interception loop + compat retry
+src/opencode/forward/stream/context.rs   # bỏ reset() ở finalize_stream_with_text; THINKING_RENDER_CHUNK_BYTES 384 → 16384
+src/stream_tracker.rs                    # test close_all_keeps_indices_monotonic_without_reset
+src/opencode/forward/stream/tests.rs     # update 2 test segmentation theo ngưỡng mới
+```
+
+**Thay đổi kỹ thuật**
+
+- Giữ `reset()` DUY NHẤT ở pre-content retry (execute.rs:405, chưa emit block nào — an toàn).
+- Segmentation giờ 16KB (≈4000 từ) → block hiếm khi bị cắt giữa câu; với thinking ngắn/trung bình chỉ 1 block.
+
+**Kiểm thử**
+
+```text
+cargo test --lib            451 passed, 0 failed
+cargo clippy --lib          clean
+cargo fmt --check           PASS
+```
+
+**Deploy & verify**
+
+- Atomic restart v3 (PID 465074, running-marker=1).
+- Repro long: index sequence giờ `[0,1,2,3,4,5]` **strictly monotonic** qua 3 vòng search loop (trước: `[0,1,0,0]`); 4 thinking block đều là segment liền mạch hết câu tự nhiên, không còn cắt 300B giữa list; tool_use 4,5 nhận đúng.
+
+**Giới hạn đã biết**
+
+- Vẫn còn cắt giữa câu khi 1 fragment upstream >16KB (hiếm); chưa làm boundary-alignment theo câu.
+- Ngưỡng 16KB là đánh đổi: nếu Claude Code giới hạn hiển thị thinking theo block thì block 16KB có thể bị truncate ở UI (nhưng history vẫn đủ) — cần xác nhận trực tiếp trên terminal.
+
+### 2026-08-03 — Start 2 protected standby WARP proxies (40004-40005)
+
+**Mục tiêu**
+
+- Người dùng yêu cầu khởi động 2 proxy standby (40004-40005) đang offline để đưa pool về full 5/5.
+
+**Thao tác**
+
+- Kiểm tra trạng thái: `/health` chỉ trả minimal `{"status":"ok","version":"0.5.0"}` (thiết kế cố ý — proxy telemetry nằm ở `/health/ready` và `/api/v1/proxies`, không phải lỗi).
+- `/health/ready`: ready, egress mode=proxy, verified_unique_exit_ips=2 (minimum 1).
+- `opencode2api proxy status`: 3 primary healthy, 2 standby offline — containers `opencode-warp-4/5` exited 4 ngày, image `ghcr.io/mon-ius/docker-warp-socks:latest`, restart policy always.
+- Không có CLI nào start standby (restart/purge chỉ tác động primary; standby được bảo vệ) → `docker start opencode-warp-4 opencode-warp-5`.
+
+**Kết quả**
+
+- 5/5 healthy, 0 offline; verified unique exit IPs tăng 2 → 4 (mỗi standby có exit IP riêng); `/health/ready` vẫn ready.
+- Không sửa code, không sửa container config, không chạm primary.
+
+**Ghi chú**
+
+- Daemon hiện tại (PID 10427) chạy từ `/home/light/GitHub/opencode2claude/target/release` — controller `target/release/opencode2api` spawn serve sibling. Binary build 2026-08-03 05:02, mới hơn source change gần nhất (04:58) nên không stale; deployment `~/.local/bin` cũng cùng mtime.
+- `/api/v1/proxies` yêu cầu Bearer token (middleware) dù env không có `BRIDGE_AUTH_TOKEN` — auth token đến từ nguồn config khác; chưa truy vết.
+
+### 2026-08-03 — Fix 8 confirmed bugs từ audit 4 bug-class (stream SSE, tool-call/DSML parsing, retry boundaries, request validation)
+
+**Mục tiêu**
+
+- Người dùng yêu cầu fan-out agent tiếp tục debug tìm lỗi cùng lớp với thinking segmentation (index reuse + 384B chunk đã fix trước). 4 audit agent quét: stream SSE lifecycle, tool-call/DSML marker parsing, retry boundaries, request validation/mapper. ~13 finding → gộp trùng → verify bằng đọc code trực tiếp → 8 CONFIRMED, người dùng chọn "Tất cả CONFIRMED" (fix hết, TDD, quality gate cuối).
+
+**Các fix (theo thứ tự ưu tiên HIGH → LOW)**
+
+1. **HIGH — sync path reject batch search calls** (`src/opencode/forward/sync.rs`): block cũ reject mọi batch `(search > 0 && total > 1)` → terminal "invalid tool protocol". Thay bằng `classify_sync_tool_batch` → 3 outcome: `Normal` / `Collapse` (pure-search batch: intercept call đầu, drop phần còn lại) / `DropSearches` (mixed batch: giữ non-search, drop search calls). Err chỉ cho unavailable/malformed args. 5 test.
+2. **MED — compat retry nhân đôi visible text** (`src/opencode/forward/stream/execute.rs`): retry path thiếu guard `has_any_blocks_ever_opened()` như path stream_failed → emit response cũ + response mới gộp vào nhau. Thêm guard `!tracker.has_any_blocks_ever_opened() && compat_tool_retries < MAX_COMPAT_TOOL_RETRIES`.
+3. **MED — mid-stream failure drop tool calls im lặng** (`src/opencode/forward/stream/context.rs`): upstream kết thúc khi còn pending tool call → trước đây emit `message_delta end_turn` giả (client tưởng hoàn tất). Giờ emit error event thay vì end_turn giả.
+4. **MED — image blocks bị drop im lặng** (`src/opencode/mapper/request.rs`): user-message match `_ => {}` nuốt image/source blocks → thay bằng placeholder `[attached {other} block not forwarded]` (không bỏ chữ im lặng, không leak base64).
+5. **MED — fan-out heuristic bắn nhầm khi có negation** (`src/opencode/mapper/request.rs`): 19 pattern negation ("do not fan", "không fan", "đừng dùng subagent"...) → return None, không inject fan-out instruction.
+6. **MED — malformed body trả plain-text 4xx** (`src/handlers/messages.rs` + `metadata.rs`): `Result<Json<T>, JsonRejection>` extractor → map thành `BridgeError::InvalidRequest` → Anthropic error shape JSON (400) thay vì axum plain-text 422.
+7. **LOW — double error event + message_start sau error** (`src/opencode/forward/stream/execute.rs`): 2 block error cũ gửi error + finalize_stream với fresh tracker → 2 error + message_start sau error. Helper `finalize_transport_error` chuẩn hoá: message_start (nếu chưa) → 1 error → message_stop.
+8. **LOW — DSML literal tag trong value misparse** (`src/opencode/sanitize.rs`): đếm raw tag bằng `text.matches()` misfire khi value chứa literal `</｜DSML｜parameter>` → parse một lần, `truncated` flag tại mỗi `break` thiếu close tag, `structurally_broken = truncated || invokes_processed != calls.len()`.
+
+**Test mới (TDD — mỗi test fail đúng lý do trước khi fix)**
+
+```text
+src/opencode/forward/sync.rs           5 test: mixed/pure/single/unavailable/malformed batch
+src/opencode/forward/stream/tests.rs   4 test: compat retry không merge response 2,
+                                       pending tool call → error không end_turn giả,
+                                       non-2xx → message_start rồi 1 error rồi message_stop,
+                                       (fixture SseReadError/Sse/Raw)
+src/opencode/mapper/tests.rs           2 test: image block placeholder, fan-out negation
+tests/protocol_conformance.rs          5 test (black-box harness): 4 ở trên + malformed body 400
+tests/fast.rs                          test_tc034: 422 → 400 + error shape (behavior mới có chủ đích)
+```
+
+**Kiểm thử (quality gate đầy đủ)**
+
+```text
+cargo fmt --all -- --check        PASS
+cargo clippy --locked --all-targets -- -D warnings   PASS
+cargo test --locked               593 passed, 0 failed
+   (lib 459 + fast 87 + protocol_conformance 18 + integration 2 + others 27)
+```
+
+**Deploy & verify**
+
+- CHƯA deploy — binary đang chạy (PID 10427) là bản trước 8 fix; cần build release + atomic restart (v3) khi người dùng xác nhận.
+- Working tree: thay đổi chưa commit, chờ yêu cầu user.
+
+**Giới hạn đã biết (SUSPECT — ngoài scope đã chọn, chưa fix)**
+
+- `context.rs:824/857`: native tool_use emit khi intercepting_search active thiếu guard (SUSPECT).
+- finish_reason sớm → finalize partial args (SUSPECT).
+- orphan tool_result không cross-check (SUSPECT); tool_call thiếu index bị drop (SUSPECT).
+- tool_result image base64 vào prompt (SUSPECT); temperature >1 cứng 400 (SUSPECT).
+- Search calls bị drop trong mixed batch (sync path) có thể không được model re-issue (model-dependent).
+- Snapshot: PID 10427 vẫn live, proxy pool 5/5, model opencode/deepseek-v4-flash-free — không đổi so với snapshot trên.

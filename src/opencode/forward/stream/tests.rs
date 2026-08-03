@@ -109,6 +109,7 @@ async fn long_reasoning_is_segmented_for_interactive_rendering() {
     let mut ctx = StreamContext::new(false);
     ctx.message_started = true;
     let payload = empty_messages_request();
+    // Short reasoning stays in ONE block; only very long streams segment.
     let first = "a".repeat(400);
 
     for reasoning in [&first, "tail"] {
@@ -128,17 +129,60 @@ async fn long_reasoning_is_segmented_for_interactive_rendering() {
     let joined = events.join("\n");
     assert_eq!(
         joined.matches("event: content_block_start").count(),
-        2,
+        1,
         "{joined}"
     );
     assert_eq!(joined.matches("thinking_delta").count(), 2, "{joined}");
     assert_eq!(
         joined.matches("event: content_block_stop").count(),
-        1,
+        0,
         "{joined}"
     );
     assert_eq!(ctx.accumulated_thinking, format!("{first}tail"));
-    assert_eq!(tracker.thinking_idx(), Some(1));
+    assert_eq!(tracker.thinking_idx(), Some(0));
+}
+
+#[tokio::test]
+async fn oversized_reasoning_segments_into_a_second_block() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    let builder = SseEventBuilder::new("msg_segmented_big".to_string(), "model".to_string());
+    let mut tracker = SseBlockTracker::new();
+    let mut ctx = StreamContext::new(false);
+    ctx.message_started = true;
+    let payload = empty_messages_request();
+    // 17KB pushes past THINKING_RENDER_CHUNK_BYTES (16KB) and must segment.
+    let big = "a".repeat(17 * 1024);
+    let line = format!(
+        "data: {}",
+        serde_json::json!({
+            "choices": [{"delta": {"reasoning_content": big}, "finish_reason": null}]
+        })
+    );
+
+    process_openai_sse_line(&line, &mut ctx, &mut tracker, &tx, &builder, &payload).await;
+    // A follow-up reasoning delta opens the NEXT segment block at index 1.
+    let tail_line = format!(
+        "data: {}",
+        serde_json::json!({
+            "choices": [{"delta": {"reasoning_content": "tail"}, "finish_reason": null}]
+        })
+    );
+    process_openai_sse_line(&tail_line, &mut ctx, &mut tracker, &tx, &builder, &payload).await;
+
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(format!("{event:?}"));
+    }
+    let joined = events.join("\n");
+    assert_eq!(joined.matches("event: content_block_start").count(), 2);
+    assert_eq!(joined.matches("event: content_block_stop").count(), 1);
+    assert_eq!(joined.matches("thinking_delta").count(), 2);
+    assert_eq!(ctx.accumulated_thinking, format!("{big}tail"));
+    assert_eq!(
+        tracker.thinking_idx(),
+        Some(1),
+        "segment continues at next index"
+    );
 }
 
 #[tokio::test]
@@ -440,8 +484,8 @@ async fn search_arguments_received_before_name_are_preserved_by_index() {
 }
 
 #[tokio::test]
-async fn native_search_batch_is_rejected_without_silent_drop() {
-    let (tx, _rx) = tokio::sync::mpsc::channel(32);
+async fn native_mixed_batch_drops_search_and_emits_non_search_calls() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(32);
     let builder = SseEventBuilder::new("msg_parallel".to_string(), "model".to_string());
     let mut tracker = SseBlockTracker::new();
     let mut ctx = StreamContext::new(false);
@@ -466,10 +510,20 @@ async fn native_search_batch_is_rejected_without_silent_drop() {
     let line = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"s","function":{"name":"WebSearch","arguments":"{\"query\":\"security\"}"}},{"index":1,"id":"r","function":{"name":"Read","arguments":"{\"path\":\"secret.txt\"}"}}]},"finish_reason":"tool_calls"}]}"#;
 
     process_openai_sse_line(line, &mut ctx, &mut tracker, &tx, &builder, &payload).await;
+
+    let mut joined = String::new();
+    while let Ok(event) = rx.try_recv() {
+        joined.push_str(&format!("{event:?}\n"));
+    }
     assert!(!ctx.intercepting_search);
     assert!(ctx.search_tc_args.is_empty());
-    assert!(!ctx.has_emitted_tool_use);
-    assert!(ctx.compat_retry_requested);
+    assert!(ctx.has_emitted_tool_use);
+    assert!(!ctx.compat_retry_requested);
+    assert!(joined.contains("secret.txt"), "{joined}");
+    assert!(
+        !joined.contains("security"),
+        "dropped search leaked: {joined}"
+    );
 }
 
 #[tokio::test]
@@ -2014,7 +2068,7 @@ async fn emitted_tool_then_malformed_marker_never_requests_replay() {
 }
 
 #[tokio::test]
-async fn search_batch_is_rejected_instead_of_silently_dropping_calls() {
+async fn search_batch_collapses_to_first_search_and_intercepts_it() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let builder = SseEventBuilder::new("msg_search_batch".to_string(), "model".to_string());
     let mut tracker = SseBlockTracker::new();
@@ -2040,9 +2094,14 @@ async fn search_batch_is_rejected_instead_of_silently_dropping_calls() {
     while let Ok(event) = rx.try_recv() {
         joined.push_str(&format!("{event:?}\n"));
     }
-    assert!(!ctx.intercepting_search);
+    assert!(ctx.intercepting_search);
+    assert!(
+        ctx.search_tc_args.contains("alpha"),
+        "{}",
+        ctx.search_tc_args
+    );
     assert!(!ctx.has_emitted_tool_use);
-    assert!(ctx.compat_retry_requested);
+    assert!(!ctx.compat_retry_requested);
     assert!(!joined.contains("alpha"), "{joined}");
     assert!(!joined.contains("beta"), "{joined}");
 }
@@ -2270,7 +2329,7 @@ async fn malformed_dsml_batch_is_atomic_and_requests_retry() {
 }
 
 #[tokio::test]
-async fn dsml_search_batch_is_rejected_without_silent_drop() {
+async fn dsml_mixed_batch_drops_search_and_emits_non_search_calls() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let builder = SseEventBuilder::new("msg_dsml_search_batch".to_string(), "model".to_string());
     let mut tracker = SseBlockTracker::new();
@@ -2299,10 +2358,10 @@ async fn dsml_search_batch_is_rejected_without_silent_drop() {
         joined.push_str(&format!("{event:?}\n"));
     }
     assert!(!ctx.intercepting_search);
-    assert!(!ctx.has_emitted_tool_use);
-    assert!(ctx.compat_retry_requested);
-    assert!(!joined.contains("alpha"), "{joined}");
-    assert!(!joined.contains("secret"), "{joined}");
+    assert!(ctx.has_emitted_tool_use);
+    assert!(!ctx.compat_retry_requested);
+    assert!(joined.contains("secret"), "{joined}");
+    assert!(!joined.contains("alpha"), "dropped search leaked: {joined}");
 }
 
 #[tokio::test]

@@ -10,6 +10,7 @@ use crate::history::HistoryRequestStart;
 use crate::observability::RequestId;
 use crate::opencode;
 use crate::state::AppState;
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use axum::response::sse::{KeepAlive, Sse};
@@ -23,8 +24,10 @@ pub async fn handle_messages(
     client: Option<Extension<AuthenticatedClient>>,
     request_id: Option<Extension<RequestId>>,
     headers: HeaderMap,
-    Json(mut payload): Json<MessagesRequest>,
+    payload: Result<Json<MessagesRequest>, JsonRejection>,
 ) -> Result<Response, BridgeError> {
+    let Json(mut payload) = payload
+        .map_err(|error| BridgeError::InvalidRequest(format!("Invalid request body: {error}")))?;
     let _rate_permit = acquire_rate_permit(&state).await?;
     validate_messages_request(&payload)?;
 
@@ -231,9 +234,9 @@ fn validate_messages_request(payload: &MessagesRequest) -> Result<(), BridgeErro
     }
 
     for (message_index, message) in payload.messages.iter().enumerate() {
-        if !matches!(message.role.as_str(), "user" | "assistant") {
+        if !matches!(message.role.as_str(), "user" | "assistant" | "system") {
             return Err(BridgeError::InvalidRequest(format!(
-                "messages[{message_index}].role must be `user` or `assistant`"
+                "messages[{message_index}].role must be `user`, `assistant`, or `system`"
             )));
         }
         let crate::handlers::ContentVal::Multiple(blocks) = &message.content else {
@@ -249,6 +252,11 @@ fn validate_messages_request(payload: &MessagesRequest) -> Result<(), BridgeErro
             if block.content_type.trim().is_empty() {
                 return Err(BridgeError::InvalidRequest(format!(
                     "{location}.type must not be empty"
+                )));
+            }
+            if message.role == "system" && block.content_type != "text" {
+                return Err(BridgeError::InvalidRequest(format!(
+                    "{location} must be a text block in a system message"
                 )));
             }
             match block.content_type.as_str() {
@@ -607,6 +615,39 @@ mod request_validation_tests {
             .unwrap_err()
             .to_string()
             .contains("user message"));
+    }
+
+    #[test]
+    fn accepts_claude_code_system_message_with_text_only() {
+        let mut request = base_request();
+        request.messages.push(Message {
+            role: "system".to_string(),
+            content: ContentVal::Multiple(vec![MessageContent {
+                content_type: "text".to_string(),
+                text: Some("SessionStart hook additional context".to_string()),
+                ..Default::default()
+            }]),
+        });
+        assert!(validate_messages_request(&request).is_ok());
+    }
+
+    #[test]
+    fn rejects_non_text_blocks_in_system_messages() {
+        let mut request = base_request();
+        request.messages.push(Message {
+            role: "system".to_string(),
+            content: ContentVal::Multiple(vec![MessageContent {
+                content_type: "tool_use".to_string(),
+                id: Some("call-1".to_string()),
+                name: Some("Read".to_string()),
+                input: Some(serde_json::json!({})),
+                ..Default::default()
+            }]),
+        });
+        assert!(validate_messages_request(&request)
+            .unwrap_err()
+            .to_string()
+            .contains("text block in a system message"));
     }
 
     #[test]

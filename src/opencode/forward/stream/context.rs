@@ -23,7 +23,7 @@ const MAX_COMPAT_TOOL_BUFFER_SIZE: usize = 64 * 1024;
 // Claude Code's interactive renderer keeps an open thinking block collapsed
 // until content_block_stop. Segment long reasoning into bounded blocks so the
 // user sees completed reasoning portions while the model is still working.
-const THINKING_RENDER_CHUNK_BYTES: usize = 384;
+const THINKING_RENDER_CHUNK_BYTES: usize = 16384;
 const DSML_OPEN_TAG: &str = "<｜DSML｜tool_calls>";
 const DSML_CLOSE_TAG: &str = "</｜DSML｜tool_calls>";
 
@@ -54,6 +54,7 @@ pub(super) async fn finalize_stream(
     }
 
     // Flush any remaining buffers
+    let had_pending_tool_calls = !ctx.pending_tool_calls.is_empty();
     ctx.flush_remaining(tracker, tx, builder, &Default::default())
         .await;
 
@@ -67,6 +68,26 @@ pub(super) async fn finalize_stream(
     if !tracker.has_any_blocks_ever_opened() {
         let error_msg = format!(
             "Upstream response did not contain content blocks (reason: {})",
+            reason
+        );
+        let error_ev = Event::default()
+            .event("error")
+            .json_data(serde_json::json!({
+                "type": "error",
+                "error": {
+                    "type": "api_error",
+                    "message": error_msg
+                }
+            }))
+            .unwrap_or_else(|_| Event::default().data("{}"));
+        let _ = send_sse(tx, error_ev).await;
+    } else if had_pending_tool_calls && !ctx.has_emitted_tool_use {
+        // A tool call was still streaming when the stream failed. It cannot be
+        // finalized (never executed) and emitting it partially would let the
+        // client run a broken tool. Close with an error event instead of a
+        // clean end_turn that would hide the loss.
+        let error_msg = format!(
+            "Upstream stream ended before a pending tool call completed (reason: {})",
             reason
         );
         let error_ev = Event::default()
@@ -106,7 +127,6 @@ pub(super) async fn finalize_stream_with_text(
     for (_, idx) in tracker.close_all() {
         let _ = send_sse(tx, crate::sse::emit_block_stop(idx)).await;
     }
-    tracker.reset();
     let (text_idx, _, _) = tracker.ensure_text();
     let _ = send_sse(
         tx,
@@ -527,16 +547,29 @@ impl StreamContext {
             resolved.push((correct_name, arguments));
         }
 
-        let contains_search = resolved.iter().any(|(name, _)| is_bridge_search_tool(name));
-        if contains_search && resolved.len() > 1 {
-            warn!(
-                calls = resolved.len(),
-                "Rejecting compatibility batch containing search to avoid silently dropping calls"
-            );
-            if !self.has_emitted_tool_use {
-                self.compat_retry_requested = true;
+        let search_count = resolved
+            .iter()
+            .filter(|(name, _)| is_bridge_search_tool(name))
+            .count();
+        if search_count > 0 && resolved.len() > 1 {
+            if search_count == resolved.len() {
+                // Pure search batch: the emit loop below sets interception on the
+                // first search call and returns; the rest are dropped and the
+                // model re-issues them on later turns.
+                warn!(
+                    calls = resolved.len(),
+                    "Collapsing compatibility batch of search calls; intercepting the first"
+                );
+            } else {
+                // Mixed batch: drop search calls and emit the rest so the client
+                // is never left waiting for a search result that is intercepted.
+                warn!(
+                    calls = resolved.len(),
+                    searches = search_count,
+                    "Dropping search calls from mixed compatibility batch; emitting non-search calls"
+                );
+                resolved.retain(|(name, _)| !is_bridge_search_tool(name));
             }
-            return;
         }
 
         for (correct_name, arguments) in resolved {
@@ -914,15 +947,26 @@ impl StreamContext {
             .filter(|(_, _, name, _)| is_bridge_search_tool(name))
             .count();
         if search_count > 0 && resolved.len() > 1 {
-            warn!(
-                calls = resolved.len(),
-                "Rejecting native tool batch containing search to avoid silently dropping calls"
-            );
-            if !self.has_emitted_tool_use {
-                self.compat_retry_requested = true;
-                self.final_stop_reason = "end_turn".to_string();
+            if search_count == resolved.len() {
+                // Pure search batch: the interception branch below handles the
+                // first call; the rest never enter conversation history, so the
+                // model re-issues them one at a time on later turns.
+                warn!(
+                    calls = resolved.len(),
+                    "Collapsing native batch of search calls; intercepting the first"
+                );
+            } else {
+                // Mixed batch: emit non-search calls normally and drop the search
+                // calls instead of rejecting the whole batch. The client executes
+                // the emitted calls, and the model re-issues the dropped searches
+                // on the next turn as single calls, which are intercepted.
+                warn!(
+                    calls = resolved.len(),
+                    searches = search_count,
+                    "Dropping search calls from mixed native batch; emitting non-search calls"
+                );
+                resolved.retain(|(_, _, name, _)| !is_bridge_search_tool(name));
             }
-            return;
         }
 
         if let Some((source_index, id, name, arguments)) = resolved

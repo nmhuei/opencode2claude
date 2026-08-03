@@ -26,6 +26,7 @@ struct FixtureState {
 enum Fixture {
     Json(Value),
     Sse(Vec<Vec<u8>>),
+    SseReadError(Vec<Vec<u8>>),
     Cancellable(tokio::sync::oneshot::Sender<()>),
     Raw {
         status: StatusCode,
@@ -43,6 +44,7 @@ async fn upstream(State(state): State<FixtureState>, Json(request): Json<Value>)
             .body(Body::from(serde_json::to_vec(&value).unwrap()))
             .unwrap(),
         Fixture::Sse(chunks) => stream_response(StatusCode::OK, "text/event-stream", chunks),
+        Fixture::SseReadError(chunks) => stream_error_response(chunks),
         Fixture::Cancellable(sender) => cancellable_response(sender),
         Fixture::Raw {
             status,
@@ -50,6 +52,30 @@ async fn upstream(State(state): State<FixtureState>, Json(request): Json<Value>)
             chunks,
         } => stream_response(status, content_type, chunks),
     }
+}
+
+fn stream_error_response(chunks: Vec<Vec<u8>>) -> Response<Body> {
+    let visible = stream::iter(
+        chunks
+            .into_iter()
+            .map(|chunk| Ok::<Bytes, std::io::Error>(Bytes::from(chunk))),
+    );
+    let reset = stream::once(async {
+        // Force an async boundary so Hyper cannot collapse the preceding data
+        // chunk and terminal read error into a single failed poll. Tests that
+        // distinguish pre-content from post-content failures require the
+        // visible chunk to be observably delivered first.
+        tokio::task::yield_now().await;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "fixture upstream body reset",
+        ))
+    });
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .body(Body::from_stream(visible.chain(reset)))
+        .unwrap()
 }
 
 fn stream_response(status: StatusCode, content_type: &str, chunks: Vec<Vec<u8>>) -> Response<Body> {
@@ -372,6 +398,164 @@ async fn malformed_lines_and_duplicate_done_do_not_break_finalization() {
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("valid"));
     assert_eq!(body.matches("event: message_stop").count(), 1);
+}
+
+#[tokio::test]
+async fn pre_content_stream_read_error_retries_without_duplicate_lifecycle() {
+    let success = vec![
+        br#"data: {"choices":[{"delta":{"content":"RECOVERED"},"finish_reason":"stop"}]}
+
+"#
+        .to_vec(),
+        b"data: [DONE]
+
+"
+        .to_vec(),
+    ];
+    let (app, state) = harness(vec![Fixture::SseReadError(vec![]), Fixture::Sse(success)]).await;
+    let (status, body) = call(app, anthropic_request(true)).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("RECOVERED"), "{body}");
+    assert!(!body.contains("event: error"), "{body}");
+    assert_eq!(body.matches("event: message_start").count(), 1, "{body}");
+    assert_eq!(body.matches("event: message_stop").count(), 1, "{body}");
+    assert_eq!(state.requests.lock().await.len(), 2);
+}
+
+#[tokio::test]
+async fn post_content_stream_read_error_is_not_replayed() {
+    let partial = vec![
+        br#"data: {"choices":[{"delta":{"content":"VISIBLE_ONCE"},"finish_reason":null}]}
+
+"#
+        .to_vec(),
+    ];
+    let unused_success = vec![
+        br#"data: {"choices":[{"delta":{"content":"MUST_NOT_REPLAY"},"finish_reason":"stop"}]}
+
+"#
+        .to_vec(),
+        b"data: [DONE]
+
+"
+        .to_vec(),
+    ];
+    let (app, state) = harness(vec![
+        Fixture::SseReadError(partial),
+        Fixture::Sse(unused_success),
+    ])
+    .await;
+    let (status, body) = call(app, anthropic_request(true)).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("VISIBLE_ONCE"), "{body}");
+    assert!(!body.contains("MUST_NOT_REPLAY"), "{body}");
+    assert_eq!(body.matches("VISIBLE_ONCE").count(), 1, "{body}");
+    assert_eq!(body.matches("event: message_start").count(), 1, "{body}");
+    assert_eq!(body.matches("event: message_stop").count(), 1, "{body}");
+    assert_eq!(state.requests.lock().await.len(), 1);
+}
+
+#[tokio::test]
+async fn compat_retry_after_visible_text_does_not_merge_second_response() {
+    let broken = vec![
+        br#"data: {"choices":[{"delta":{"content":"VISIBLE_BEFORE_BROKEN_MARKER "},"finish_reason":null}]}
+
+"#
+        .to_vec(),
+        br#"data: {"choices":[{"delta":{"content":"[Requesting Read with arguments: {\"file_path\": \"x\"},"},"finish_reason":null}]}
+
+"#
+        .to_vec(),
+        b"data: [DONE]
+
+"
+        .to_vec(),
+    ];
+    let success = vec![
+        br#"data: {"choices":[{"delta":{"content":"SECOND_RESPONSE_TEXT"},"finish_reason":"stop"}]}
+
+"#
+        .to_vec(),
+        b"data: [DONE]
+
+"
+        .to_vec(),
+    ];
+    let (app, state) = harness(vec![Fixture::Sse(broken), Fixture::Sse(success)]).await;
+    let (status, body) = call(app, anthropic_request(true)).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("VISIBLE_BEFORE_BROKEN_MARKER"), "{body}");
+    assert_eq!(
+        body.matches("VISIBLE_BEFORE_BROKEN_MARKER").count(),
+        1,
+        "{body}"
+    );
+    assert!(!body.contains("SECOND_RESPONSE_TEXT"), "{body}");
+    assert_eq!(body.matches("event: message_start").count(), 1, "{body}");
+    assert_eq!(body.matches("event: message_stop").count(), 1, "{body}");
+    assert_eq!(state.requests.lock().await.len(), 1, "{body}");
+}
+
+#[tokio::test]
+async fn upstream_non_2xx_emits_single_error_after_message_start() {
+    let fixture = Fixture::Raw {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        content_type: "application/json",
+        chunks: vec![br#"{"error":"boom"}"#.to_vec()],
+    };
+    let (app, _state) = harness(vec![fixture]).await;
+    let (status, body) = call(app, anthropic_request(true)).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let start_pos = body
+        .find("event: message_start")
+        .expect("message_start must be present");
+    let first_error_pos = body.find("event: error").expect("error must be present");
+    assert!(
+        start_pos < first_error_pos,
+        "message_start must precede the error event: {body}"
+    );
+    assert_eq!(body.matches("event: error").count(), 1, "{body}");
+    assert_eq!(body.matches("event: message_stop").count(), 1, "{body}");
+}
+
+#[tokio::test]
+async fn malformed_anthropic_body_returns_anthropic_error_shape() {
+    let (app, _state) = harness(vec![]).await;
+    let (status, body) = call(app, json!({"messages": "oops"})).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body.contains("\"type\":\"error\""), "{body}");
+    assert!(body.contains("\"error\""), "{body}");
+    assert!(body.contains("\"message\""), "{body}");
+}
+
+#[tokio::test]
+async fn post_content_failure_with_pending_tool_call_emits_error_not_clean_end_turn() {
+    let partial = vec![
+        br#"data: {"choices":[{"delta":{"content":"VISIBLE_PARTIAL "},"finish_reason":null}]}
+
+"#
+        .to_vec(),
+        br#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"Read","arguments":"{\"file_path\":\"re"}}]},"finish_reason":null}]}
+
+"#
+        .to_vec(),
+    ];
+    let (app, _state) = harness(vec![Fixture::SseReadError(partial)]).await;
+    let (status, body) = call(app, anthropic_request(true)).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("VISIBLE_PARTIAL"), "{body}");
+    // The client must be told the message is incomplete rather than receiving a
+    // clean end_turn that implies the tool call was not executed when it was
+    // never completed. The dropped tool call must never be emitted partially.
+    assert!(body.contains("event: error"), "{body}");
+    assert!(!body.contains("\"name\":\"Read\""), "{body}");
+    assert_eq!(body.matches("event: message_stop").count(), 1, "{body}");
 }
 
 #[tokio::test]

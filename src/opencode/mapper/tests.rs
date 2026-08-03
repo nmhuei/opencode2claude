@@ -131,6 +131,55 @@ fn test_map_anthropic_to_openai_plain() {
 }
 
 #[test]
+fn folds_claude_code_2_1_220_system_message_into_system_prompt() {
+    let payload = MessagesRequest {
+        model: Some("opencode/deepseek-v4-flash-free".to_string()),
+        system: Some(serde_json::json!([
+            {"type":"text","text":"base system prompt"}
+        ])),
+        messages: vec![
+            Message {
+                role: "user".to_string(),
+                content: ContentVal::Multiple(vec![MessageContent {
+                    content_type: "text".to_string(),
+                    text: Some("hello".to_string()),
+                    ..Default::default()
+                }]),
+            },
+            Message {
+                role: "system".to_string(),
+                content: ContentVal::Multiple(vec![MessageContent {
+                    content_type: "text".to_string(),
+                    text: Some(
+                        "SessionStart hook additional context: use the required skill".to_string(),
+                    ),
+                    ..Default::default()
+                }]),
+            },
+        ],
+        stream: true,
+        max_tokens: Some(1024),
+        ..Default::default()
+    };
+
+    let result = map_anthropic_to_openai(&payload, "opencode/deepseek-v4-flash-free".to_string());
+
+    assert_eq!(result.messages.len(), 2);
+    assert_eq!(result.messages[0].role, "system");
+    assert_eq!(
+        result.messages[0].content.as_deref(),
+        Some("base system prompt\n\nSessionStart hook additional context: use the required skill")
+    );
+    assert_eq!(result.messages[1].role, "user");
+    assert_eq!(result.messages[1].content.as_deref(), Some("hello"));
+    assert!(result
+        .messages
+        .iter()
+        .skip(1)
+        .all(|message| message.role != "system"));
+}
+
+#[test]
 fn test_map_anthropic_to_openai_tools_and_results() {
     let payload = MessagesRequest {
         model: None,
@@ -217,6 +266,87 @@ fn test_map_anthropic_to_openai_tools_and_results() {
         result.tool_choice,
         Some(serde_json::Value::String("required".to_string()))
     );
+}
+
+#[test]
+fn fanout_heuristic_does_not_trigger_on_negation() {
+    let payload = MessagesRequest {
+        model: None,
+        messages: vec![Message {
+            role: "user".to_string(),
+            content: ContentVal::Single(
+                "Do not fan out subagents, just answer directly.".to_string(),
+            ),
+        }],
+        system: None,
+        tools: Some(vec![AnthropicTool {
+            name: "Agent".to_string(),
+            description: "spawn an agent".to_string(),
+            input_schema: serde_json::json!({ "type": "object" }),
+            ..Default::default()
+        }]),
+        tool_choice: None,
+        stream: true,
+        temperature: None,
+        max_tokens: None,
+        ..Default::default()
+    };
+
+    let result = map_anthropic_to_openai(&payload, "deepseek-chat".to_string());
+    let system_text = result
+        .messages
+        .iter()
+        .find(|m| m.role == "system")
+        .and_then(|m| m.content.as_deref())
+        .unwrap_or("");
+    assert!(
+        !system_text.contains("fan-out of subagents"),
+        "negated request must not inject the fan-out mandate: {system_text}"
+    );
+}
+
+#[test]
+fn user_image_block_is_not_silently_dropped() {
+    let payload = MessagesRequest {
+        model: None,
+        messages: vec![Message {
+            role: "user".to_string(),
+            content: ContentVal::Multiple(vec![
+                MessageContent {
+                    content_type: "image".to_string(),
+                    source: Some(serde_json::json!({
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": "abc123"
+                    })),
+                    ..Default::default()
+                },
+                MessageContent {
+                    content_type: "text".to_string(),
+                    text: Some("what is this?".to_string()),
+                    ..Default::default()
+                },
+            ]),
+        }],
+        system: None,
+        tools: None,
+        tool_choice: None,
+        stream: false,
+        temperature: None,
+        max_tokens: None,
+        ..Default::default()
+    };
+
+    let result = map_anthropic_to_openai(&payload, "deepseek-chat".to_string());
+    assert_eq!(result.messages.len(), 1);
+    assert_eq!(result.messages[0].role, "user");
+    let text = result.messages[0].content.as_deref().unwrap();
+    assert!(text.contains("what is this?"), "{text}");
+    // The base64 payload must never be dumped into the prompt text.
+    assert!(!text.contains("abc123"), "{text}");
+    // The model must learn that the user attached an image instead of the
+    // block silently vanishing from the conversation.
+    assert!(text.contains("image"), "{text}");
 }
 
 #[test]
@@ -537,7 +667,87 @@ fn preserves_claude_thinking_history_as_reasoning_content() {
 }
 
 #[test]
-fn maps_claude_structured_output_for_deepseek_json_mode() {
+fn preserves_claude_thinking_history_for_dflash_free() {
+    let payload: MessagesRequest = serde_json::from_value(serde_json::json!({
+        "messages": [{
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "historical reasoning", "signature": "sig"},
+                {"type": "text", "text": "calling tool"},
+                {"type": "tool_use", "id": "call_1", "name": "Read", "input": {"path": "a"}}
+            ]
+        }],
+        "thinking": {"type": "enabled", "budget_tokens": 64000}
+    }))
+    .unwrap();
+
+    let mapped = map_anthropic_to_openai(&payload, "opencode/deepseek-v4-flash-free".to_string());
+    assert_eq!(
+        mapped.messages[0].reasoning_content.as_deref(),
+        Some("historical reasoning")
+    );
+    assert_eq!(mapped.messages[0].content.as_deref(), Some("calling tool"));
+    assert_eq!(
+        mapped.messages[0].tool_calls.as_ref().map(Vec::len),
+        Some(1)
+    );
+}
+
+#[test]
+fn fills_missing_tool_reasoning_for_dflash_sync() {
+    let payload: MessagesRequest = serde_json::from_value(serde_json::json!({
+        "messages": [{
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use",
+                "id": "call_1",
+                "name": "Read",
+                "input": {"path": "a"}
+            }]
+        }],
+        "stream": false,
+        "thinking": {"type": "enabled", "budget_tokens": 64000}
+    }))
+    .unwrap();
+
+    let mapped = map_anthropic_to_openai(&payload, "opencode/deepseek-v4-flash-free".to_string());
+    assert_eq!(
+        mapped.messages[0].reasoning_content.as_deref(),
+        Some("Tool call continuation.")
+    );
+}
+
+#[test]
+fn fills_missing_tool_reasoning_for_dflash_stream() {
+    let payload: MessagesRequest = serde_json::from_value(serde_json::json!({
+        "messages": [{
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use",
+                "id": "call_stream_1",
+                "name": "Bash",
+                "input": {"command": "true"}
+            }]
+        }],
+        "stream": true,
+        "thinking": {"type": "enabled", "budget_tokens": 64000}
+    }))
+    .unwrap();
+
+    let mapped = map_anthropic_to_openai(&payload, "opencode/deepseek-v4-flash-free".to_string());
+    let assistant = mapped
+        .messages
+        .iter()
+        .find(|message| message.role == "assistant")
+        .expect("assistant history message");
+    assert_eq!(
+        assistant.reasoning_content.as_deref(),
+        Some("Tool call continuation.")
+    );
+}
+
+#[test]
+fn omits_claude_structured_output_for_dflash_free() {
     let payload: MessagesRequest = serde_json::from_value(serde_json::json!({
         "messages": [{"role": "user", "content": "return json"}],
         "thinking": {"type": "disabled"},
@@ -556,10 +766,7 @@ fn maps_claude_structured_output_for_deepseek_json_mode() {
     .unwrap();
 
     let mapped = map_anthropic_to_openai(&payload, "opencode/deepseek-v4-flash-free".to_string());
-    assert_eq!(
-        mapped.response_format,
-        Some(serde_json::json!({"type": "json_object"}))
-    );
+    assert!(mapped.response_format.is_none());
     assert_eq!(
         mapped
             .thinking
@@ -687,4 +894,46 @@ fn fanout_requirement_stops_after_two_agent_calls() {
     let mapped = map_anthropic_to_openai(&payload, "opencode/deepseek-v4-flash-free".into());
     let system = mapped.messages[0].content.as_deref().unwrap_or_default();
     assert_eq!(system, "base system");
+}
+
+#[test]
+fn parallel_tool_calls_false_is_serialized_when_tools_present() {
+    let payload = MessagesRequest {
+        model: Some("claude-sonnet-4-6".to_string()),
+        messages: vec![Message {
+            role: "user".to_string(),
+            content: ContentVal::Single("hi".to_string()),
+        }],
+        system: None,
+        tools: Some(vec![AnthropicTool {
+            name: "WebSearch".to_string(),
+            description: "search".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+            ..Default::default()
+        }]),
+        tool_choice: None,
+        stream: true,
+        temperature: None,
+        max_tokens: Some(100),
+        ..Default::default()
+    };
+
+    let mapped = map_anthropic_to_openai(&payload, "claude-sonnet-4-6".to_string());
+    let serialized = serde_json::to_string(&mapped).unwrap();
+    assert!(
+        serialized.contains("\"parallel_tool_calls\":false"),
+        "expected parallel_tool_calls=false in {serialized}"
+    );
+    let mapped_no_tools = map_anthropic_to_openai(
+        &MessagesRequest {
+            tools: None,
+            ..payload
+        },
+        "claude-sonnet-4-6".to_string(),
+    );
+    let serialized_no_tools = serde_json::to_string(&mapped_no_tools).unwrap();
+    assert!(
+        !serialized_no_tools.contains("parallel_tool_calls"),
+        "parallel_tool_calls should be omitted without tools: {serialized_no_tools}"
+    );
 }

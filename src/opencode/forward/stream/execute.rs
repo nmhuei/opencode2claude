@@ -28,6 +28,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::{error, info, trace};
 
 const MAX_COMPAT_TOOL_RETRIES: u32 = 2;
+const MAX_STREAM_READ_RETRIES: u32 = 2;
 
 /// Remove one complete logical SSE line without copying the unread tail.
 ///
@@ -48,6 +49,32 @@ fn take_next_sse_line(
         None if buffer.len() > max_line_bytes => Err(buffer.len()),
         None => Ok(None),
     }
+}
+
+/// Close a failed turn with one complete error lifecycle: message_start (unless
+/// a previous search-loop iteration already started it), a single error event,
+/// then message_stop.
+async fn finalize_transport_error(
+    message: &str,
+    tx: &tokio::sync::mpsc::Sender<Event>,
+    builder: &SseEventBuilder,
+    message_started: bool,
+) {
+    if !message_started {
+        let _ = send_sse(tx, builder.message_start(0)).await;
+    }
+    let error_ev = Event::default()
+        .event("error")
+        .json_data(serde_json::json!({
+            "type": "error",
+            "error": {
+                "type": "api_error",
+                "message": message
+            }
+        }))
+        .unwrap_or_else(|_| Event::default().data("{}"));
+    let _ = send_sse(tx, error_ev).await;
+    let _ = send_sse(tx, builder.message_stop()).await;
 }
 
 /// Perform a streaming completions request to upstream OpenCode API and stream Anthropic SSE chunks.
@@ -89,6 +116,7 @@ pub async fn forward_to_llm_stream(
             let mut search_cache = HashMap::<String, String>::new();
             let mut synthesis_only = false;
             let mut compat_tool_retries = 0_u32;
+            let mut stream_read_retries = 0_u32;
             let mut message_emitted = false;
             let mut tracker = SseBlockTracker::new();
 
@@ -107,6 +135,7 @@ pub async fn forward_to_llm_stream(
                 if upstream_turns
                     > max_search_loops
                         .saturating_add(MAX_COMPAT_TOOL_RETRIES)
+                        .saturating_add(MAX_STREAM_READ_RETRIES)
                         .saturating_add(3)
                 {
                     error!(
@@ -162,26 +191,18 @@ pub async fn forward_to_llm_stream(
                             Some(&e.to_string()),
                         );
                         capture.fail(None, "forward_error", &e.to_string());
-                        // Send error SSE event so Claude Code gets a clear message
-                        let error_ev = Event::default()
-                            .event("error")
-                            .json_data(serde_json::json!({
-                                "type": "error",
-                                "error": {
-                                    "type": "api_error",
-                                    "message": format!("Bridge upstream error: {}", e)
-                                }
-                            }))
-                            .unwrap_or_else(|_| Event::default().data("{}"));
-                        let _ = send_sse(&tx, error_ev).await;
-                        // Finalize to ensure SSE protocol completes
-                        let mut tmp_tracker = SseBlockTracker::new();
-                        let mut tmp_ctx = StreamContext::new(is_compact);
-                        // Use message_emitted from outer scope so we don't emit
-                        // a duplicate message_start if this is a search loop iteration
-                        tmp_ctx.message_started = message_emitted;
-                        finalize_stream("api_error", &tx, &builder, &mut tmp_tracker, &mut tmp_ctx)
-                            .await;
+                        // Emit one complete error turn: message_start (unless a
+                        // previous search-loop iteration already started one),
+                        // a single error event, then message_stop. Sending the
+                        // error before message_start, or letting finalize_stream
+                        // re-emit a second error, violates the SSE ordering.
+                        finalize_transport_error(
+                            &format!("Bridge upstream error: {}", e),
+                            &tx,
+                            &builder,
+                            message_emitted,
+                        )
+                        .await;
                         break;
                     }
                 };
@@ -207,33 +228,18 @@ pub async fn forward_to_llm_stream(
                         status,
                         body.chars().take(300).collect::<String>()
                     );
-                    // Send error SSE event with status only (no body leak to client)
-                    let error_ev = Event::default()
-                        .event("error")
-                        .json_data(serde_json::json!({
-                            "type": "error",
-                            "error": {
-                                "type": "api_error",
-                                "message": format!("Upstream returned {}", status)
-                            }
-                        }))
-                        .unwrap_or_else(|_| Event::default().data("{}"));
-                    let _ = send_sse(&tx, error_ev).await;
-                    // Finalize to ensure SSE protocol completes (message_stop after error)
-                    let mut tmp_tracker = SseBlockTracker::new();
-                    let mut tmp_ctx = StreamContext::new(is_compact);
-                    tmp_ctx.message_started = message_emitted;
-                    finalize_stream(
-                        "upstream_non_2xx",
+                    // Error event carries the status only (no body leak to client).
+                    finalize_transport_error(
+                        &format!("Upstream returned {}", status),
                         &tx,
                         &builder,
-                        &mut tmp_tracker,
-                        &mut tmp_ctx,
+                        message_emitted,
                     )
                     .await;
                     break;
                 }
 
+                let response_proxy_index = res.proxy_index();
                 let mut bytes_stream = res.bytes_stream();
                 let max_sse_line_bytes = state_clone.config.protocol.max_sse_line_bytes;
                 let mut line_buffer = BytesMut::with_capacity(
@@ -275,6 +281,9 @@ pub async fn forward_to_llm_stream(
                         Ok(c) => c,
                         Err(e) => {
                             error!("Error reading chunk from upstream: {}", e);
+                            if let Some(index) = response_proxy_index {
+                                state_clone.proxy_pool.write().await.record_failure(index);
+                            }
                             ctx.stream_failed = true;
                             break;
                         }
@@ -371,7 +380,6 @@ pub async fn forward_to_llm_stream(
                 }
 
                 if ctx.stream_failed {
-                    error!("Stream failed — finalizing stream");
                     capture.append_reasoning(&ctx.accumulated_thinking);
                     capture.append_response(&ctx.accumulated_text);
                     capture.attempt_finished(
@@ -381,6 +389,26 @@ pub async fn forward_to_llm_stream(
                         Some("upstream_read_error"),
                         Some("upstream stream ended with a read error"),
                     );
+
+                    // Retrying after any content block was emitted can duplicate
+                    // visible text or execute a tool twice. Before the first
+                    // content block, however, only message_start reached the
+                    // client, so the same request can be replayed safely while
+                    // preserving one Anthropic message lifecycle.
+                    if !tracker.has_any_blocks_ever_opened()
+                        && stream_read_retries < MAX_STREAM_READ_RETRIES
+                    {
+                        stream_read_retries = stream_read_retries.saturating_add(1);
+                        info!(
+                            retry = stream_read_retries,
+                            max_retries = MAX_STREAM_READ_RETRIES,
+                            "retrying upstream stream after pre-content read failure"
+                        );
+                        tracker.reset();
+                        continue;
+                    }
+
+                    error!("Stream failed after visible output or retry exhaustion — finalizing stream");
                     capture.fail(
                         None,
                         "upstream_read_error",
@@ -390,6 +418,8 @@ pub async fn forward_to_llm_stream(
                         .await;
                     break;
                 }
+
+                stream_read_retries = 0;
 
                 // Finalize retained text/DSML/compat/native tool buffers before
                 // deciding whether this turn is a search interception, retry,
@@ -505,12 +535,21 @@ pub async fn forward_to_llm_stream(
                     for (_, idx) in tracker.close_all() {
                         let _ = send_sse(&tx, crate::sse::emit_block_stop(idx)).await;
                     }
-                    tracker.reset();
+                    // Intentionally no reset(): block indices must stay monotonic
+                    // within one Anthropic message across search loop iterations,
+                    // or the client overwrites earlier blocks by reused index.
                     continue;
                 }
 
                 if ctx.compat_retry_requested {
-                    if compat_tool_retries < MAX_COMPAT_TOOL_RETRIES {
+                    // Retrying after any content block was emitted would append
+                    // the retried stream's text to blocks the client already
+                    // received, merging two upstream responses into one message
+                    // (visible duplicate content). Only replay when nothing
+                    // content-visible reached the client.
+                    if !tracker.has_any_blocks_ever_opened()
+                        && compat_tool_retries < MAX_COMPAT_TOOL_RETRIES
+                    {
                         compat_tool_retries = compat_tool_retries.saturating_add(1);
                         info!(
                             retry = compat_tool_retries,
@@ -528,7 +567,8 @@ pub async fn forward_to_llm_stream(
                         for (_, idx) in tracker.close_all() {
                             let _ = send_sse(&tx, crate::sse::emit_block_stop(idx)).await;
                         }
-                        tracker.reset();
+                        // No reset(): keep block indices monotonic within the
+                        // message across the retried upstream stream.
                         continue;
                     }
 

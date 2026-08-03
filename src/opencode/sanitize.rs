@@ -136,13 +136,27 @@ fn extract_attribute(tag_content: &str, attr_name: &str) -> String {
 }
 
 pub fn parse_dsml_tool_calls(text: &str) -> Vec<ParsedDsmlCall> {
+    parse_dsml_tool_calls_checked(text).0
+}
+
+/// Parse DSML invocations and report whether the block was structurally broken.
+///
+/// The second element is true when the scan hit a missing close tag (truncated
+/// block) or a completed invocation carried no name. Structural integrity is
+/// derived from the scan itself, not from counting raw tag occurrences, so a
+/// parameter value that literally quotes the DSML grammar (e.g. contains a
+/// literal `</｜DSML｜parameter>`) does not falsely mark the block malformed.
+fn parse_dsml_tool_calls_checked(text: &str) -> (Vec<ParsedDsmlCall>, bool) {
     let mut calls = Vec::new();
     let mut search_pos = 0;
+    let mut truncated = false;
+    let mut invokes_processed = 0usize;
 
     while let Some(invoke_start) = text[search_pos..].find("<｜DSML｜invoke") {
         let absolute_invoke_start = search_pos + invoke_start;
         let remaining = &text[absolute_invoke_start..];
         let Some(tag_open_end) = remaining.find('>') else {
+            truncated = true;
             break;
         };
         let tag_open_content = &remaining[..tag_open_end];
@@ -150,6 +164,7 @@ pub fn parse_dsml_tool_calls(text: &str) -> Vec<ParsedDsmlCall> {
         let name = extract_attribute(tag_open_content, "name");
 
         let Some(invoke_end) = remaining.find("</｜DSML｜invoke>") else {
+            truncated = true;
             break;
         };
         let invoke_body = &remaining[tag_open_end + 1..invoke_end];
@@ -160,6 +175,7 @@ pub fn parse_dsml_tool_calls(text: &str) -> Vec<ParsedDsmlCall> {
             let abs_p_start = p_pos + p_start;
             let p_rem = &invoke_body[abs_p_start..];
             let Some(p_open_end) = p_rem.find('>') else {
+                truncated = true;
                 break;
             };
             let p_open_content = &p_rem[..p_open_end];
@@ -167,6 +183,7 @@ pub fn parse_dsml_tool_calls(text: &str) -> Vec<ParsedDsmlCall> {
             let p_name = extract_attribute(p_open_content, "name");
 
             let Some(p_close) = p_rem.find("</｜DSML｜parameter>") else {
+                truncated = true;
                 break;
             };
             let p_val_str = p_rem[p_open_end + 1..p_close].trim();
@@ -202,6 +219,7 @@ pub fn parse_dsml_tool_calls(text: &str) -> Vec<ParsedDsmlCall> {
             p_pos = abs_p_start + p_close + "</｜DSML｜parameter>".len();
         }
 
+        invokes_processed += 1;
         if !name.is_empty() {
             calls.push(ParsedDsmlCall {
                 name,
@@ -212,19 +230,12 @@ pub fn parse_dsml_tool_calls(text: &str) -> Vec<ParsedDsmlCall> {
         search_pos = absolute_invoke_start + invoke_end + "</｜DSML｜invoke>".len();
     }
 
-    calls
+    let structurally_broken = truncated || invokes_processed != calls.len();
+    (calls, structurally_broken)
 }
 
 pub fn parse_dsml_tool_calls_detailed(text: &str) -> (Vec<ParsedDsmlCall>, bool) {
-    let calls = parse_dsml_tool_calls(text);
-    let invoke_open = text.matches("<｜DSML｜invoke").count();
-    let invoke_close = text.matches("</｜DSML｜invoke>").count();
-    let parameter_open = text.matches("<｜DSML｜parameter").count();
-    let parameter_close = text.matches("</｜DSML｜parameter>").count();
-    let malformed = invoke_open != invoke_close
-        || parameter_open != parameter_close
-        || calls.len() != invoke_open;
-    (calls, malformed)
+    parse_dsml_tool_calls_checked(text)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -383,6 +394,26 @@ mod dsml_regression_tests {
         assert_eq!(calls[1].arguments["file"], "README.md");
         assert_eq!(calls[1].arguments["replace_all"], "true");
         assert_eq!(calls[1].arguments["edits"][0]["newText"], "b");
+    }
+
+    #[test]
+    fn parameter_value_containing_literal_close_tag_is_not_malformed() {
+        let sample = concat!(
+            "<｜DSML｜tool_calls>",
+            "<｜DSML｜invoke name=\"Write\">",
+            "<｜DSML｜parameter name=\"content\">",
+            "write this literal text: </｜DSML｜parameter> is not a real close",
+            "</｜DSML｜parameter>",
+            "</｜DSML｜invoke>",
+            "</｜DSML｜tool_calls>"
+        );
+        let (calls, malformed) = parse_dsml_tool_calls_detailed(sample);
+        assert!(
+            !malformed,
+            "quoted grammar inside a parameter value must not mark the block malformed"
+        );
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "Write");
     }
 
     #[test]

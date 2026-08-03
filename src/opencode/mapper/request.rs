@@ -2,9 +2,9 @@
 
 use super::helpers::{extract_system_prompt, map_model_name, tool_result_content_to_string};
 use super::policy::{
-    include_reasoning_for_stream, is_compact_request, is_deepseek_v4_model,
-    normalize_reasoning_effort, normalize_response_format, normalize_upstream_max_tokens,
-    normalize_upstream_thinking,
+    include_reasoning_for_stream, is_compact_request, is_deepseek_v4_flash_free_model,
+    is_deepseek_v4_model, normalize_reasoning_effort, normalize_response_format,
+    normalize_upstream_max_tokens, normalize_upstream_thinking,
 };
 use crate::handlers::{ContentVal, MessagesRequest};
 use crate::opencode::types::*;
@@ -29,6 +29,10 @@ pub fn map_anthropic_to_openai_with_policy(
     minimum_reasoning_stream_tokens: u32,
 ) -> OpenAiRequest {
     let mapped_model = map_model_name(&model);
+    // DFLASH thinking requests require every historical assistant tool-call
+    // message to carry non-empty reasoning_content, for both sync and stream.
+    let synthesize_missing_tool_reasoning =
+        is_deepseek_v4_flash_free_model(&mapped_model) && payload.thinking_enabled() == Some(true);
     let needs_reasoning_hygiene = payload.stream
         && mapped_model.ends_with("-free")
         && is_deepseek_v4_model(&mapped_model)
@@ -57,6 +61,19 @@ pub fn map_anthropic_to_openai_with_policy(
         .as_ref()
         .map(extract_system_prompt)
         .unwrap_or_default();
+    for message in &payload.messages {
+        if message.role != "system" {
+            continue;
+        }
+        let hook_context = message_content_text(&message.content);
+        if hook_context.is_empty() {
+            continue;
+        }
+        if !system.is_empty() {
+            system.push_str("\n\n");
+        }
+        system.push_str(&hook_context);
+    }
     if let Some(remaining_agents) = explicit_fanout_agents_remaining(payload) {
         if !system.is_empty() {
             system.push_str("\n\n");
@@ -84,6 +101,9 @@ pub fn map_anthropic_to_openai_with_policy(
 
     // 2. Messages conversation turns
     for msg in &payload.messages {
+        if msg.role == "system" {
+            continue;
+        }
         match &msg.content {
             ContentVal::Single(text) => {
                 openai_messages.push(OpenAiMessage {
@@ -130,7 +150,18 @@ pub fn map_anthropic_to_openai_with_policy(
                                     name,
                                 });
                             }
-                            _ => {}
+                            other => {
+                                // Non-text content (image, document, ...) cannot
+                                // be converted for the upstream provider. Keep a
+                                // compact marker so the model learns the user
+                                // attached something instead of the block
+                                // silently vanishing from the conversation.
+                                if !user_text.is_empty() {
+                                    user_text.push('\n');
+                                }
+                                user_text
+                                    .push_str(&format!("[attached {other} block not forwarded]"));
+                            }
                         }
                     }
                     if !user_text.is_empty() {
@@ -189,10 +220,12 @@ pub fn map_anthropic_to_openai_with_policy(
                         } else {
                             Some(assistant_text)
                         },
-                        reasoning_content: if reasoning_content.is_empty() {
-                            None
-                        } else {
+                        reasoning_content: if !reasoning_content.is_empty() {
                             Some(reasoning_content)
+                        } else if synthesize_missing_tool_reasoning && !tool_calls.is_empty() {
+                            Some("Tool call continuation.".to_string())
+                        } else {
+                            None
                         },
                         tool_calls: if tool_calls.is_empty() {
                             None
@@ -274,11 +307,15 @@ pub fn map_anthropic_to_openai_with_policy(
         normalize_reasoning_effort(payload, &mapped_model, upstream_thinking.as_ref());
     let response_format = normalize_response_format(payload, &mapped_model);
     let deepseek_thinking = is_deepseek_v4_model(&mapped_model) && effective_thinking == Some(true);
+    // Batched tool calls containing bridge-intercepted search tools are rejected
+    // by the stream executor, so force single-call emission when tools are present.
+    let parallel_tool_calls = tools.as_ref().map(|_| false);
 
     OpenAiRequest {
         model: mapped_model,
         messages: openai_messages,
         tools,
+        parallel_tool_calls,
         tool_choice: if deepseek_thinking { None } else { tool_choice },
         stream: payload.stream,
         temperature: if deepseek_thinking {
@@ -297,6 +334,18 @@ pub fn map_anthropic_to_openai_with_policy(
         reasoning_effort,
         response_format,
         include_reasoning,
+    }
+}
+
+fn message_content_text(content: &ContentVal) -> String {
+    match content {
+        ContentVal::Single(text) => text.clone(),
+        ContentVal::Multiple(blocks) => blocks
+            .iter()
+            .filter(|block| block.content_type == "text")
+            .filter_map(|block| block.text.as_deref())
+            .collect::<Vec<_>>()
+            .join("\n"),
     }
 }
 
@@ -347,6 +396,36 @@ fn explicit_fanout_agents_remaining(payload: &MessagesRequest) -> Option<usize> 
     .iter()
     .any(|needle| normalized.contains(needle));
     if !explicit {
+        return None;
+    }
+
+    // A trigger phrase with a negation means the user asked NOT to fan out
+    // ("do not fan out subagents"). Injecting the mandate would override the
+    // user's actual instruction.
+    let negated = [
+        "do not fan",
+        "don't fan",
+        "dont fan",
+        "no fan",
+        "not fan",
+        "without fan",
+        "do not use subagent",
+        "don't use subagent",
+        "dont use subagent",
+        "no subagent",
+        "not use subagent",
+        "không fan",
+        "đừng fan",
+        "không dùng subagent",
+        "đừng dùng subagent",
+        "không subagent",
+        "đừng subagent",
+        "không chia subagent",
+        "đừng chia subagent",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle));
+    if negated {
         return None;
     }
 

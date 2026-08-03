@@ -5,6 +5,7 @@ use crate::config::{EgressMode, DEFAULT_MODEL};
 use crate::error::BridgeError;
 use crate::opencode;
 use crate::state::AppState;
+use axum::extract::rejection::JsonRejection;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -13,8 +14,10 @@ use serde_json::json;
 use std::time::Duration;
 
 pub async fn handle_count_tokens(
-    Json(payload): Json<MessagesRequest>,
+    payload: Result<Json<MessagesRequest>, JsonRejection>,
 ) -> Result<axum::response::Response, BridgeError> {
+    let Json(payload) = payload
+        .map_err(|error| BridgeError::InvalidRequest(format!("Invalid request body: {error}")))?;
     Ok(Json(json!({
         "input_tokens": opencode::estimate_input_tokens(&payload)
     }))

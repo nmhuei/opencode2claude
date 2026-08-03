@@ -25,6 +25,39 @@ use tracing::{error, info, warn};
 
 const MAX_SYNC_COMPAT_TOOL_RETRIES: u32 = 2;
 
+/// How a tool-call batch from one upstream turn must be handled.
+///
+/// Mirrors the stream executor's split: pure-search batches are collapsed to
+/// the first intercepted call, mixed batches emit non-search calls and drop
+/// the search calls (the model re-issues them one at a time on later turns).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncBatchOutcome {
+    Normal,
+    Collapse,
+    DropSearches,
+}
+
+fn classify_sync_tool_batch(
+    unavailable_tool: Option<&str>,
+    malformed_native_arguments: Option<&str>,
+    search_tool_calls: usize,
+    total_tool_calls: usize,
+) -> Result<SyncBatchOutcome, String> {
+    if let Some(name) = unavailable_tool {
+        return Err(format!("unavailable tool `{name}`"));
+    }
+    if let Some(name) = malformed_native_arguments {
+        return Err(format!("malformed native arguments for `{name}`"));
+    }
+    if search_tool_calls > 0 && total_tool_calls > 1 {
+        if search_tool_calls < total_tool_calls {
+            return Ok(SyncBatchOutcome::DropSearches);
+        }
+        return Ok(SyncBatchOutcome::Collapse);
+    }
+    Ok(SyncBatchOutcome::Normal)
+}
+
 struct EncodedToolExtraction {
     cleaned: String,
     dsml_calls: Vec<ParsedDsmlCall>,
@@ -316,19 +349,15 @@ pub async fn forward_to_llm_sync(
         let total_tool_calls = unique_calls.len();
         let search_tool_calls = unique_search_calls.len();
 
-        let protocol_issue = unavailable_tool
-            .map(|name| format!("unavailable tool `{name}`"))
-            .or_else(|| {
-                malformed_native_arguments
-                    .map(|name| format!("malformed native arguments for `{name}`"))
-            })
-            .or_else(|| {
-                (search_tool_calls > 0 && total_tool_calls > 1).then(|| {
-                    "search was batched with another invocation and would be dropped".to_string()
-                })
-            });
+        let batch_outcome = classify_sync_tool_batch(
+            unavailable_tool.as_deref(),
+            malformed_native_arguments.as_deref(),
+            search_tool_calls,
+            total_tool_calls,
+        );
+        let mixed_batch = batch_outcome == Ok(SyncBatchOutcome::DropSearches);
 
-        if let Some(issue) = protocol_issue {
+        if let Err(issue) = batch_outcome {
             if compat_tool_retries < MAX_SYNC_COMPAT_TOOL_RETRIES {
                 compat_tool_retries = compat_tool_retries.saturating_add(1);
                 capture.attempt_finished(
@@ -414,7 +443,11 @@ pub async fn forward_to_llm_sync(
             }
         }
 
-        if has_search {
+        // Pure-search batches and single searches are intercepted here. A mixed
+        // batch falls through to standard formatting so non-search calls are
+        // emitted to the client; the search calls are dropped and re-issued by
+        // the model on the next turn.
+        if has_search && !mixed_batch {
             let (search_query, used_fallback) = resolve_search_query(&search_args_raw, &payload);
             let normalized_query = normalize_search_query(&search_query);
             let cached = search_cache.get(&normalized_query).cloned();
@@ -532,6 +565,10 @@ pub async fn forward_to_llm_sync(
                     warn!(tool = %tc.function.name, "Ignoring native call for unavailable tool");
                     continue;
                 };
+                if mixed_batch && is_bridge_search_tool(&correct_name) {
+                    warn!(tool = %correct_name, "Dropping search call from mixed sync batch; emitting non-search calls");
+                    continue;
+                }
                 let parsed = serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
                     .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
                 let input_val = normalize_dsml_arguments(&correct_name, parsed, &payload);
@@ -558,6 +595,10 @@ pub async fn forward_to_llm_sync(
                 warn!(tool = %call.name, "Ignoring DSML call for unavailable tool");
                 continue;
             };
+            if mixed_batch && is_bridge_search_tool(&cased_name) {
+                warn!(tool = %cased_name, "Dropping search call from mixed sync batch; emitting non-search calls");
+                continue;
+            }
             let input = normalize_dsml_arguments(&cased_name, call.arguments, &payload);
             let fingerprint = tool_call_fingerprint(&cased_name, &input);
             if !emitted_tool_fingerprints.insert(fingerprint) {
@@ -589,6 +630,10 @@ pub async fn forward_to_llm_sync(
                 warn!(tool = %name, "Ignoring compatibility marker for unavailable tool");
                 continue;
             };
+            if mixed_batch && is_bridge_search_tool(&cased_name) {
+                warn!(tool = %cased_name, "Dropping search call from mixed sync batch; emitting non-search calls");
+                continue;
+            }
             let parsed = serde_json::from_str::<serde_json::Value>(&arguments)
                 .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
             let input = normalize_dsml_arguments(&cased_name, parsed, &payload);
@@ -698,5 +743,43 @@ pub async fn forward_to_llm_sync(
             "stop_sequence": null,
             "usage": {"input_tokens":0,"output_tokens":1}
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mixed_batch_with_search_and_non_search_is_split_not_rejected() {
+        let outcome = classify_sync_tool_batch(None, None, 1, 2);
+        assert_eq!(outcome, Ok(SyncBatchOutcome::DropSearches));
+    }
+
+    #[test]
+    fn pure_search_batch_is_collapsed_not_rejected() {
+        let outcome = classify_sync_tool_batch(None, None, 2, 2);
+        assert_eq!(outcome, Ok(SyncBatchOutcome::Collapse));
+    }
+
+    #[test]
+    fn single_search_call_is_normal() {
+        let outcome = classify_sync_tool_batch(None, None, 1, 1);
+        assert_eq!(outcome, Ok(SyncBatchOutcome::Normal));
+    }
+
+    #[test]
+    fn unavailable_tool_is_still_rejected() {
+        let outcome = classify_sync_tool_batch(Some("Read"), None, 1, 2);
+        assert_eq!(outcome, Err("unavailable tool `Read`".to_string()));
+    }
+
+    #[test]
+    fn malformed_native_arguments_are_still_rejected() {
+        let outcome = classify_sync_tool_batch(None, Some("Bash"), 1, 2);
+        assert_eq!(
+            outcome,
+            Err("malformed native arguments for `Bash`".to_string())
+        );
     }
 }
