@@ -52,8 +52,23 @@ cargo clippy -- -D warnings
 ./scripts/verify.sh all --profile ci        # All enabled phases
 ```
 
+**Restart rule** — When the running bridge must be restarted, always do it in **one atomic command**: build + install + start in a single `&&`-chained invocation (or the atomic `/tmp/restart_bridge3.sh` script; v1/v2 are stale). Never kill the serving process and start again in separate steps — the production deployment is `~/.local/bin/opencode2api-serve`, and the supervisor spawns `serve` as a sibling of the controller from `current_exe().parent()`, so a restart from any other binary loads stale code, and leaving the bridge down mid-restart drops the active Claude Code connection.
+
 **CI** (`.github/workflows/ci.yml`): fmt → clippy → test → build-release + shellcheck.
 **Release** (`.github/workflows/release.yml`): Linux binary build (amd64/arm64) → GitHub Releases → crates.io publish → ghcr.io Docker image.
+
+**Deployment verification gate (immutable)** — The parse/protocol layer is "basic functionality": fixed once, it must keep working, because a regression in any of it breaks Claude Code immediately. Before deploying or restarting the serving bridge after ANY change that touches the parse/protocol/streaming/mapping layer, first run the mandatory real-CLI verification below — unit tests alone are never sufficient for terminal behavior. The features below were previously fixed (see `REPO_WORKLOG.md`, especially the 2026-07-24 parser audit and the streaming-lifecycle work) and must continue to work:
+
+1. **Streaming lifecycle** (sync + SSE parity): `message_start → content_block_start → content_block_delta → content_block_stop → message_delta(stop_reason) → message_stop`; a terminal `error` event ends the stream with no `message_delta`/`message_stop` after it.
+2. **Tool calls in every native form**: native `tool_calls`, DSML markers, compatibility markers (`[Requesting Name with arguments: …]`, `TaskUpdate`/`ReadReport`…), new batching, and the tool-result continuation loop.
+3. **Fenced/inline-code safety**: markers inside code fences, inline code, JSON strings, or quotes must never execute as tools.
+4. **Resynchronization + no duplicate side effects**: malformed-marker resync and JSON repair; never replay/retry a whole turn after a `tool_use` has already been emitted.
+5. **Thinking modes**: adaptive/fixed/disabled reasoning; reasoning content before visible text; compact/`clear`-style requests still strip leaked tags from readable text.
+6. **Search interception** (web_search/web_fetch tool loop) and **retry behavior**: rate-limit → retry with proxy rotation; mid-stream/upstream error → error event that properly ends the stream.
+7. **`!` shell commands** (unrestricted/allowlist/disabled), sync and streaming.
+8. **Ctrl+C mid-stream**: terminates cleanly with no leftover spinner/spinner, ANSI garbage, or duplicate lines; ≥10 consecutive turns render without terminal dirt.
+
+**Mandatory manual verification sequence (before deploying the parse/protocol changes)**: drive the REAL `claude` CLI in a pseudo-terminal against the bridge (a separate instance on a non-production side pointing at `tests/stub_openai.py` / `stub_upstream.py` is fine; only then restart the deployed bridge via the atomic restart rule). Exercise: two consecutive requests; a tool call that invokes an agent; a streaming tool call; an `!` shell command; Ctrl+C mid-stream; an upstream error (the CLI must recover through its own retry); ≥10 consecutive requests with a clean terminal. Only after this passes may the deployed service be restarted.
 
 ## Project Overview
 

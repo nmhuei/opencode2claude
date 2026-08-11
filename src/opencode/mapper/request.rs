@@ -1,10 +1,12 @@
 //! Construction of the OpenAI-compatible upstream request.
 
-use super::helpers::{extract_system_prompt, map_model_name, tool_result_content_to_string};
+use super::helpers::{
+    extract_system_prompt, is_bridge_search_tool, map_model_name, tool_result_content_to_string,
+};
 use super::policy::{
-    include_reasoning_for_stream, is_compact_request, is_deepseek_v4_flash_free_model,
-    is_deepseek_v4_model, normalize_reasoning_effort, normalize_response_format,
-    normalize_upstream_max_tokens, normalize_upstream_thinking,
+    dropped_schema_system_instruction, include_reasoning_for_stream, is_compact_request,
+    is_deepseek_v4_flash_free_model, is_deepseek_v4_model, normalize_reasoning_effort,
+    normalize_response_format, normalize_upstream_max_tokens, normalize_upstream_thinking,
 };
 use crate::handlers::{ContentVal, MessagesRequest};
 use crate::opencode::types::*;
@@ -87,6 +89,12 @@ pub fn map_anthropic_to_openai_with_policy(
             system.push_str("\n\n");
         }
         system.push_str(DEEPSEEK_FREE_REASONING_HYGIENE);
+    }
+    if let Some(schema_instruction) = dropped_schema_system_instruction(payload, &mapped_model) {
+        if !system.is_empty() {
+            system.push_str("\n\n");
+        }
+        system.push_str(&schema_instruction);
     }
     if !system.is_empty() {
         openai_messages.push(OpenAiMessage {
@@ -307,9 +315,18 @@ pub fn map_anthropic_to_openai_with_policy(
         normalize_reasoning_effort(payload, &mapped_model, upstream_thinking.as_ref());
     let response_format = normalize_response_format(payload, &mapped_model);
     let deepseek_thinking = is_deepseek_v4_model(&mapped_model) && effective_thinking == Some(true);
-    // Batched tool calls containing bridge-intercepted search tools are rejected
-    // by the stream executor, so force single-call emission when tools are present.
-    let parallel_tool_calls = tools.as_ref().map(|_| false);
+    // Only bridge-intercepted search tools need serial single-call emission:
+    // the executor splits mixed batches and collapses pure search batches, so
+    // other tool sets keep the upstream default (parallel), which the fan-out
+    // instruction above relies on for same-turn concurrent Agent calls.
+    let parallel_tool_calls = tools
+        .as_ref()
+        .filter(|tools: &&Vec<OpenAiTool>| {
+            tools
+                .iter()
+                .any(|tool| is_bridge_search_tool(&tool.function.name))
+        })
+        .map(|_| false);
 
     OpenAiRequest {
         model: mapped_model,

@@ -7,7 +7,7 @@ use crate::dashboard::DashboardEvent;
 use crate::docker::{ContainerRuntime, DockerCliRuntime};
 use crate::history::HistoryStore;
 use crate::infrastructure::file_store::{AtomicFileStore, FileStore};
-use crate::infrastructure::warp::{CliWarpController, WarpController};
+use crate::infrastructure::warp::{DisabledWarpController, WarpController};
 use crate::observability::Metrics;
 use crate::opencode::search::SearchClient;
 use crate::proxy_pool::{health_monitor, identity_monitor, process_restart_queue, ProxyPool};
@@ -61,9 +61,7 @@ impl AppState {
     pub fn new(config: BridgeConfig) -> Self {
         let container_runtime: Arc<dyn ContainerRuntime> =
             Arc::new(DockerCliRuntime::from_config(&config));
-        let warp_controller: Arc<dyn WarpController> = Arc::new(CliWarpController::new(
-            config.runtime.warp_cli_binary.clone(),
-        ));
+        let warp_controller: Arc<dyn WarpController> = Arc::new(DisabledWarpController);
         Self::new_with_infrastructure(
             config,
             container_runtime,
@@ -76,9 +74,7 @@ impl AppState {
         config: BridgeConfig,
         container_runtime: Arc<dyn ContainerRuntime>,
     ) -> Self {
-        let warp_controller: Arc<dyn WarpController> = Arc::new(CliWarpController::new(
-            config.runtime.warp_cli_binary.clone(),
-        ));
+        let warp_controller: Arc<dyn WarpController> = Arc::new(DisabledWarpController);
         Self::new_with_infrastructure(
             config,
             container_runtime,
@@ -251,5 +247,16 @@ mod tests {
         };
         let state = AppState::new(config);
         assert_eq!(state.config.bridge_port, 0);
+    }
+
+    #[tokio::test]
+    async fn production_state_forbids_host_warp_reconnect() {
+        let state = AppState::new(BridgeConfig::default());
+        let error = state
+            .warp_controller
+            .reconnect()
+            .await
+            .expect_err("host WARP control must remain disabled");
+        assert!(error.to_string().contains("forbidden"));
     }
 }

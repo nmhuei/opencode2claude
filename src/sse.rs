@@ -128,6 +128,12 @@ impl SseEventBuilder {
         if block_type == "text" {
             content_block["text"] = json!("");
         }
+        if block_type == "thinking" {
+            // The Anthropic SDK parses ThinkingBlock as {type, thinking,
+            // signature}; without the mandatory "thinking" field the block
+            // cannot be constructed and rendering is skipped or shows garbage.
+            content_block["thinking"] = json!("");
+        }
         if block_type == "tool_use" || block_type == "thinking" {
             if let Some(id_val) = id {
                 content_block["id"] = json!(id_val);
@@ -179,6 +185,23 @@ impl SseEventBuilder {
             .event("message_stop")
             .json_data(json!({
                 "type": "message_stop"
+            }))
+            .unwrap_or_else(|_| Event::default().data("{}"))
+    }
+
+    /// Generate the Anthropic `error` event that terminates a stream.
+    ///
+    /// Per the Messages API spec an error event ends the stream: the server
+    /// must not emit `message_delta` or `message_stop` after it.
+    pub fn api_error(&self, message: &str) -> Event {
+        Event::default()
+            .event("error")
+            .json_data(json!({
+                "type": "error",
+                "error": {
+                    "type": "api_error",
+                    "message": message
+                }
             }))
             .unwrap_or_else(|_| Event::default().data("{}"))
     }
@@ -244,5 +267,28 @@ mod tests {
         assert_eq!(resp["stop_reason"], "end_turn");
         assert_eq!(resp["usage"]["input_tokens"], 15);
         assert_eq!(resp["usage"]["output_tokens"], 25);
+    }
+
+    #[test]
+    fn thinking_block_start_includes_thinking_field() {
+        let builder = SseEventBuilder::new("msg_test".to_string(), "test-model".to_string());
+        let debug = format!(
+            "{:?}",
+            builder.content_block_start_at(0, "thinking", None, None)
+        );
+        // Debug output backslash-escapes the JSON quotes: `\"thinking\":\"\"`.
+        assert!(
+            debug.contains("\\\"thinking\\\":\\\"\\\""),
+            "spec requires content_block_start for thinking to carry \"thinking\": \"\", got: {debug}"
+        );
+    }
+
+    #[test]
+    fn api_error_event_ends_with_error_payload() {
+        let builder = SseEventBuilder::new("msg_test".to_string(), "test-model".to_string());
+        let debug = format!("{:?}", builder.api_error("upstream exploded"));
+        assert!(debug.contains("\\\"type\\\":\\\"error\\\""));
+        assert!(debug.contains("\\\"api_error\\\""));
+        assert!(debug.contains("upstream exploded"));
     }
 }

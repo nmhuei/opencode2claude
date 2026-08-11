@@ -8,9 +8,12 @@ use reqwest::Client;
 const MAX_COMPAT_ARGUMENT_BYTES: usize = 64 * 1024;
 const MAX_COMPAT_BATCH_ITEMS: usize = 32;
 const MAX_COMPAT_CALLS_PER_RESPONSE: usize = 128;
-const TV_TOOLCALLS_TAG: &str = "tvToolcalls";
-const TV_INVOKE_TAG: &str = "tvInvoke";
-const TV_PARAMETER_TAG: &str = "tvParameter";
+const XML_TOOLCALL_WRAPPER_TAGS: [&str; 3] = ["tvToolcalls", "tool_calls", "tool_call"];
+const XML_INVOKE_TAGS: [&str; 2] = ["tvInvoke", "invoke"];
+const XML_PARAMETER_TAGS: [&str; 2] = ["tvParameter", "parameter"];
+
+type XmlAttributes = Vec<(String, String)>;
+type ParsedXmlOpenTag = (usize, XmlAttributes, usize);
 
 /// Check if the OpenCode daemon is running and reachable.
 pub async fn check_daemon(client: &Client, port: u16) -> bool {
@@ -319,7 +322,9 @@ fn find_compat_marker_in_context(
                         || parse_compat_tool_shorthand_header_at(text, cursor).is_some()
                         || parse_compat_tool_direct_header_at(text, cursor).is_some()
                 }
-                '<' => parse_tv_open_tag_at(text, cursor, TV_TOOLCALLS_TAG).is_some(),
+                '<' => {
+                    parse_xml_open_tag_family_at(text, cursor, &XML_TOOLCALL_WRAPPER_TAGS).is_some()
+                }
                 _ => false,
             };
             if recognized {
@@ -431,10 +436,15 @@ pub(super) fn compat_tool_marker_pending_suffix_len(
             longest = longest.max(suffix.len());
         }
     }
-    const TV_PREFIX: &str = "<tvtoolcalls>";
+    const XML_PREFIXES: [&str; 3] = ["<tvtoolcalls>", "<tool_calls>", "<tool_call>"];
+    let max_xml_prefix_len = XML_PREFIXES
+        .iter()
+        .map(|prefix| prefix.len())
+        .max()
+        .unwrap_or(0);
     for start in memchr_iter(b'<', text.as_bytes()) {
         let suffix = &text[start..];
-        if suffix.len() > TV_PREFIX.len() || suffix.contains('>') {
+        if suffix.len() > max_xml_prefix_len || suffix.contains('>') {
             continue;
         }
         let normalized = suffix
@@ -442,7 +452,11 @@ pub(super) fn compat_tool_marker_pending_suffix_len(
             .filter(|ch| !ch.is_whitespace())
             .map(|ch| ch.to_ascii_lowercase())
             .collect::<String>();
-        if !normalized.is_empty() && TV_PREFIX.starts_with(&normalized) {
+        if !normalized.is_empty()
+            && XML_PREFIXES
+                .iter()
+                .any(|prefix| prefix.starts_with(&normalized))
+        {
             longest = longest.max(suffix.len());
         }
     }
@@ -451,16 +465,19 @@ pub(super) fn compat_tool_marker_pending_suffix_len(
 }
 
 fn find_tv_toolcalls_marker(text: &str) -> Option<usize> {
-    memchr_iter(b'<', text.as_bytes())
-        .find(|start| parse_tv_open_tag_at(text, *start, TV_TOOLCALLS_TAG).is_some())
+    memchr_iter(b'<', text.as_bytes()).find(|start| {
+        parse_xml_open_tag_family_at(text, *start, &XML_TOOLCALL_WRAPPER_TAGS).is_some()
+    })
 }
 
 fn parse_tv_toolcalls_marker(text: &str, start: usize) -> Option<ParsedCompatMarker> {
-    let (body_start, wrapper_attributes) = parse_tv_open_tag_at(text, start, TV_TOOLCALLS_TAG)?;
+    let (body_start, wrapper_attributes, wrapper_tag_index) =
+        parse_xml_open_tag_family_at(text, start, &XML_TOOLCALL_WRAPPER_TAGS)?;
     if !wrapper_attributes.is_empty() {
         return None;
     }
-    let (body_end, consumed) = find_tv_close_tag(text, body_start, TV_TOOLCALLS_TAG)?;
+    let wrapper_tag = XML_TOOLCALL_WRAPPER_TAGS[wrapper_tag_index];
+    let (body_end, consumed) = find_tv_close_tag(text, body_start, wrapper_tag)?;
     if body_end.saturating_sub(body_start) > MAX_COMPAT_ARGUMENT_BYTES {
         return None;
     }
@@ -472,8 +489,8 @@ fn parse_tv_toolcalls_marker(text: &str, start: usize) -> Option<ParsedCompatMar
         if cursor >= body_end {
             break;
         }
-        let (parameters_start, invoke_attributes) =
-            parse_tv_open_tag_at(text, cursor, TV_INVOKE_TAG)?;
+        let (parameters_start, invoke_attributes, invoke_tag_index) =
+            parse_xml_open_tag_family_at(text, cursor, &XML_INVOKE_TAGS)?;
         let name = tv_attribute(&invoke_attributes, "name")?.trim().to_string();
         if name.is_empty()
             || !invoke_attributes
@@ -482,8 +499,8 @@ fn parse_tv_toolcalls_marker(text: &str, start: usize) -> Option<ParsedCompatMar
         {
             return None;
         }
-        let (parameters_end, invoke_end) =
-            find_tv_close_tag(text, parameters_start, TV_INVOKE_TAG)?;
+        let invoke_tag = XML_INVOKE_TAGS[invoke_tag_index];
+        let (parameters_end, invoke_end) = find_tv_close_tag(text, parameters_start, invoke_tag)?;
         if parameters_end > body_end || invoke_end > body_end {
             return None;
         }
@@ -513,7 +530,8 @@ fn parse_tv_parameters(text: &str, start: usize, end: usize) -> Option<serde_jso
         if cursor >= end {
             break;
         }
-        let (value_start, attributes) = parse_tv_open_tag_at(text, cursor, TV_PARAMETER_TAG)?;
+        let (value_start, attributes, parameter_tag_index) =
+            parse_xml_open_tag_family_at(text, cursor, &XML_PARAMETER_TAGS)?;
         let name = tv_attribute(&attributes, "name")?.trim().to_string();
         if name.is_empty()
             || fields
@@ -527,7 +545,8 @@ fn parse_tv_parameters(text: &str, start: usize, end: usize) -> Option<serde_jso
         }) {
             return None;
         }
-        let (value_end, parameter_end) = find_tv_close_tag(text, value_start, TV_PARAMETER_TAG)?;
+        let parameter_tag = XML_PARAMETER_TAGS[parameter_tag_index];
+        let (value_end, parameter_end) = find_tv_close_tag(text, value_start, parameter_tag)?;
         if value_end > end || parameter_end > end {
             return None;
         }
@@ -546,11 +565,18 @@ fn parse_tv_parameters(text: &str, start: usize, end: usize) -> Option<serde_jso
     (skip_compat_whitespace(text, cursor) == end).then_some(serde_json::Value::Object(fields))
 }
 
-fn parse_tv_open_tag_at(
+fn parse_xml_open_tag_family_at(
     text: &str,
     start: usize,
-    tag: &str,
-) -> Option<(usize, Vec<(String, String)>)> {
+    tags: &[&str],
+) -> Option<ParsedXmlOpenTag> {
+    tags.iter().enumerate().find_map(|(index, tag)| {
+        parse_tv_open_tag_at(text, start, tag)
+            .map(|(body_start, attributes)| (body_start, attributes, index))
+    })
+}
+
+fn parse_tv_open_tag_at(text: &str, start: usize, tag: &str) -> Option<(usize, XmlAttributes)> {
     let mut cursor = start;
     if !text.get(cursor..)?.starts_with('<') {
         return None;
@@ -590,7 +616,7 @@ fn parse_tv_open_tag_at(
     None
 }
 
-fn parse_tv_attributes(raw: &str) -> Option<Vec<(String, String)>> {
+fn parse_tv_attributes(raw: &str) -> Option<XmlAttributes> {
     let mut attributes = Vec::new();
     let mut cursor = 0;
     loop {
@@ -1013,7 +1039,7 @@ fn parse_compat_tool_requests_impl(
     allow_missing_closing_bracket: bool,
 ) -> Option<ParsedCompatMarker> {
     let start = find_compat_tool_marker(text)?;
-    if parse_tv_open_tag_at(text, start, TV_TOOLCALLS_TAG).is_some() {
+    if parse_xml_open_tag_family_at(text, start, &XML_TOOLCALL_WRAPPER_TAGS).is_some() {
         return parse_tv_toolcalls_marker(text, start);
     }
     let (name, arguments_start) = if let Some((name, arguments_start)) =
@@ -1615,6 +1641,72 @@ pub(super) fn tool_call_fingerprint(name: &str, arguments: &serde_json::Value) -
     format!("{}\u{0}{serialized}", name.to_ascii_lowercase())
 }
 
+/// Split visible narration that arrived in the same upstream response as a
+/// tool call. Some free providers stop the content field in the middle of a
+/// word or sentence when switching to `tool_calls`. Anthropic responses are
+/// append-only, so emit only through the last trustworthy sentence boundary
+/// and omit the unfinished tail rather than exposing corrupted narration.
+pub(super) fn split_completed_pre_tool_text(text: &str) -> (&str, &str) {
+    fn is_closing_punctuation(ch: char) -> bool {
+        matches!(ch, '"' | '\'' | ')' | ']' | '}' | '»' | '”' | '’')
+    }
+
+    let mut completed = 0usize;
+    let mut cursor = 0usize;
+    while cursor < text.len() {
+        let ch = text[cursor..]
+            .chars()
+            .next()
+            .expect("cursor remains on a UTF-8 boundary");
+        let next = cursor + ch.len_utf8();
+
+        if ch == '\n' {
+            completed = next;
+            cursor = next;
+            continue;
+        }
+
+        if matches!(ch, '.' | '!' | '?' | '。' | '！' | '？') {
+            let mut boundary = next;
+            while boundary < text.len() {
+                let trailing = text[boundary..]
+                    .chars()
+                    .next()
+                    .expect("boundary remains on a UTF-8 boundary");
+                if is_closing_punctuation(trailing) {
+                    boundary += trailing.len_utf8();
+                } else {
+                    break;
+                }
+            }
+
+            if boundary == text.len()
+                || text[boundary..]
+                    .chars()
+                    .next()
+                    .is_some_and(char::is_whitespace)
+            {
+                while boundary < text.len() {
+                    let trailing = text[boundary..]
+                        .chars()
+                        .next()
+                        .expect("boundary remains on a UTF-8 boundary");
+                    if trailing.is_whitespace() {
+                        boundary += trailing.len_utf8();
+                    } else {
+                        break;
+                    }
+                }
+                completed = boundary;
+            }
+        }
+
+        cursor = next;
+    }
+
+    text.split_at(completed)
+}
+
 /// Detect short claims that assert a side effect already succeeded before the
 /// client has returned a tool_result. Such text is held while streaming and
 /// omitted from a tool-use turn; the model can report success on the next turn
@@ -1668,6 +1760,27 @@ pub(super) fn get_correct_tool_name(name: &str, payload: &MessagesRequest) -> St
 /// Anthropic tool schema. The DSML wire format itself is text-first, so this
 /// final schema-aware step avoids both `"true"`-instead-of-`true` bugs and the
 /// opposite problem where string commands that look like JSON are over-parsed.
+pub(super) fn invalid_semantic_tool_argument(
+    name: &str,
+    arguments: &serde_json::Value,
+) -> Option<&'static str> {
+    fn placeholder(value: Option<&serde_json::Value>) -> bool {
+        let Some(text) = value.and_then(serde_json::Value::as_str) else {
+            return true;
+        };
+        matches!(
+            text.trim().to_ascii_lowercase().as_str(),
+            "" | "..." | "…" | "<prompt>" | "<message>" | "placeholder"
+        )
+    }
+
+    match name.to_ascii_lowercase().as_str() {
+        "agent" if placeholder(arguments.get("prompt")) => Some("prompt"),
+        "sendmessage" if placeholder(arguments.get("message")) => Some("message"),
+        _ => None,
+    }
+}
+
 pub(super) fn normalize_dsml_arguments(
     name: &str,
     arguments: serde_json::Value,

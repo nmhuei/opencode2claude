@@ -25,6 +25,8 @@ pub struct OpenAiRequest {
     pub tools: Option<Vec<OpenAiTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parallel_tool_calls: Option<bool>,
     pub stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
@@ -137,7 +139,21 @@ pub struct OpenAiUsage {
 
 #[derive(Debug, Deserialize)]
 pub struct OpenAiStreamChunk {
+    #[serde(default)]
     pub choices: Vec<OpenAiStreamChoice>,
+    /// Present when the upstream ends the SSE stream with an OpenAI error
+    /// payload (`{"error": {...}}`). Must be surfaced to the client as an
+    /// Anthropic error event, not dropped.
+    #[serde(default)]
+    pub error: Option<OpenAiStreamError>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpenAiStreamError {
+    pub message: Option<String>,
+    #[serde(rename = "type")]
+    pub error_type: Option<String>,
+    pub code: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]

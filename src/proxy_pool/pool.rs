@@ -82,12 +82,15 @@ impl ProxyPool {
     }
 
     pub fn recovery_in_progress(&self) -> bool {
+        let now = Instant::now();
         !self.restart_queue.is_empty()
             || self.proxies.iter().any(|node| {
                 node.lifecycle == LifecyclePolicy::Managed
                     && node.routing_enabled
                     && node.recovery_cause.is_some()
-                    && node.restart_attempts < self.max_restart_attempts.max(1)
+                    && (node.restart_attempts < self.max_restart_attempts.max(1)
+                        || (node.recovery_cause == Some(RecoveryCause::RateLimit)
+                            && node.rate_limit_until.is_some_and(|until| now < until)))
             })
     }
 
@@ -98,6 +101,35 @@ impl ProxyPool {
             .filter_map(|node| node.rate_limit_until)
             .filter_map(|until| until.checked_duration_since(now))
             .min()
+    }
+
+    /// True when routing is temporarily blocked by startup/recovery identity
+    /// verification rather than a hard-open circuit or active rate limit.
+    /// Requests may wait briefly for these candidates instead of failing
+    /// immediately during fan-out bursts after a restart.
+    pub fn route_availability_pending(&self) -> bool {
+        let now = Instant::now();
+        self.proxies.iter().any(|node| {
+            let role_enabled = node.role != EgressRole::Primary || node.routing_enabled;
+            let rate_limited = node.rate_limit_until.is_some_and(|until| now < until);
+            let hard_open = node.circuit.is_open(now);
+            if !role_enabled || node.is_duplicate() || rate_limited || hard_open {
+                return false;
+            }
+
+            if matches!(node.health, HealthState::Unknown | HealthState::Recovering) {
+                return true;
+            }
+
+            let identity_required =
+                self.require_verified_exit_ip || node.role == EgressRole::WarmStandby;
+            node.health == HealthState::Healthy
+                && identity_required
+                && !node
+                    .exit_identity
+                    .as_ref()
+                    .is_some_and(|identity| identity.is_fresh(self.identity_ttl))
+        })
     }
 
     pub fn drain_restart_queue(&mut self) -> Vec<usize> {

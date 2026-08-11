@@ -89,48 +89,29 @@ pub(super) async fn cmd_proxy(cmd: ProxyCommand, fmt: OutputFormat) {
 
             for port in &primary_ports {
                 if let Some(spinner) = &spinner {
-                    spinner.set_message(format!("Removing proxy {port}"));
+                    spinner.set_message(format!("Rotating proxy identity {port}"));
                 }
-                let remove = match docker::remove_container(*port).await {
+                let result = match docker::rotate_container(*port).await {
                     Ok(()) => ProxyOperationResult {
                         port: *port,
-                        action: "remove".into(),
+                        action: "rotate".into(),
                         status: "ok".into(),
                         message: None,
                     },
                     Err(docker::DockerError::Protected(message)) => ProxyOperationResult {
                         port: *port,
-                        action: "remove".into(),
+                        action: "rotate".into(),
                         status: "skipped".into(),
                         message: Some(message),
                     },
                     Err(error) => ProxyOperationResult {
                         port: *port,
-                        action: "remove".into(),
+                        action: "rotate".into(),
                         status: "error".into(),
                         message: Some(error.to_string()),
                     },
                 };
-                results.push(remove);
-
-                if let Some(spinner) = &spinner {
-                    spinner.set_message(format!("Creating proxy {port}"));
-                }
-                let create = match docker::create_container(*port).await {
-                    Ok(()) => ProxyOperationResult {
-                        port: *port,
-                        action: "create".into(),
-                        status: "ok".into(),
-                        message: None,
-                    },
-                    Err(error) => ProxyOperationResult {
-                        port: *port,
-                        action: "create".into(),
-                        status: "error".into(),
-                        message: Some(error.to_string()),
-                    },
-                };
-                results.push(create);
+                results.push(result);
             }
 
             finish_spinner(spinner);
@@ -157,7 +138,7 @@ async fn show_proxy_status(fmt: OutputFormat, primary_ports: &[u16], standby_por
                         "port": port,
                         "name": name,
                         "role": if primary_ports.contains(port) { "primary" } else { "standby" },
-                        "status": if *running { "healthy" } else { "offline" },
+                        "status": if *running { "running" } else { "offline" },
                         "running": running,
                     })
                 })
@@ -192,12 +173,12 @@ async fn show_proxy_status(fmt: OutputFormat, primary_ports: &[u16], standby_por
             let table = print_proxy_table().await;
             print_table(&table);
 
-            let healthy = containers.iter().filter(|(_, _, running)| *running).count();
-            let offline = containers.len().saturating_sub(healthy);
+            let running = containers.iter().filter(|(_, _, running)| *running).count();
+            let offline = containers.len().saturating_sub(running);
             println!(
                 "{}",
                 presentation::summary(&[
-                    format!("{} healthy", healthy.to_string().green()),
+                    format!("{} running", running.to_string().green()),
                     format!("{} offline", offline.to_string().dim()),
                     format!("{} primary", primary_ports.len()),
                     format!("{} standby", standby_ports.len()),

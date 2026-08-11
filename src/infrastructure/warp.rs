@@ -15,6 +15,8 @@ pub enum WarpStatus {
 
 #[derive(Debug, thiserror::Error)]
 pub enum WarpError {
+    #[error("Host WARP control is disabled: {0}")]
+    Disabled(String),
     #[error("WARP command failed: {0}")]
     Command(String),
     #[error("WARP command IO error: {0}")]
@@ -33,6 +35,39 @@ pub trait WarpController: Send + Sync + fmt::Debug {
         self.connect().await?;
         tokio::time::sleep(Duration::from_millis(2500)).await;
         Ok(())
+    }
+}
+
+/// Production-safe host WARP boundary.
+///
+/// The bridge must never mutate the machine-wide Cloudflare WARP state because
+/// doing so interrupts unrelated user processes. Managed egress rotation is
+/// handled exclusively by the Docker WARP pool.
+#[derive(Debug, Default)]
+pub struct DisabledWarpController;
+
+#[async_trait]
+impl WarpController for DisabledWarpController {
+    async fn connect(&self) -> Result<(), WarpError> {
+        Err(WarpError::Disabled(
+            "managed Docker egress must be used instead".to_string(),
+        ))
+    }
+
+    async fn disconnect(&self) -> Result<(), WarpError> {
+        Err(WarpError::Disabled(
+            "managed Docker egress must be used instead".to_string(),
+        ))
+    }
+
+    async fn status(&self) -> Result<WarpStatus, WarpError> {
+        Ok(WarpStatus::Unknown)
+    }
+
+    async fn reconnect(&self) -> Result<(), WarpError> {
+        Err(WarpError::Disabled(
+            "automatic host warp-cli reconnect is forbidden".to_string(),
+        ))
     }
 }
 

@@ -190,3 +190,80 @@ fn parses_claude_code_2_1_207_request_modes() {
     assert_eq!(serialized["thinking"]["future_thinking_mode"], "preserved");
     assert_eq!(serialized["output_config"]["future_output_mode"], 7);
 }
+
+#[test]
+fn last_user_shell_cmd_accepts_claude_code_leading_system_reminders() {
+    let msgs = vec![make_msg(
+        "user",
+        ContentVal::Single(
+            concat!(
+                "<system-reminder>Available agent types...</system-reminder>\n",
+                "<system-reminder>Available skills...</system-reminder>\n\n",
+                "!printf PTY_SHELL_OK"
+            )
+            .to_string(),
+        ),
+    )];
+
+    assert_eq!(
+        last_user_shell_cmd(&msgs),
+        Some("printf PTY_SHELL_OK".to_string())
+    );
+}
+
+#[test]
+fn last_user_shell_cmd_accepts_reminder_and_command_in_separate_text_blocks() {
+    let msgs = vec![make_msg(
+        "user",
+        ContentVal::Multiple(vec![
+            MessageContent {
+                content_type: "text".to_string(),
+                text: Some("<system-reminder>Injected context</system-reminder>".to_string()),
+                ..Default::default()
+            },
+            MessageContent {
+                content_type: "text".to_string(),
+                text: Some("!printf BLOCK_SHELL_OK".to_string()),
+                ..Default::default()
+            },
+        ]),
+    )];
+
+    assert_eq!(
+        last_user_shell_cmd(&msgs),
+        Some("printf BLOCK_SHELL_OK".to_string())
+    );
+}
+
+#[test]
+fn last_user_shell_cmd_rejects_unclosed_leading_system_reminder() {
+    let msgs = vec![make_msg(
+        "user",
+        ContentVal::Single("<system-reminder>unclosed context\n!printf MUST_NOT_RUN".to_string()),
+    )];
+
+    assert_eq!(last_user_shell_cmd(&msgs), None);
+}
+
+#[test]
+fn last_user_shell_cmd_rejects_bang_inside_system_reminder_only() {
+    let msgs = vec![make_msg(
+        "user",
+        ContentVal::Single(
+            "<system-reminder>example: !printf MUST_NOT_RUN</system-reminder>\nordinary prompt"
+                .to_string(),
+        ),
+    )];
+
+    assert_eq!(last_user_shell_cmd(&msgs), None);
+}
+
+#[test]
+fn last_user_shell_cmd_rejects_ordinary_text_before_bang() {
+    let msgs = vec![make_msg(
+        "user",
+        ContentVal::Single("Please explain this:\n!printf MUST_NOT_RUN".to_string()),
+    )];
+
+    assert_eq!(last_user_shell_cmd(&msgs), None);
+}

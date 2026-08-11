@@ -1,6 +1,6 @@
 use super::policy::{
-    bounded_backoff, build_model_retry_list, classify_status, is_rate_limit_body,
-    parse_retry_after, FailureClass,
+    bounded_backoff, build_model_retry_list, classify_status, client_retry_after,
+    is_rate_limit_body, parse_retry_after, FailureClass,
 };
 use crate::config::RetryConfig;
 use std::time::{Duration, SystemTime};
@@ -69,6 +69,19 @@ fn retry_after_supports_delta_seconds_and_http_dates() {
     assert_eq!(parse_retry_after("7", now), Some(Duration::from_secs(7)));
     let date = httpdate::fmt_http_date(now + Duration::from_secs(30));
     assert_eq!(parse_retry_after(&date, now), Some(Duration::from_secs(30)));
+}
+
+#[test]
+fn client_retry_after_is_short_even_when_provider_quota_reset_is_distant() {
+    assert_eq!(
+        client_retry_after(Duration::from_secs(47_897)),
+        Duration::from_secs(30)
+    );
+    assert_eq!(
+        client_retry_after(Duration::from_secs(7)),
+        Duration::from_secs(7)
+    );
+    assert_eq!(client_retry_after(Duration::ZERO), Duration::from_secs(1));
 }
 
 #[test]

@@ -4,6 +4,8 @@ use super::integration::IntegrationEnvironment;
 use serde::Serialize;
 use std::str::FromStr;
 
+const CLAUDE_CODE_COMPAT_MODEL: &str = "claude-opus-5";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientConfigFormat {
     Env,
@@ -108,6 +110,8 @@ fn claude_code(environment: &IntegrationEnvironment, api_key: &str, model: &str)
             "ANTHROPIC_BASE_URL": environment.anthropic_base_url,
             "OPENCODE_MODEL": model
         },
+        "model": CLAUDE_CODE_COMPAT_MODEL,
+        "ultracode": true,
         "alwaysThinkingEnabled": true
     }))
     .unwrap_or_else(|_| "{}".to_string())
@@ -197,6 +201,8 @@ mod tests {
             parsed["$schema"],
             "https://json.schemastore.org/claude-code-settings.json"
         );
+        assert_eq!(parsed["model"], "claude-opus-5");
+        assert_eq!(parsed["ultracode"], true);
     }
 
     #[test]

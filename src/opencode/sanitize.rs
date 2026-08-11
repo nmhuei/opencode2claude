@@ -11,14 +11,33 @@ use crate::opencode::forward::common::{find_literal_marker_in_context, CompatMar
 /// including HTML-encoded variants. Also trims leading whitespace when tags were
 /// stripped from the beginning of the text.
 pub fn strip_system_tags(text: &str) -> String {
-    strip_system_tags_with_context(text, &CompatMarkdownState::default())
+    strip_system_tags_impl(text, &CompatMarkdownState::default(), false)
 }
 
 pub(crate) fn strip_system_tags_with_context(
     text: &str,
     initial_state: &CompatMarkdownState,
 ) -> String {
-    const TAGS: [&str; 16] = [
+    strip_system_tags_impl(text, initial_state, false)
+}
+
+/// Strip ordinary system-leak tags while preserving generic XML tool protocol
+/// markers for the compatibility parser that runs immediately afterwards.
+///
+/// The synchronous pipeline first extracts canonical DSML and then extracts
+/// compatibility markers. Removing `<tool_calls>/<invoke>/<parameter>` during
+/// the DSML phase would erase a valid tool request before the compatibility
+/// parser can validate and convert it.
+fn strip_system_tags_preserving_compat_xml(text: &str) -> String {
+    strip_system_tags_impl(text, &CompatMarkdownState::default(), true)
+}
+
+fn strip_system_tags_impl(
+    text: &str,
+    initial_state: &CompatMarkdownState,
+    preserve_compat_xml: bool,
+) -> String {
+    const TAGS: [&str; 28] = [
         "</think>",
         "<think>",
         "</thinking>",
@@ -31,10 +50,40 @@ pub(crate) fn strip_system_tags_with_context(
         "<｜DSML｜invoke>",
         "</｜DSML｜tool_calls>",
         "<｜DSML｜tool_calls>",
+        // ASCII-pipe and plain-tag variants free models emit in place of the
+        // full-width DSML markers; they must not reach the visible stream.
+        "<|DSML|tool_calls>",
+        "</|DSML|tool_calls>",
+        "<|DSML|invoke>",
+        "</|DSML|invoke>",
+        "<|DSML|parameter>",
+        "</|DSML|parameter>",
+        "<dsml>",
+        "</dsml>",
         "&lt;/think&gt;",
         "&lt;think&gt;",
+        "</tool_calls>",
+        "<tool_calls>",
         "</tool_call>",
         "<tool_call>",
+        "</invoke>",
+        "<invoke>",
+    ];
+
+    /// Tool-protocol opening tags can carry attributes (`<invoke name="…">`),
+    /// which the exact-match `TAGS` list cannot match; skip through the closing
+    /// `>`, respecting quotes so a `>` inside an attribute does not truncate.
+    const TOOL_XML_OPEN_PREFIXES: [&str; 10] = [
+        "<|DSML|invoke",
+        "<|DSML|tool_calls",
+        "<|DSML|parameter",
+        "<｜DSML｜invoke",
+        "<｜DSML｜tool_calls",
+        "<｜DSML｜parameter",
+        "<tool_calls",
+        "<tool_call",
+        "<invoke",
+        "<parameter",
     ];
 
     let mut state = initial_state.clone();
@@ -45,12 +94,47 @@ pub(crate) fn strip_system_tags_with_context(
 
     while cursor < text.len() {
         if state.is_executable_context() {
-            if let Some(tag) = TAGS.iter().find(|tag| text[cursor..].starts_with(**tag)) {
+            if let Some(tag) = TAGS.iter().find(|tag| {
+                (!preserve_compat_xml || !is_compat_xml_exact_tag(tag))
+                    && text[cursor..].starts_with(**tag)
+            }) {
                 if !has_visible_text {
                     stripped_before_visible_text = true;
                 }
                 cursor += tag.len();
                 continue;
+            }
+            let rest = &text[cursor..];
+            if let Some(prefix) = TOOL_XML_OPEN_PREFIXES.iter().find(|prefix| {
+                (!preserve_compat_xml || !is_compat_xml_open_prefix(prefix))
+                    && rest.starts_with(**prefix)
+            }) {
+                let mut scan = prefix.len();
+                let mut quote: Option<char> = None;
+                let mut closed_at = None;
+                while scan < rest.len() {
+                    let ch = rest[scan..].chars().next().expect("valid UTF-8 boundary");
+                    if let Some(active) = quote {
+                        if ch == active {
+                            quote = None;
+                        }
+                    } else if ch == '"' || ch == '\'' {
+                        quote = Some(ch);
+                    } else if ch == '>' {
+                        closed_at = Some(scan);
+                        break;
+                    }
+                    scan += ch.len_utf8();
+                }
+                // Only strip a properly terminated tag; an unterminated leak
+                // (no `>`) is left untouched rather than swallowing the message.
+                if let Some(end) = closed_at {
+                    if !has_visible_text {
+                        stripped_before_visible_text = true;
+                    }
+                    cursor += end + 1;
+                    continue;
+                }
             }
         }
 
@@ -79,6 +163,27 @@ pub(crate) fn strip_system_tags_with_context(
         cleaned.drain(..trim_bytes);
     }
     cleaned
+}
+
+fn is_compat_xml_exact_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        "<parameter>"
+            | "</parameter>"
+            | "<tool_calls>"
+            | "</tool_calls>"
+            | "<tool_call>"
+            | "</tool_call>"
+            | "<invoke>"
+            | "</invoke>"
+    )
+}
+
+fn is_compat_xml_open_prefix(prefix: &str) -> bool {
+    matches!(
+        prefix,
+        "<tool_calls" | "<tool_call" | "<invoke" | "<parameter"
+    )
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -290,7 +395,7 @@ pub fn extract_and_clean_dsml_detailed(text: &str) -> DsmlExtraction {
         cleaned_text: if malformed_intent {
             cleaned_text
         } else {
-            strip_system_tags(&cleaned_text)
+            strip_system_tags_preserving_compat_xml(&cleaned_text)
         },
         calls,
         malformed_intent,
@@ -316,6 +421,47 @@ mod tests {
             "Some thinkingResponse"
         );
         assert_eq!(strip_system_tags("Normal text"), "Normal text");
+    }
+
+    #[test]
+    fn strips_ascii_pipe_and_plain_dsml_variants() {
+        assert_eq!(
+            strip_system_tags("<|DSML|tool_calls>hello</|DSML|tool_calls>"),
+            "hello"
+        );
+        assert_eq!(
+            strip_system_tags("<|DSML|invoke name=\"Bash\">x</|DSML|invoke>"),
+            "x"
+        );
+        assert_eq!(
+            strip_system_tags("<|DSML|parameter name=\"p\">v</|DSML|parameter>"),
+            "v"
+        );
+        assert_eq!(strip_system_tags("<dsml>hello</dsml>"), "hello");
+    }
+
+    #[test]
+    fn strips_generic_xml_tool_tags_with_attributes_outside_code() {
+        assert_eq!(
+            strip_system_tags(
+                "<tool_calls><invoke name=\"Bash\"><parameter name=\"command\">echo ok</parameter></invoke></tool_calls>"
+            ),
+            "echo ok"
+        );
+        assert_eq!(
+            strip_system_tags(
+                "<tool_call><invoke name=\"Agent\"><parameter name=\"prompt\">review</parameter></invoke></tool_call>"
+            ),
+            "review"
+        );
+    }
+
+    #[test]
+    fn generic_xml_tool_tags_inside_code_are_inert() {
+        let fenced = "```xml\n<tool_calls><invoke name=\"Bash\"><parameter name=\"command\">echo ok</parameter></invoke></tool_calls>\n```";
+        let inline = "Use `<tool_call><invoke name=\"Bash\"></invoke></tool_call>` as an example.";
+        assert_eq!(strip_system_tags(fenced), fenced);
+        assert_eq!(strip_system_tags(inline), inline);
     }
 
     #[test]

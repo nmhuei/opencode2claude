@@ -24,6 +24,20 @@ fn identity(ip: &str) -> ExitIdentity {
 }
 
 #[test]
+fn route_availability_pending_while_required_identity_is_missing() {
+    let mut pool = ProxyPool::new_with_policy(&["socks5://127.0.0.1:40001".to_string()], 1, true);
+    pool.proxies[0].health = HealthState::Healthy;
+    pool.proxies[0].exit_identity = None;
+    assert!(pool.route_availability_pending());
+
+    pool.proxies[0].health = HealthState::Unhealthy;
+    pool.proxies[0].circuit = CircuitState::Open {
+        until: Instant::now() + Duration::from_secs(60),
+    };
+    assert!(!pool.route_availability_pending());
+}
+
+#[test]
 fn proxy_pool_mapping_is_sticky() {
     let mut pool = ProxyPool::new(&make_test_urls(3));
     assert_eq!(pool.proxies.len(), 3);

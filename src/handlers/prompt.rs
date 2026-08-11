@@ -18,12 +18,30 @@ pub(super) fn last_user_shell_cmd(messages: &[Message]) -> Option<String> {
         .iter()
         .rev()
         .find(|message| message.role == "user")?;
-    let text = message_text_parts(message).collect::<String>();
-    text.trim()
-        .strip_prefix('!')
+    let text = message_text_parts(message).collect::<Vec<_>>().join(
+        "
+",
+    );
+    let text = strip_leading_system_reminders(&text)?;
+    text.strip_prefix('!')
         .map(str::trim)
         .filter(|command| !command.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn strip_leading_system_reminders(mut text: &str) -> Option<&str> {
+    const OPEN: &str = "<system-reminder>";
+    const CLOSE: &str = "</system-reminder>";
+
+    loop {
+        text = text.trim_start();
+        if !text.starts_with(OPEN) {
+            return Some(text);
+        }
+        let body = &text[OPEN.len()..];
+        let end = body.find(CLOSE)?;
+        text = &body[end + CLOSE.len()..];
+    }
 }
 
 pub(super) fn local_shell_result(messages: &[Message]) -> Option<String> {

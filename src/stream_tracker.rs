@@ -50,6 +50,14 @@ impl SseBlockTracker {
         self.ever_opened
     }
 
+    /// Number of content block indices allocated since creation. Blocks are
+    /// never deallocated, so the difference between two snapshots is the
+    /// number of blocks opened in between — the per-attempt emission signal
+    /// for retry gates that must not reset the tracker.
+    pub fn allocated_blocks(&self) -> usize {
+        self.next_idx
+    }
+
     /// Allocate and return the next content block index.
     pub fn next_index(&mut self) -> usize {
         let i = self.next_idx;
@@ -417,6 +425,19 @@ mod tests {
         assert!(t.tool_idx(0).is_none());
         // next_index should start from 0 again
         assert_eq!(t.next_index(), 0);
+    }
+
+    #[test]
+    fn test_close_all_keeps_indices_monotonic_without_reset() {
+        let mut t = SseBlockTracker::new();
+        t.open_thinking(); // idx 0
+        assert_eq!(t.close_all().len(), 1);
+        t.open_thinking(); // next segment must NOT reuse idx 0
+        assert_eq!(t.thinking_idx(), Some(1));
+        assert_eq!(t.close_all().len(), 1);
+        // emulate a third loop iteration without reset()
+        let (idx, _, _) = t.ensure_thinking();
+        assert_eq!(idx, 2);
     }
 
     #[test]

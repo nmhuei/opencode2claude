@@ -37,7 +37,7 @@ Dashboard:     http://127.0.0.1:4000/dashboard
 Binary:        /home/light/.local/bin/opencode2api-serve  (deployment thật — supervisor spawn sibling của controller)
 Controller:    /home/light/.local/bin/opencode2api
 Port:          4000
-PID snapshot:  101647   (serve chạy từ ~/.local/bin sau atomic restart 2026-08-03 — binary chứa 8 fix mới, đã verify marker)
+PID snapshot:  123278   (serve chạy từ ~/.local/bin sau atomic restart 08:27 — binary mới chứa fix standby auto-start, md5 khớp target/release, marker đã verify)
 Status:        running
 Managed:       true
 Model runtime: opencode/deepseek-v4-flash-free
@@ -77,6 +77,21 @@ cargo test --locked                       PASS
 0 failed
 1 ignored
 ```
+
+Gate ngày 2026-08-03 (sau chuỗi fix D1–D6 + fail-fast + terminal-error, verify trong phiên này):
+
+```text
+cargo fmt --check                                      PASS
+cargo clippy --all-targets -- -D warnings              PASS
+cargo test --lib                                       PASS (473)
+cargo test --test protocol_conformance                 PASS (27/27)
+cargo test --test stream_retry_gates                   PASS (2/2)
+cargo test --test retry_compat_livelock                PASS (1/1)
+cargo test tool                                        PASS (11/11)
+cargo build --release --locked                         PASS
+```
+
+Real-CLI PTY matrix (test instance 4199 + stub 8124, KHÔNG production): 8/8 scenario pass — xem `report/final-report.md` mục 7/12. Production :4000 **chưa** restart trong chu kỳ này; việc deploy fix lên `~/.local/bin/opencode2api-serve` phải qua deployment gate (CLAUDE.md) và chỉ làm theo lệnh user.
 
 Luôn chạy lại vì working tree có thể được thay đổi đồng thời bởi session khác.
 
@@ -3107,3 +3122,565 @@ cargo test --locked               593 passed, 0 failed
 - tool_result image base64 vào prompt (SUSPECT); temperature >1 cứng 400 (SUSPECT).
 - Search calls bị drop trong mixed batch (sync path) có thể không được model re-issue (model-dependent).
 - Snapshot: PID 10427 vẫn live, proxy pool 5/5, model opencode/deepseek-v4-flash-free — không đổi so với snapshot trên.
+
+### 2026-08-03 — `server start` tự khởi động standby proxies (40004-40005)
+
+**Mục tiêu**
+
+- Khi `opencode2api server start` chạy, bridge phải đảm bảo cả 5 proxy container lên (3 primary + 2 standby). Trước đây standby tắt bị bỏ qua với cảnh báo.
+- Nguyên tắc mới (đã duyệt qua brainstorming, spec: `docs/superpowers/specs/2026-08-03-server-start-ensure-standby-design.md`): **protected = không bao giờ bị destroy/purge/stop, nhưng luôn được start/restart**. `server stop` / `proxy restart` / `proxy purge` / `server restart` không đổi.
+
+**File đã sửa**
+
+```text
+src/docker/types.rs       # thêm validate_startable_port; xóa ContainerSetupState::ProtectedStopped;
+                          # trait ContainerRuntime thêm verify_online (default: verify_proxy 1 lần)
+src/docker/lifecycle.rs   # start_managed/restart_managed dùng validate_startable_port (cho phép protected);
+                          # ensure_proxy: protected stopped → start_managed → Resumed;
+                          # DockerCliRuntime::verify_online override (retry 15×2s — chuyển từ bootstrap)
+src/docker/bootstrap.rs   # bỏ cảnh báo ProtectedStopped; verification qua runtime.verify_online;
+                          # standby offline sau verify → restart_managed best-effort (lỗi không abort bootstrap)
+```
+
+**Kiểm thử**
+
+```text
+cargo test --lib            464 passed, 0 failed
+cargo clippy --lib          clean
+cargo fmt --check           PASS
+```
+
+- Sửa 3 test cũ (destructive vẫn chặn protected; stopped protected → Resumed + start; stopped/legacy bootstrap), thêm 2 test (start/restart protected tới được runner; offline standby → restart best-effort không abort).
+
+**Live verify**
+
+- `docker stop opencode-warp-4/5` → `./target/release/opencode2api server start -f -p 4001` (port phụ, không đụng daemon :4000) → bootstrap in `✓ opencode-warp-4 (port 40004) online` + `✓ ...40005 online` → container Up, `proxy status` 5/5 healthy, `/health/ready` ready.
+
+**Deploy (đã hoàn tất)**
+
+- Script v3 cũ đã bị xóa khỏi /tmp → tạo lại `/tmp/restart_bridge3.sh`: stop → backup → install → marker check → start → health poll 45s → rollback. Gọi `~/.local/bin/opencode2api` cho cả stop/start (đúng rule: controller phải chạy từ `~/.local/bin` để serve sibling spawn binary mới).
+- Lỗi lần 1: install trước stop → `cp` serve "Text file busy" (process cũ giữ file) → daemon bật với serve cũ. Sửa thứ tự **stop trước, install sau**, chạy lại — md5 installed == target/release cho cả 2 binary.
+- Kết quả: daemon PID 123278 từ `~/.local/bin/opencode2api-serve` (binary mới), 5/5 proxy online, `/health/ready` ready. Claude Code session sống xuyên 2 lần restart.
+
+**Giới hạn / việc còn dở**
+
+- `verified_unique_exit_ips` hiện = 2 (WARP identity đang re-verify sau restart, minimum=1) — sẽ hồi phục.
+- Có process `./target/debug/opencode2api-serve` (PID 114782) và `./target/release/opencode2api-serve` (PID 120969) chạy nhưng không giữ port 4000/4001 — chưa truy vết (không đụng, có thể là session user khác).
+
+---
+
+## Debug loop: 8 findings đóng, 6 fix verified (2026-08-03 ~09:10)
+
+Vòng tự động debug loop (lead orchestrator, cây đang dirty có session song song) — kết quả cuối ITER-3:
+
+**Các lỗi đã sửa + verify**
+
+- **BUG-002 (High)** — livelock vô hạn trong vòng sanitize 400-compat (retry/execute.rs): cắm trần `MAX_COMPAT_SANITIZE_ROUNDS=2`, sau trần rơi vào retry budget/advance_model. Regression test `tests/retry_compat_livelock.rs` (fake upstream luôn 400 reasoning_content) → PASS 1/1; manual: bridge thật + fake 400 upstream → HTTP 502 sau 3.1s, đúng 4 lần gọi upstream. Verifier độc lập ACCEPT.
+- **BUG-004 (Medium)** — identity monitor ghi đè deadline rotation hoãn mới (proxy_pool/identity.rs): giữ deadline gần hơn (`min(existing until, rate_limit_until)`). Test mới + proxy_pool 57/57. Verifier ACCEPT.
+- **BUG-003 (Medium)** — retry compat/transport chết cứng khi search round mở block trước (sticky `ever_opened()` turn-global): nếu round trước phát text/thinking rồi mới đến marker web_search (context.rs:341/:508 emit trước guard :603), round sau lỗi (marker cắt ngắn) không retry được. Sửa: snapshot `allocated_blocks()` theo attempt + gate `== attempt_start_allocated`; bỏ `tracker.reset()` khỏi đường retry (giữ chỉ số block monotonic). Accessor `allocated_blocks()` mới ở stream_tracker.rs. Test `compat_retry_fires_after_search_round` (round 1: text + marker search, round 2: marker Bash cắt ngắn, round 3: hợp lệ) fail pre-fix (verifier trace) / pass post-fix. Manual: bridge thật :4558 + fake upstream 3 round + fake SearXNG → 3 upstream hits, `"name":"Bash"` tool_use trong body, 0 "repeatedly emitted". Verifier độc lập đang chạy (a03a685bd0eea6f27).
+- **BUG-005 (Medium)** — `parallel_tool_calls=false` áp cho MỌI model có tool (mapper/request.rs): scope lại chỉ khi request chứa bridge search tool; tool set khác giữ mặc định song song (đúng fanout prompt). Test `parallel_tool_calls_omitted_for_non_search_tool_sets` fail pre-fix / pass post-fix. Manual: capture upstream → Bash-only không có key; web_search → `false`.
+- **BUG-006 (Low-Med)** — schema structured-output bị rơi im lặng với deepseek-v4-flash-free (comment hứa hẹn prompt preservation nhưng không có code): `dropped_schema_system_instruction()` chèn schema vào system prompt; response_format vẫn None. Manual: capture upstream chứa schema. Verifier độc lập ACCEPT.
+- **BUG-007 (Low-Med)** — retry stream-read phát lại sau error event đã gửi client (line-limit): flag `line_limit_exceeded` chặn replay. Manual: 1 upstream hit, msg_start×1 error×2 msg_stop×1.
+
+**Không phải bug**
+
+- **BUG-008** — purge contract đổi 6→3 entries action "rotate" là hành vi chủ đích (identity rotation), không consumer nào hỏng → REJECTED.
+- **BUG-001** — do session song song sửa (sync batch split/collapse), lead xác nhận 5/5 test pass.
+
+**Trạng thái kiểm thử (cuối ITER-3)**
+
+```text
+cargo clippy --all-targets -- -D warnings   clean
+cargo test --lib                            466 passed
+cargo test --test stream_retry_gates        2/2
+cargo test --test protocol_conformance      27/27
+cargo test --test retry_compat_livelock     1/1
+```
+
+Bridge production :4000 (PID 123278) không bị đụng trong toàn bộ vòng verify; mọi harness dùng port phụ 4556–4559/4567–4571 và đều bị kill sau đó. Fix chưa commit (cây dirty do session song song đang làm việc — chỉ commit theo yêu cầu).
+
+**Debug loop KẾT THÚC (2026-08-03 ~10:05)** — verifier a03a685bd0eea6f27 ACCEPT cho BUG-003 (pre-fix repro trong detached worktree: cả 2 regression test FAIL — compat 2 vs 3 requests, line-limit replay 3x vs 1; E2E sạch trên fixture mới: 3 upstream, text idx 0 + Bash idx 1, 0 livelock). Toàn bộ 8 findings đóng, 15 tiêu chí hoàn thành đạt, cron loop đã hủy. Residual risk đã ghi (execute.rs:623 empty-stream fallback dùng ever_opened turn-global — ngoài scope, Low). Fix vẫn uncommitted trên cây dirty của session song song.
+
+## 2026-08-03 — Reverse upstream SSE lifecycle, fix D1–D6 + retry fail-fast, real-CLI PTY matrix (final)
+
+**Mục tiêu.** Đảo ngược cách Claude Code CLI (v2.1.220) tiêu thụ luồng upstream rồi sửa tầng parse/protocol/stream/mapping của bridge: hết retry storm ("✻ Manifesting… 1m0s"), hết truncation im lặng mid-stream, hết terminal bẩn.
+
+**Ràng buộc tuân thủ:** không `clear`/newline-spam/blind-ANSI-strip; không tắt streaming, không buffer toàn response, không nuốt lỗi parser; không để lộ credential trong artifact; không bypass bảo mật; không can thiệp production :4000; chỉ xoay proxy khi rate-limit; không thêm cơ chế API key mới; error path phải kết thúc stream đúng spec, không cắt kết nối CLI↔bridge.
+
+**Root cause family (D1–D6).**
+
+| ID | Bug | Fix |
+|----|-----|-----|
+| D1 | `finalize_transport_error` phát `error` + `message_stop` | Bỏ `message_stop`; trả `builder.api_error()` terminal |
+| D2 | line-limit path phát error rồi `message_stop` | `api_error()` + `ctx.error_terminated = true` + early break, không dòng sau |
+| D3 | thinking `content_block_start` thiếu `"thinking": ""` | `sse.rs` thêm field cho thinking block |
+| D4 | mid-stream OpenAI `{"error"}` SSE bị nuốt → clean end_turn | `process_openai_sse_line` phát `api_error`, set `error_terminated`+`stream_failed`; stranded → no message_delta/message_stop |
+| D5 | compact mode bỏ `strip_system_tags` | sync.rs: luôn strip (2 chỗ) |
+| D6 | DSML ASCII (`<|DSML|…>`, `<dsml>`) stream raw | `DSML_OPEN_PREFIXES` quote-aware strip trong sanitize.rs |
+
+**Retry storm.** `retry/execute.rs`: fail-fast (không backoff-sleep) cho `ProviderServer(5xx)` / `ProviderClient(400 non-rate-limit)` sau chuỗi model-fallback; giữ rate-limit retry + proxy rotation + compat-sanitize rounds (instant) + transport retry.
+
+**File sửa:** `opencode/forward/stream/execute.rs`, `stream/context.rs`, `forward/sync.rs`, `retry/execute.rs`, `sanitize.rs`, `sse.rs`, `types.rs` (OpenAiStreamChunk.error), `protocol_conformance.rs`, `stream_retry_gates.rs`; test mới trong `execute.rs` (transport_error...without_message_stop, mid-stream raw), `sanitize.rs` (ascii pipe variants).
+
+**Test tự động.** fmt/clippy sạch; lib 473 pass; protocol_conformance 27/27; stream_retry_gates 2/2; retry_compat_livelock 1/1; tool 11/11; release build PASS.
+
+**Manual verification (thật, theo deployment gate).** Real `claude` v2.1.220 trong PTY qua test bridge 4199 (direct egress, stub_openai trên 8124) + config-dir `/tmp/oc2verify/cli-config` (pre-seed `customApiKeyResponses.approved` để CLI bỏ qua OAuth, dùng custom key test). Kết quả (raw + render screen lưu `/tmp/oc2verify/s1…s10`):
+
+1. Hai turn liên tiếp → sạch, prompt quay `❯`.
+2. **Tool call (Bash echo ok)** — `● Bash(echo ok)` → `ok` → tool-result loop → `TOOL_RESULT_ACCEPTED`. ✓
+3. **Agent tool call** — CLI spawn `Agent(...)` thật (nền), result loop đóng. ✓
+4. **Upstream lỗi + CLI retry** — 500 stream → CLI retry stream=False → 200 → `● OK`; bridge fail-fast (chỉ 2 request upstream, witness req.log). ✓
+5. **Ctrl+C mid-stream** (idle-gap 6s giữa stream) — bridge log `client disconnected; upstream stream dropped immediately`; terminal sạch, không spinner dư. ✓
+6. **≥10 turn** — 12 prompt, 12/12 OK, 0 spinner-residue, screen final sạch. ✓
+7. **`!` shell** — unrestricted 4202: sync → `tool_use name=bash`, stream → SSE lifecycle đầy đủ; disabled 4199: 403 permission_error. ✓
+8. Wire-level: normal lifecycle đầy đủ; `error` terminal không `message_stop`; `midfail` → `partial` + terminal `error`. ✓
+
+**Artifacts.** `report/final-report.md` (mới): 12 mục + acceptance 16/16 criteria PASS với đường dẫn evidence. Harness mới/thay đổi: `artifacts/claude-upstream-reverse/tests/stub_openai.py` (scenario agent/slow, req-log/done-marker, recovery sau 1 lần 500), `pty_drive.py` (thêm `--ctrl-c-at` wall-clock).
+
+**Rule vĩnh viễn (theo yêu cầu user).** Ghi vào `CLAUDE.md` mục "Deployment verification gate (immutable)" — 8 nhóm chức năng cơ bản (streaming lifecycle, tool call mọi encoding + agent gọi, fence-safe, resync/no-duplicate-side-effect, thinking, search interception, shell, Ctrl+C + ≥10 turn sạch) phải verify bằng **real CLI** trước mọi deploy/restart; kèm manual sequence. Memory `verify-before-deploy` (feedback type) trong auto-memory để được nhắc ở session sau.
+
+**Trạng thái.** Toàn bộ 8 findings scope đóng + nghiệm thu. Production bridge :4000 **chưa** restart; deploy các fix này lên bridge thật phải qua deployment gate và theo lệnh user (restart atomic `/tmp/restart_bridge3.sh`). Fix trong working tree, chưa commit (theo quy tắc: chỉ commit theo yêu cầu).
+
+
+## 2026-08-03 13:57 +0700 — Generic XML tool-call recovery, local Claude Code routing, atomic production deploy
+
+**Mục tiêu**
+
+- Tái hiện và sửa các marker cũ bị lộ ra terminal: `<tool_calls>/<tool_call>/<invoke>/<parameter>`, bao gồm Bash và Agent.
+- Audit recent commits `52cdf0b`, `bc60b40` và toàn bộ dirty working tree hiện tại; không reset/clean/ghi đè thay đổi của session khác.
+- Cấu hình Claude Code chỉ gọi local bridge của repo, không dùng Anthropic API thật.
+- Manual verify bằng Claude Code 2.1.220, sau đó deploy atomic và verify lại trên production `:4000`.
+
+**Root cause đã xác nhận**
+
+1. Compatibility parser trước đó chỉ coi `tvToolcalls/tvInvoke/tvParameter` là executable grammar; generic XML wrapper không được parse thành `tool_use`.
+2. Sanitizer exact-tag không xử lý opening tag có attributes (`<invoke name="Bash">`, `<parameter name="command">`).
+3. Sync pipeline strip generic XML trước compatibility extraction, gây sync/stream lệch nhau.
+4. Stream marker bị cắt ở boundary 17 byte (`<tool_calls><invo...`) chưa có regression sát wire thực.
+5. Sau khi tool marker parse xong, trailing `</think>` bị cắt thành `</th` + `ink>`; text path không giữ partial system-tag prefix nên tag bị lộ.
+6. Claude shell startup hard-code `ANTHROPIC_BASE_URL=http://127.0.0.1:4000/v1`; Anthropic-compatible base đúng là `http://127.0.0.1:4000`.
+7. Restart v3 lấy binary stale từ `repo/target/release`, trong khi `CARGO_TARGET_DIR=/home/light/rust-target`; production process hash không khớp release mới và service cũ không được supervisor track.
+
+**Fix chính**
+
+- Mở rộng XML compatibility grammar cho wrapper/call/invoke/parameter generic, case-insensitive, quote-aware, XML entity decode, batch-safe và fence-safe.
+- Generic XML hợp lệ map thành structured `tool_use`; malformed/incomplete fail closed và request retry; không phát raw marker.
+- Tách sync sanitization mode để giữ protocol XML đến khi compatibility parser xử lý.
+- Text rolling buffer giữ partial `<think>/<thinking>` prefixes giống reasoning path, tránh split-tag leak.
+- Thêm regression unit + black-box cho Bash, Agent, malformed retry exact-once, code-fence inert, boundary 17-byte và trailing `</think>`.
+- Tạo `.claude/settings.local.json` (mode `0600`, `.claude/` đã ignored) bằng env do installed bridge sinh:
+  - `ANTHROPIC_BASE_URL=http://127.0.0.1:4000`
+  - bridge-generated compatibility key
+  - `OPENCODE_MODEL=opencode/deepseek-v4-flash-free`
+- Sửa `~/.zshrc`: lấy env từ `~/.local/bin/opencode2api --quiet env`, fallback local `:4000`, và `unset ANTHROPIC_AUTH_TOKEN`.
+- Tạo `artifacts/local-bridge-config-20260803/restart_bridge4.sh`: build đúng `/home/light/rust-target`, verify listener ownership, backup, stop verified PID only, atomic install, start, health/process-hash verify, rollback nếu lỗi.
+
+**Automated quality gate (fresh)**
+
+```text
+git diff --check                                      PASS
+cargo fmt --check                                     PASS
+cargo clippy --locked --all-targets -- -D warnings   PASS
+cargo test --locked                                   PASS
+  lib:                   486 passed
+  fast:                   87 passed
+  protocol/conformance:   18 passed
+  integration/groups:      2 + 32 + 1 + 2 passed
+  total:                  628 passed, 0 failed, 1 WARP test ignored
+cargo build --release --locked --bins                 PASS
+```
+
+Không còn `eprintln!/dbg!/println!` debug instrumentation trong parser/stream paths. `shellcheck` không có trên host; restart script đã qua `bash -n` và preflight PID/exe/hash.
+
+**Manual side-bridge verification**
+
+Evidence: `artifacts/generic-xml-tool-call-recovery-20260803/`.
+
+- Generic XML Bash: one unique `tool_use`, one matching `tool_result`, side effect exact, no raw XML.
+- Generic XML Agent foreground: child result quay lại parent, exact-once IDs, no raw XML.
+- Malformed XML → đúng 2 pre-result attempts → một tool execution/side effect.
+- 1-byte/17-byte fragmented stream: exact-once, no markup leak.
+- PTY 10 turns: `TEN_OK_01..10`, exit 0.
+- Ctrl+C mid-stream: clean interrupt.
+- Upstream terminal error: `ERROR_RECOVERED_OK` qua client retry.
+- `!` shell: real normal profile, `printf PTY_SHELL_OK` thực thi và trả đúng output; không dùng OAuth/Anthropic route.
+
+**Atomic deploy production**
+
+- Old production: PID `243774`, `/home/light/.local/bin/opencode2api-serve`, stale hash `885c0956...`, unmanaged.
+- Fresh serve hash: `4b0374a20bdfde543b9988260426e1cec7d40a665ceb8f1a2ce8adb1783cae77`.
+- Restart v4: PASS 7/7; backup `/tmp/oc2api-restart4.5IPe7R`.
+- New production: PID `1331199`, managed, endpoint `http://127.0.0.1:4000`, process exe/hash trùng installed release.
+- Proxy containers 40001–40005 online; không có host `warp-cli` process.
+- Side fixture listeners `4595/8195` đã dừng bằng exact PID/cmdline check; chỉ còn production `:4000`.
+
+**Post-deploy real Claude Code verification**
+
+Evidence: `artifacts/local-bridge-config-20260803/`.
+
+- Normal smoke: `POST_DEPLOY_LOCAL_BRIDGE_OK`, exit 0, stderr 0.
+- Bash: side effect `POST_DEPLOY_BASH_OK`, final `POST_DEPLOY_BASH_DONE`.
+- Agent foreground: child `POST_DEPLOY_CHILD_OK`, final `POST_DEPLOY_PARENT_OK`.
+- Analyzer `post-deploy-tool-summary.json`: all checks PASS; one unique tool ID, one matching result, no unmatched result, no raw `<tool_calls>/<invoke>`, child completed once.
+- SQLite history records `/v1/messages`, requested `claude-sonnet-4-6`, effective `opencode/deepseek-v4-flash-free`, tool turns `finish_reason=tool_use`, HTTP 200.
+- Một row `mid_stream_upstream_error` xuất hiện ở Agent lượt đầu; error event kết thúc terminal đúng spec và Claude Code tự gửi request mới, sau đó Agent hoàn tất. Không có duplicate side effect.
+
+**Trạng thái cuối**
+
+- Production bridge đang chạy PID `1331199` từ binary mới.
+- Claude Code shell/project config đều trỏ local `:4000`; `ANTHROPIC_AUTH_TOKEN` unset; project key/model/base khớp output của installed bridge.
+- Working tree vẫn dirty và **chưa commit** theo yêu cầu chỉ commit khi user nói rõ.
+
+## 2026-08-03 — Actual parse/proxy runtime inspection
+
+- Timestamp: 2026-08-03 15:25:44 +0700
+- Scope: verified current source, deployed daemon, live Claude Code parsing, and proxy pool state. No source-code edit, service restart, proxy rotation, or deployment was performed.
+- Runtime: managed daemon PID 1331199 remained live on `127.0.0.1:4000`; readiness reported `status=ready`, proxy mode, 2 verified unique exit IPs, minimum required 1.
+- Parse verification:
+  - Focused suites: 103/103 passed (protocol conformance, stream retry gates, compat livelock, proxy-pool, sanitizer).
+  - Full `cargo test --locked`: 632 passed, 0 failed, 1 ignored (the real-WARP identity test requires explicit live execution).
+  - `cargo build --release --locked --bins`: passed.
+  - Fresh Claude Code CLI smoke: exact text response passed; Bash lifecycle completed with one `tool_use`, zero bridge retries, one continuation, and exact final response. No raw XML/tool marker appeared.
+  - Current daemon log since startup: zero malformed-SSE classifications and zero raw compatibility-marker leaks; terminal upstream errors ended without a false clean stop.
+- Deployment drift: installed production binary from 13:53 differs from the freshly built release; parse files `common.rs`, `stream/context.rs`, `stream/sync.rs`, and related tests were modified after the installed binary timestamp. Latest source is verified but not deployed.
+- Proxy verification:
+  - 5/5 SOCKS containers were running and externally reachable; 3 primary plus 2 standby.
+  - Only 2 unique egress identities were observed; four proxy ports shared one exit identity. Container health therefore overstates identity diversity.
+  - No host `warp-cli` process was running.
+  - Live history attempts did not populate `proxy_node`, leaving a per-request routing observability gap.
+- Remaining risks/actions:
+  - Preserve/freeze the current dirty tree, run the required live matrix, then atomically deploy the verified release if accepted.
+  - Align the unique-exit readiness threshold with the serving topology and rotate/re-register nodes one at a time until primary identities are genuinely distinct.
+  - Persist the selected proxy node/identity into request history.
+  - A destructive live failover injection was intentionally not performed during this inspection to avoid disrupting concurrent sessions.
+
+
+## 2026-08-03 19:12 +0700 — Fix proxy health/status semantics and hour-long Retry-After leak
+
+**User-visible symptom**
+
+- Claude Code reported `429 Rate limited: no unique healthy proxy exit is currently available; retry after 47897 second(s)` while `opencode2api server status` still rendered every Docker proxy as `● healthy`.
+- Live logs confirmed upstream `Retry-After` values such as 56,370 / 54,031 / 48,212 seconds were copied into each proxy quota deadline and then echoed unchanged back to the foreground client when no route was currently eligible.
+
+**Root causes**
+
+1. `app/view.rs` and `app/proxy.rs` equated `container.running` with end-to-end health. A running SOCKS container only proves local process/port availability; it does not prove a fresh unique exit, an eligible route, or absence of an active rate-limit quarantine.
+2. Managed WARP recovery retries exhausted rotations every 30 seconds (`RATE_LIMIT_ROTATION_RETRY_SECS`), but `select_route()` returned the much longer provider quota deadline to Claude Code. The long deadline is necessary internally to quarantine the old exit IP, but is not a useful client retry interval.
+
+**Implementation**
+
+- `src/opencode/retry/policy.rs`: added `client_retry_after`, bounded to 1–30 seconds.
+- `src/opencode/retry/execute.rs`: no-route 429 now says managed recovery is running and exposes the bounded recovery cadence, while `mark_rate_limited` still retains the full provider deadline internally.
+- Added red/green regression coverage for 47,897 seconds → client 30 seconds while internal quarantine remains >47,000 seconds.
+- `src/app/view.rs`: proxy rows now say `● running` (cyan), never `healthy`; `server status` now has an explicit `Readiness` section sourced from `/health/ready`: Gateway, Egress, Workers, and verified/minimum exit identities.
+- `src/app/proxy.rs`: proxy JSON and summaries now use `running`, not `healthy`.
+- Added readiness parser regression proving a process can be running with four known identities while egress is still `not ready`.
+- Updated one stale stream test expectation only: a 400-byte reasoning delta is intentionally chunked as 256 + 144 bytes, followed by `tail`, so three deltas remain within one thinking block. Runtime was unchanged; the failing test reproduced 10/10 before correction and passed 10/10 afterward.
+
+**Automated verification**
+
+```text
+cargo fmt --check                                  PASS
+cargo clippy --locked --all-targets -- -D warnings PASS
+cargo test --locked                                PASS
+  lib 495; fast 87; integration 18; groups 35 (+1 ignored live-WARP);
+  protocol 27; compat livelock 1; stream gates 2; tool 11; 0 failures
+cargo build --release --locked --bins              PASS
+```
+
+Focused retry/status tests and the actual `select_route()` regression passed. Release artifact verified before deploy:
+
+```text
+controller sha256 de225eb18ba03842595a78102ea7645622993807060b756af1d5d837d7a0405a
+serve sha256      3a8097e4823a5e6c853d4d22fcb5f4a1b085f8fe894c03ee97241fbe6f45ee5e
+```
+
+**Real Claude Code PTY gate on side bridge `:4199` + local stub `:8124`**
+
+- Exact normal stream: one real upstream request, `● OK`, no raw marker.
+- Bash tool: two-request tool/result loop, `TOOL_RESULT_ACCEPTED`, no duplicate/raw marker.
+- Agent tool: real foreground Agent lifecycle, child/parent completion, no raw marker.
+- Upstream 500: first streaming request failed, Claude Code retried `stream=false`, recovered to `● OK`.
+- Ctrl+C during a six-second mid-stream gap: bridge logged `client disconnected; upstream stream dropped immediately`; terminal returned cleanly.
+- Ten consecutive turns: 10 requests / 10 DONE, final screen at `❯`, `? for shortcuts`, no `esc to interrupt` or raw marker.
+- `!printf PTY_SHELL_OK` on unrestricted side bridge: executed locally with clean Bash lifecycle and zero upstream requests.
+- Side fixtures were stopped by exact PID/cmdline checks; production `:4000` was untouched during this matrix.
+
+Evidence directory: `artifacts/retry-health-status-fix-20260803/`.
+
+**Atomic production deployment**
+
+- Used reviewed `artifacts/local-bridge-config-20260803/restart_bridge4.sh` (syntax checked, verified listener ownership, backup + rollback, atomic install, health and process-hash checks).
+- Old PID `1331199` → new managed PID `3290155`.
+- Running executable `/home/light/.local/bin/opencode2api-serve`, process hash exactly `3a8097e...`.
+- Five WARP containers came online; no host `warp-cli` process.
+- New human status shows separate `Readiness` and labels proxy containers `● running`; JSON status is `running`.
+- Post-deploy readiness: Gateway ready, Egress ready, Workers ready, 2 verified identities, minimum 1.
+- Real production Claude Code returned exact `POST_DEPLOY_STATUS_OK`.
+- Real production Bash tool ran `printf POST_DEPLOY_BASH_TOOL_OK`, returned the output and final `POST_DEPLOY_BASH_DONE`; no raw marker/API error, prompt restored cleanly.
+- Production `!command` remains intentionally blocked because deployed `shell_policy=disabled`; it returned the expected 403 and cleanly restored the prompt. Unrestricted shell behavior was separately verified on the side bridge.
+
+**Repository state**
+
+- Changes remain uncommitted in the existing dirty working tree; no reset/clean/commit was performed and concurrent-session changes were preserved.
+
+
+## 2026-08-03 21:22 +0700 — Recover proxy routing, compare parser baseline, harden streaming/tool transitions, deploy verified candidate
+
+**Scope and safety**
+
+- Production repository: `/home/light/GitHub/opencode2claude`.
+- The existing dirty tree and concurrent sessions were preserved; no `reset`, `clean`, broad checkout, unrelated process stop, or all-proxy restart was performed.
+- Frozen candidate source: `/home/light/Documents/opencode2claude-parse-candidate-20260803` on branch `debug/parse-candidate-20260803`.
+- Pre-candidate snapshot: `/home/light/Documents/opencode2claude-snapshot-20260803-2033/`.
+- Existing unrelated listeners on ports `4010` and `4610` were left untouched.
+
+**Proxy 429/recovery root causes and fixes**
+
+- Provider `Retry-After` values such as `47897` seconds were correctly useful as an internal exit-IP quarantine, but were incorrectly returned unchanged to Claude Code when no route was currently eligible. Client-visible retry is now bounded to the managed recovery cadence (maximum 30 seconds), while the long internal quota deadline is retained.
+- Recovery previously processed nodes sequentially; a slow identity verification could block later primaries for almost a minute. Recovery batches now process primary nodes concurrently with a bounded limit, preserving cancellation and worker heartbeat behavior.
+- Route/readiness decisions distinguish Docker/container liveness from a usable, verified, non-quarantined exit identity. CLI proxy rows report `running`, and `server status` exposes explicit Gateway/Egress/Workers readiness.
+- Duplicate recovered exit identities are rejected rather than treated as independent capacity. Rotation exhaustion defers another attempt by 30 seconds instead of leaking the long provider quota to the foreground client.
+- No host `warp-cli` process was invoked or enabled. `/bin/warp-svc` PID 857 is an existing system service; all managed lifecycle operations remained inside the proxy containers.
+
+**Parser baseline investigation requested by user**
+
+- Yesterday's stable baseline was isolated at commit `f984d9c9e60f9251b0682098911a74994b990a72` (2026-08-02 16:00) in `/home/light/Documents/opencode2claude-parse-baseline-20260802`.
+- The morning parse commit `52cdf0b53c8634de055bd03d0c30f621c60f582a` (2026-08-03 08:09) was isolated in `/home/light/Documents/opencode2claude-parse-morning-52cdf0b` and proved not to compile standalone: it referenced APIs/fields only present in uncommitted files (`is_deepseek_v4_flash_free_model`, `LeasedResponse::proxy_index`, `OpenAiRequest::parallel_tool_calls`). This confirmed the morning state was a half-committed/half-working-tree integration rather than a self-contained parser release.
+- A wholesale rollback to `f984d9c` was rejected after direct A/B testing:
+  - old parser emitted one 53 KB reasoning delta and one 28 KB text delta; real PTY reasoning rendered in one instant and text in about 80 ms;
+  - old parser displayed the full truncated pre-tool sentence `Proxy up (200), env đủ. Copy tinyctfer sang tools/ và đọc code container conf`;
+  - candidate splits the same blobs into 209 reasoning + 112 text deltas, maximum 256 bytes, preserves every byte/UTF-8 marker, and clips only the unfinished native-tool transition tail while still executing the tool exactly once.
+
+**Streaming and tool-transition implementation**
+
+- Large single provider deltas are UTF-8-safe split into at most 256-byte Anthropic deltas.
+- Pathological multi-chunk deltas are paced by 2 ms between chunks; normal provider deltas at or below 256 bytes receive no added delay.
+- RED/GREEN paused-time tests prove giant text and reasoning no longer enqueue in one scheduler burst.
+- Real Claude Code PTY measurement improved giant reasoning render span from `0 ms` to about `440 ms`, and giant text from about `80 ms` to about `308 ms`, with no content loss.
+- `split_completed_pre_tool_text()` is shared by streaming and non-streaming native tool paths. It keeps narration through the last trustworthy sentence boundary and removes only the unfinished tail before a native `tool_calls` transition. DSML/compat text that remains valid after marker removal is preserved.
+- Generic XML/compat marker families, malformed-marker bounded retry/resynchronization, native/DSML/compat duplicate suppression, semantic argument validation, terminal error event semantics, tool-result continuation, and client-disconnect cancellation were verified together.
+
+**Fresh automated quality gate on frozen candidate**
+
+```text
+git diff --check                                      PASS
+cargo fmt --check                                      PASS
+cargo clippy --locked --all-targets -- -D warnings     PASS
+cargo test --locked --quiet                            PASS
+  unit 499; fast 87; integration 18; parser-fuzz 2;
+  protocol 36; retry-livelock 1; stream-retry-gates 2;
+  live WARP system test 1 ignored by design; 0 failures
+cargo build --release --locked --bins                  PASS
+```
+
+Source hashes were captured before and after the complete gate and were identical.
+
+Verified candidate artifacts:
+
+```text
+controller sha256 3437ff6edb65fb31cc560ee8dafaf2a5e8745d2431699128e2c6bb7a2c1484e8
+serve sha256      17036ae15220e69c44acd8400c8b420b2425a7dd8fe8a4d6ae973c6931a68b43
+```
+
+**Real Claude Code PTY verification before deployment**
+
+- Giant one-event reasoning/text blob: bounded deltas, visible progressive rendering, complete byte/UTF-8 reconstruction, one `message_stop`, no error event.
+- Native Bash transition: complete preamble only, unfinished tail absent, one Bash side effect, one continuation, final token, clean prompt.
+- Generic XML Bash: fragmented XML converted to one Bash call, one side effect, no raw XML.
+- Generic XML Agent: one real child Agent, parent received the child result and finished cleanly.
+- Malformed XML retry: malformed attempt suppressed; valid retry emitted one Bash; tool result completed on the third upstream request; side effect exactly once.
+- Mid-stream upstream error: partial text never appeared; Claude Code recovered through non-stream fallback and rendered only the recovered final response.
+- Ctrl+C mid-stream: prompt restored in about 270 ms, no stale spinner or `esc to interrupt`, and no retry after client disconnect.
+- Ten consecutive turns in one Claude Code session: 10/10 exact request order, clean prompt, no raw marker or accumulated terminal dirt.
+- Claude Code `!printf PTY_SHELL_OK`: shell mode output rendered and prompt restored cleanly.
+
+Evidence:
+
+- `artifacts/giant-stream-pty-20260803/`
+- `artifacts/generic-xml-tool-call-recovery-20260803/candidate-live/`
+
+**Atomic production deployment**
+
+- Deployed with `/home/light/restart_bridge_candidate_20260803.sh`.
+- Script rebuilt the frozen candidate, verified exact hashes, backed up installed binaries, stopped production, installed with same-directory atomic renames, started through the installed controller, polled health/readiness, verified the live process hash, and included automatic rollback on any failure.
+- Rollback backup: `/tmp/opencode2api-deploy-20260803-211333`.
+- Old production PID `3466836` → current managed PID `89252`.
+- Running executable and installed server both match sha256 `17036ae15220e69c44acd8400c8b420b2425a7dd8fe8a4d6ae973c6931a68b43`.
+- Installed controller matches sha256 `3437ff6edb65fb31cc560ee8dafaf2a5e8745d2431699128e2c6bb7a2c1484e8`.
+- A transient `dashboard_auth_configured: false` appeared during the first milliseconds of supervisor metadata initialization; repeated status checks stabilized to the correct configured value `true`.
+
+**Post-deploy production verification**
+
+- Readiness passed 15/15, then 12/12 consecutive polls. Final state had 3 verified unique exit identities with minimum 1.
+- Direct real requests returned exact `PROD_DIRECT_OK`, `PROD_FINAL_OK`, HTTP 200.
+- Real Claude Code text request rendered `PROD_CLAUDE_TEXT_OK` after live reasoning and returned to a clean prompt.
+- Real Claude Code Bash fixture:
+  - exactly one `Bash(/tmp/oc2-prod-bash-fixture.sh)`;
+  - side effect exactly once;
+  - tool result and final `PROD_CLAUDE_BASH_SECRET_OK`;
+  - no raw marker or duplicate execution.
+- Real Claude Code Agent fixture:
+  - exactly one parent Agent;
+  - child executed its fixture exactly once;
+  - parent received Task Output and returned `PROD_CLAUDE_AGENT_SECRET_OK`;
+  - no parent Bash, raw marker, or duplicate side effect.
+- Since deploy: zero panic, zero `malformed_tool_use`, zero raw-tool leak, zero compat-retry exhaustion, and zero `no unique healthy proxy exit` errors. One `SSE send failed because receiver was closed` was produced by an intentionally premature test-harness disconnect and was followed by immediate upstream cancellation.
+- Side bridges/stubs created for this task (`4620`–`4623`, `8124`, `8196`) were stopped by exact PID/cmdline ownership checks. Production `4000` remained online; unrelated `4010` and `4610` listeners remain untouched.
+
+**Current production snapshot**
+
+```text
+Endpoint       http://127.0.0.1:4000
+Dashboard      http://127.0.0.1:4000/dashboard
+PID            89252
+Model          opencode/deepseek-v4-flash-free
+Supervisor     managed
+API auth       disabled
+Dashboard auth configured
+Readiness      ready (Gateway/Egress/Workers)
+Verified exits 3 (minimum 1)
+```
+
+**Repository state / next phase**
+
+- The verified and deployed source lives in the frozen candidate worktree. No merge, commit, reset, or cleanup of the user's main dirty working tree was performed.
+- Backend proxy/parse/streaming stabilization is verified. The next planned phase is the required live dashboard screenshot review and UI refinement, while preserving this production baseline.
+
+
+## 2026-08-06 10:00 +0700 — Current parse/proxy repository and runtime inspection
+
+**Scope and safety**
+
+- Reviewed prior project handoffs, `CLAUDE.md`, the repository worklog, worktrees, current dirty tree, installed runtime, proxy pool, daemon logs, request-history SQLite data, and fresh automated quality gates.
+- No source file was edited, no commit/reset/clean was performed, and the production bridge/proxy containers were not restarted, rotated, purged, or redeployed.
+- User's latest project direction remains parse/proxy stabilization; the older UI screenshot-review handoff is not the active priority.
+
+**Repository snapshot**
+
+- Repo: `/home/light/GitHub/opencode2claude`
+- Branch/HEAD: `completion/full-repository-20260711` at `bc60b40f5dbafbe78454fc0864aad83ca59e961a`.
+- Working tree remains intentionally dirty: 37 tracked files changed (primarily parse/stream/retry/proxy/docker/status), plus untracked parser plans, `report/final-report.md`, `tests/retry_compat_livelock.rs`, and `tests/stream_retry_gates.rs`.
+- Main-repo source matches the frozen `debug/parse-candidate-20260803` worktree for repository source files; only local configuration/report/tmp directories differ.
+- Key parse files have edits timestamped after the previous 2026-08-03 21:22 worklog deploy entry. `artifacts/parse-fragment-20260803/pty-result.json` records exact-once tool execution, safe preamble retention, unfinished-tail suppression, clean prompt restoration, and no raw tool marker. The Aug-4 binary installation and Aug-6 service start were not previously documented, so deployed-binary provenance is incomplete.
+
+**Current runtime**
+
+```text
+Endpoint       http://127.0.0.1:4000
+Dashboard      http://127.0.0.1:4000/dashboard
+PID            7868
+Started        2026-08-06 07:55:56 +0700
+Model          opencode/deepseek-v4-flash-free
+Supervisor     managed
+API auth       disabled
+Dashboard auth configured
+Readiness      ready (Gateway/Egress/Workers)
+Verified exits 2 (minimum 1)
+```
+
+- Running executable: `/home/light/.local/bin/opencode2api-serve`.
+- Running/installed serve sha256: `613bdf0ce7f2bce4b08ceb7c9883adf8d5a058920f6fa5bf2def2a4b9207c8de` (installed 2026-08-04 15:11 +0700).
+- A fresh current-source release serve artifact was produced with sha256 `c9c140b16d9b74dc73c46bfcad110d1243a7f62ccffd873c31ddf2340f0fc95c`, which differs from production. The release-build tool invocation exceeded its execution timeout, so the release-build gate is not recorded as a clean PASS and no deployment was attempted.
+
+**Fresh automated verification**
+
+```text
+git diff --check                                      PASS
+cargo fmt --check                                     PASS
+cargo clippy --locked --all-targets -- -D warnings   PASS
+cargo test --locked                                   PASS
+  unit 503; fast 87; integration 18; parser fuzz 2;
+  protocol 37; compat livelock 1; stream gates 2;
+  total 650 passed, 0 failed, 1 live-WARP test ignored
+```
+
+Focused checks also passed: proxy-pool 56/56 and sanitizer 10/10.
+
+No fresh real-Claude-Code PTY matrix was run during this inspection; prior PTY evidence remains historical evidence rather than a current deployment gate.
+
+**Live parse/history evidence (last two hours at inspection time)**
+
+- 727 history requests: 689 completed with `tool_use`, 29 completed with `end_turn`, 5 still running, 3 failed with `mid_stream_upstream_error`, and 1 client-cancelled.
+- 723 upstream attempts completed HTTP 200; no captured request was incomplete or truncated; 695 tool calls; zero recorded bridge retries/fallbacks.
+- Current daemon run contained no panic, `malformed_tool_use`, raw compatibility marker, or `no unique healthy proxy exit` message.
+- All 727 history attempts still have `proxy_node = NULL`; selected proxy/identity persistence remains an observability gap.
+
+**Proxy condition**
+
+- All five Docker SOCKS containers are running: primaries 40001–40003 and standbys 40004–40005.
+- Pool is available but degraded, not fully healthy: logs repeatedly show `opencode-warp-1` with an open circuit and `opencode-warp-2` failing 2-probe identity consensus approximately every 10 seconds.
+- Since the current daemon start there were 648 identity-verification warnings and 98 sticky-primary-unavailable messages, while readiness stayed `ready` because two identities satisfy the configured minimum of one.
+- Independent live egress probes returned inconsistent Cloudflare addresses across providers/ports, confirming that container liveness is not equivalent to one stable unique identity per node.
+- No host `warp-cli` process was running; the existing `/bin/warp-svc` system service remains present.
+
+**Priority next actions**
+
+1. Treat proxy recovery/identity-consensus churn as the active defect: reproduce per node, trace probe disagreement and open-circuit recovery, then add a failing regression before changing behavior.
+2. Persist the leased `proxy_node` and verified identity into history attempts so routing failures can be correlated to requests.
+3. Reconcile and freeze the dirty source, update missing Aug-4/Aug-6 deployment provenance, then run the full real-Claude-Code PTY deployment gate before any atomic production deployment.
+4. Keep UI work out of scope until parse/proxy stability and runtime/source provenance are closed.
+
+
+## 2026-08-06 10:28 +0700 — Claude Code xhigh-compatible display model with DeepSeek routing
+
+**User goal**
+
+- Allow Claude Code effort modes such as `/effort ultracode` without changing the actual free upstream model.
+- Let supported Claude model aliases be selected while the bridge continues routing Claude Code traffic to `opencode/deepseek-v4-flash-free`.
+
+**Root cause and evidence**
+
+- `~/.claude/settings.json` selected `claude-sonnet-4-6`, which Claude Code rejects for the interactive Ultracode/xhigh mode.
+- The same settings also forced `CLAUDE_CODE_EFFORT_LEVEL=max`; a real PTY session reported that this environment variable overrides `/effort ultracode`.
+- The production bridge already had the correct routing policy for the bridge-owned Claude Code key: requested aliases are ignored for upstream selection and resolve to the configured DeepSeek model.
+- Live history confirmed `claude-fable-5`, `claude-sonnet-5`, and `claude-opus-5` requests all used `opencode/deepseek-v4-flash-free` as `effective_model`.
+
+**Applied runtime/client configuration**
+
+- Backed up the previous settings to `~/.claude/settings.json.opencode2api-model-backup-20260806-1006`.
+- Set the Claude Code display/capability model to `claude-opus-5`.
+- Removed the forced `CLAUDE_CODE_EFFORT_LEVEL` entry so session commands can select low/medium/high/xhigh/max/ultracode.
+- Preserved `ANTHROPIC_BASE_URL=http://127.0.0.1:4000`, the bridge integration key, `CLAUDE_CODE_ALWAYS_ENABLE_EFFORT=1`, and the existing thinking-token ceiling.
+
+**Repository changes**
+
+- `src/application/client_config.rs`: generated Claude Code settings now include `model = claude-opus-5`, while `OPENCODE_MODEL` remains the real configured upstream model.
+- `src/middleware.rs`: expanded the regression assertion to prove Sonnet 4.6, Sonnet 5, Fable 5, Opus 4.8, and Opus 5 all resolve to DeepSeek for the bridge-owned Claude Code key.
+- TDD evidence: the generated-client-config test first failed with `left: Null`, then passed after adding the compatibility model field.
+
+**Fresh verification**
+
+```text
+Real Claude Code 2.1.223 PTY:
+  startup: Opus 5 with xhigh effort
+  /effort ultracode: accepted
+  result: xhigh + dynamic workflow orchestration
+  no unsupported-model warning
+  no forced-effort override warning
+
+Live model-routing matrix:
+  claude-fable-5  -> opencode/deepseek-v4-flash-free
+  claude-sonnet-5 -> opencode/deepseek-v4-flash-free
+  claude-opus-5   -> opencode/deepseek-v4-flash-free
+
+Quality gates:
+  git diff --check                                    PASS
+  cargo fmt --check                                   PASS
+  cargo clippy --locked --all-targets -- -D warnings PASS
+  cargo test --locked                                 PASS
+    650 passed, 0 failed, 1 live-WARP test ignored
+```
+
+**Deployment note**
+
+- No production bridge restart or binary deployment was needed for the immediate fix: Claude Code settings are active for new sessions, and the running bridge already performs the requested DeepSeek redirect.
+- The source change updates future generated Claude Code presets. It was not deployed independently because the repository contains unrelated dirty parse/proxy changes and deploying the whole tree would require the complete production PTY deployment gate.
+
+## 2026-08-06 10:27 +0700 — Claude Code defaults to Ultracode while gateway stays on DeepSeek
+
+- Root cause: `CLAUDE_CODE_EFFORT_LEVEL=ultracode` is not a valid persistent effort value; Claude Code 2.1.223 falls back to `high`. Binary inspection confirmed the dedicated settings flag `ultracode: true`, which resolves launch effort to `xhigh` and enables dynamic workflows.
+- Updated `/home/light/.claude/settings.json` to keep `model: claude-opus-5`, set top-level `ultracode: true`, and remove the invalid forced `CLAUDE_CODE_EFFORT_LEVEL` value.
+- Updated `src/application/client_config.rs` so newly generated Claude Code settings include both `model: claude-opus-5` and `ultracode: true`; added a regression assertion first, observed it fail, then implemented the setting and observed it pass.
+- Fresh real PTY verification in `/home/light/GitHub/opencode2claude`: startup displays `Opus 5 with xhigh effort`; status displays `effort: ultracode · xhigh effort + dynamic workflows for maximum thoroughness`; no unsupported-model or effort-override warning.
+- Fresh checks: targeted client-config test PASS, `cargo fmt --check` PASS, `git diff --check` PASS. No bridge restart or proxy mutation was needed; requests remain forced by the Claude integration policy to `opencode/deepseek-v4-flash-free`.

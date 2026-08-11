@@ -1,11 +1,11 @@
 //! Non-streaming upstream forwarding.
 
 use super::common::{
-    extract_compat_tool_requests_detailed, inject_search_results,
+    extract_compat_tool_requests_detailed, inject_search_results, invalid_semantic_tool_argument,
     looks_like_unverified_tool_success, matching_tool_name, normalize_dsml_arguments,
     normalize_search_query, prepare_compat_tool_retry, prepare_final_search_synthesis,
     read_bounded_body, resolve_search_query, search_results_with_instruction,
-    tool_call_fingerprint,
+    split_completed_pre_tool_text, tool_call_fingerprint,
 };
 use crate::error::BridgeError;
 use crate::handlers::MessagesRequest;
@@ -306,6 +306,36 @@ pub async fn forward_to_llm_sync(
                 .is_none()
                 .then(|| call.function.name.clone())
         });
+        let invalid_semantic_arguments = native_tool_calls
+            .iter()
+            .filter_map(|call| {
+                let name = matching_tool_name(&call.function.name, &payload)?;
+                let arguments =
+                    serde_json::from_str::<serde_json::Value>(&call.function.arguments).ok()?;
+                let arguments = normalize_dsml_arguments(&name, arguments, &payload);
+                invalid_semantic_tool_argument(&name, &arguments)
+                    .map(|field| format!("{name}.{field}"))
+            })
+            .chain(dsml_tool_calls.iter().filter_map(|call| {
+                let name = matching_tool_name(&call.name, &payload)?;
+                let arguments = normalize_dsml_arguments(&name, call.arguments.clone(), &payload);
+                invalid_semantic_tool_argument(&name, &arguments)
+                    .map(|field| format!("{name}.{field}"))
+            }))
+            .chain(
+                compat_tool_calls
+                    .iter()
+                    .filter_map(|(raw_name, raw_arguments)| {
+                        let name = matching_tool_name(raw_name, &payload)?;
+                        let arguments =
+                            serde_json::from_str::<serde_json::Value>(raw_arguments).ok()?;
+                        let arguments = normalize_dsml_arguments(&name, arguments, &payload);
+                        invalid_semantic_tool_argument(&name, &arguments)
+                            .map(|field| format!("{name}.{field}"))
+                    }),
+            )
+            .next();
+        let invalid_tool_arguments = malformed_native_arguments.or(invalid_semantic_arguments);
         // Count semantic invocations, not wire encodings. A model may echo the
         // same call in native, reasoning, and visible-marker channels.
         let mut unique_calls = HashSet::new();
@@ -351,7 +381,7 @@ pub async fn forward_to_llm_sync(
 
         let batch_outcome = classify_sync_tool_batch(
             unavailable_tool.as_deref(),
-            malformed_native_arguments.as_deref(),
+            invalid_tool_arguments.as_deref(),
             search_tool_calls,
             total_tool_calls,
         );
@@ -476,16 +506,9 @@ pub async fn forward_to_llm_sync(
                 results
             };
 
-            let is_compact = is_compact_request(&payload);
             let text_cleaned = cleaned_message_content
                 .as_deref()
-                .map(|text| {
-                    if is_compact {
-                        text.to_string()
-                    } else {
-                        strip_system_tags(text)
-                    }
-                })
+                .map(strip_system_tags)
                 .unwrap_or_default();
 
             let should_finalize = final_turn || completed_searches >= max_search_loops;
@@ -537,20 +560,31 @@ pub async fn forward_to_llm_sync(
 
         // 2. Text block
         if let Some(text) = &cleaned_message_content {
-            let is_compact = is_compact_request(&payload);
-            let cleaned = if is_compact {
-                text.to_string()
-            } else {
-                strip_system_tags(text)
-            };
+            let cleaned = strip_system_tags(text);
             if !cleaned.is_empty() {
-                if total_tool_calls > 0 && looks_like_unverified_tool_success(&cleaned) {
-                    warn!("Suppressing unverified sync success claim before tool_result");
-                } else {
-                    capture.append_response(&cleaned);
+                let visible_text =
+                    if total_tool_calls > 0 && looks_like_unverified_tool_success(&cleaned) {
+                        warn!("Suppressing unverified sync success claim before tool_result");
+                        None
+                    } else if !native_tool_calls.is_empty() {
+                        let (completed, unfinished) = split_completed_pre_tool_text(&cleaned);
+                        if !unfinished.trim().is_empty() {
+                            warn!(
+                                dropped_bytes = unfinished.len(),
+                                preview = ?unfinished.chars().take(160).collect::<String>(),
+                                "Dropping unfinished visible text tail before sync native tool call"
+                            );
+                        }
+                        Some(completed)
+                    } else {
+                        Some(cleaned.as_str())
+                    };
+
+                if let Some(visible_text) = visible_text.filter(|value| !value.is_empty()) {
+                    capture.append_response(visible_text);
                     content_blocks.push(serde_json::json!({
                         "type": "text",
-                        "text": cleaned
+                        "text": visible_text
                     }));
                 }
             }

@@ -28,6 +28,52 @@ fn uptime_str(started_at: u64) -> String {
     }
 }
 
+fn proxy_container_state_text(running: bool) -> &'static str {
+    if running {
+        "● running"
+    } else {
+        "○ offline"
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReadinessSummary {
+    ready: bool,
+    workers_ready: bool,
+    egress_ready: bool,
+    verified_unique_exit_ips: u64,
+    minimum_unique_exit_ips: u64,
+}
+
+fn parse_readiness_summary(value: &serde_json::Value) -> Option<ReadinessSummary> {
+    Some(ReadinessSummary {
+        ready: value.get("status")?.as_str()? == "ready",
+        workers_ready: value.get("checks")?.get("critical_workers")?.as_bool()?,
+        egress_ready: value.get("checks")?.get("egress")?.as_bool()?,
+        verified_unique_exit_ips: value
+            .get("egress")?
+            .get("verified_unique_exit_ips")?
+            .as_u64()?,
+        minimum_unique_exit_ips: value
+            .get("egress")?
+            .get("minimum_unique_exit_ips")?
+            .as_u64()?,
+    })
+}
+
+async fn fetch_readiness(port: u16) -> Option<ReadinessSummary> {
+    let response = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .ok()?
+        .get(format!("http://127.0.0.1:{port}/health/ready"))
+        .send()
+        .await
+        .ok()?;
+    let body = response.json::<serde_json::Value>().await.ok()?;
+    parse_readiness_summary(&body)
+}
+
 /// Print the product mark and one concise descriptor line.
 pub(super) fn print_brand_header(title: &str, subtitle: &str) {
     println!();
@@ -215,9 +261,9 @@ pub(super) async fn print_proxy_table() -> Table {
             "standby"
         };
         let status = if *running {
-            CtCell::new("● healthy").fg(CtColor::Green)
+            CtCell::new(proxy_container_state_text(true)).fg(CtColor::Cyan)
         } else {
-            CtCell::new("○ offline").fg(CtColor::DarkGrey)
+            CtCell::new(proxy_container_state_text(false)).fg(CtColor::DarkGrey)
         };
 
         let mut row = vec![CtCell::new(port.to_string()), CtCell::new(role), status];
@@ -311,6 +357,55 @@ pub(super) async fn cmd_print_status(
                     ),
                 ])
             );
+
+            print_section("Readiness");
+            if let Some(readiness) = fetch_readiness(port).await {
+                println!(
+                    "{}",
+                    presentation::facts(&[
+                        (
+                            "Gateway",
+                            if readiness.ready {
+                                "ready".green().to_string()
+                            } else {
+                                "not ready".red().to_string()
+                            },
+                        ),
+                        (
+                            "Egress",
+                            if readiness.egress_ready {
+                                "ready".green().to_string()
+                            } else {
+                                "not ready".red().to_string()
+                            },
+                        ),
+                        (
+                            "Workers",
+                            if readiness.workers_ready {
+                                "ready".green().to_string()
+                            } else {
+                                "degraded".yellow().to_string()
+                            },
+                        ),
+                        (
+                            "Exit identities",
+                            format!(
+                                "{} verified · minimum {}",
+                                readiness.verified_unique_exit_ips,
+                                readiness.minimum_unique_exit_ips
+                            ),
+                        ),
+                    ])
+                );
+            } else {
+                println!(
+                    "{}",
+                    presentation::facts(&[(
+                        "Gateway",
+                        "readiness unavailable".yellow().to_string(),
+                    )])
+                );
+            }
 
             maybe_print_proxy_table(fmt).await;
             println!();
@@ -584,6 +679,30 @@ mod tests {
             lines[0],
             "export ANTHROPIC_API_KEY='token'\"'\"'with-quote'"
         );
+    }
+
+    #[test]
+    fn proxy_container_state_does_not_claim_end_to_end_health() {
+        assert_eq!(proxy_container_state_text(true), "● running");
+        assert_eq!(proxy_container_state_text(false), "○ offline");
+    }
+
+    #[test]
+    fn readiness_summary_distinguishes_running_process_from_unusable_egress() {
+        let summary = parse_readiness_summary(&serde_json::json!({
+            "status": "not_ready",
+            "checks": {"critical_workers": true, "egress": false},
+            "egress": {
+                "verified_unique_exit_ips": 4,
+                "minimum_unique_exit_ips": 1
+            }
+        }))
+        .expect("valid readiness response");
+        assert!(!summary.ready);
+        assert!(summary.workers_ready);
+        assert!(!summary.egress_ready);
+        assert_eq!(summary.verified_unique_exit_ips, 4);
+        assert_eq!(summary.minimum_unique_exit_ips, 1);
     }
 
     #[test]

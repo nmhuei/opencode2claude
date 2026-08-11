@@ -346,18 +346,26 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(claude.client.key_id, "system_claude_code");
-        assert_eq!(
-            claude
-                .client
-                .policy
-                .resolve_model(
-                    Some("claude-sonnet-4-6"),
-                    state.config.model.as_deref(),
-                    crate::config::DEFAULT_MODEL,
-                )
-                .unwrap(),
-            "opencode/deepseek-v4-flash-free"
-        );
+        for requested_model in [
+            "claude-sonnet-4-6",
+            "claude-sonnet-5",
+            "claude-fable-5",
+            "claude-opus-4-8",
+            "claude-opus-5",
+        ] {
+            assert_eq!(
+                claude
+                    .client
+                    .policy
+                    .resolve_model(
+                        Some(requested_model),
+                        state.config.model.as_deref(),
+                        crate::config::DEFAULT_MODEL,
+                    )
+                    .unwrap(),
+                "opencode/deepseek-v4-flash-free"
+            );
+        }
 
         let application = super::resolve_authenticated_client(
             &state,

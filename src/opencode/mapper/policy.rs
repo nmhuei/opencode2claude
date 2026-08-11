@@ -12,6 +12,12 @@ pub fn is_deepseek_v4_model(model: &str) -> bool {
     name.contains("deepseek-v4-flash") || name.contains("deepseek-v4-pro")
 }
 
+pub fn is_deepseek_v4_flash_free_model(model: &str) -> bool {
+    model
+        .to_ascii_lowercase()
+        .contains("deepseek-v4-flash-free")
+}
+
 pub(super) fn is_reasoning_heavy_model(model: &str) -> bool {
     let name = model.to_ascii_lowercase();
     is_deepseek_v4_model(&name)
@@ -125,6 +131,14 @@ pub(super) fn normalize_response_format(
     let format = payload.output_config.as_ref()?.format.as_ref()?;
     let format_type = format.get("type").and_then(Value::as_str)?;
 
+    // The free DFLASH backend rejects every response_format variant as
+    // grammar-constrained decoding. The schema cannot be forwarded upstream;
+    // [`dropped_schema_system_instruction`] preserves it in the system prompt
+    // instead.
+    if is_deepseek_v4_flash_free_model(mapped_model) {
+        return None;
+    }
+
     match format_type {
         "json_object" => Some(json!({"type": "json_object"})),
         "json_schema" if is_deepseek_v4_model(mapped_model) => {
@@ -145,6 +159,27 @@ pub(super) fn normalize_response_format(
         }
         _ => None,
     }
+}
+
+/// System-prompt instruction that preserves a structured-output schema for
+/// free DFLASH, whose upstream `response_format` is dropped by
+/// [`normalize_response_format`]: the schema must still reach the model.
+pub(super) fn dropped_schema_system_instruction(
+    payload: &MessagesRequest,
+    mapped_model: &str,
+) -> Option<String> {
+    if !is_deepseek_v4_flash_free_model(mapped_model) {
+        return None;
+    }
+    let format = payload.output_config.as_ref()?.format.as_ref()?;
+    if format.get("type").and_then(Value::as_str)? != "json_schema" {
+        return None;
+    }
+    let schema = format.get("schema")?;
+    Some(format!(
+        "The user requested structured output. Return exactly one JSON object matching this JSON schema and no other text:\n{}",
+        serde_json::to_string_pretty(schema).ok()?
+    ))
 }
 
 pub(super) fn normalize_upstream_max_tokens(

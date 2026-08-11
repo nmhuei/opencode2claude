@@ -9,6 +9,10 @@ use crate::opencode::forward::common::{
 use crate::opencode::sanitize::{extract_and_clean_dsml_detailed, strip_system_tags};
 use crate::sse::SseEventBuilder;
 use crate::stream_tracker::SseBlockTracker;
+use axum::body::to_bytes;
+use axum::response::{sse::Sse, IntoResponse};
+use futures_util::stream;
+use std::convert::Infallible;
 
 #[test]
 fn test_split_pending_text() {
@@ -132,7 +136,10 @@ async fn long_reasoning_is_segmented_for_interactive_rendering() {
         1,
         "{joined}"
     );
-    assert_eq!(joined.matches("thinking_delta").count(), 2, "{joined}");
+    // The 400-byte provider delta is intentionally split into 256 + 144 byte
+    // Anthropic deltas, then the follow-up `tail` remains a third delta. This
+    // is transport chunking only: all three stay inside the same thinking block.
+    assert_eq!(joined.matches("thinking_delta").count(), 3, "{joined}");
     assert_eq!(
         joined.matches("event: content_block_stop").count(),
         0,
@@ -144,7 +151,7 @@ async fn long_reasoning_is_segmented_for_interactive_rendering() {
 
 #[tokio::test]
 async fn oversized_reasoning_segments_into_a_second_block() {
-    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(128);
     let builder = SseEventBuilder::new("msg_segmented_big".to_string(), "model".to_string());
     let mut tracker = SseBlockTracker::new();
     let mut ctx = StreamContext::new(false);
@@ -176,7 +183,7 @@ async fn oversized_reasoning_segments_into_a_second_block() {
     let joined = events.join("\n");
     assert_eq!(joined.matches("event: content_block_start").count(), 2);
     assert_eq!(joined.matches("event: content_block_stop").count(), 1);
-    assert_eq!(joined.matches("thinking_delta").count(), 2);
+    assert!(joined.matches("thinking_delta").count() > 2, "{joined}");
     assert_eq!(ctx.accumulated_thinking, format!("{big}tail"));
     assert_eq!(
         tracker.thinking_idx(),
@@ -357,6 +364,61 @@ async fn test_process_openai_sse_line_done_marker_stops_outer_stream() {
     assert!(done);
 }
 
+#[tokio::test]
+async fn mid_stream_upstream_error_emits_error_and_ends_the_stream() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    let builder = SseEventBuilder::new("msg_error".to_string(), "model".to_string());
+    let mut tracker = SseBlockTracker::new();
+    let mut ctx = StreamContext::new(false);
+    ctx.message_started = true;
+    let payload = empty_messages_request();
+    let line = r#"data: {"error": {"message": "mid-stream failure", "type": "server_error", "code": 500}}"#;
+
+    let done = process_openai_sse_line(line, &mut ctx, &mut tracker, &tx, &builder, &payload).await;
+
+    assert!(done, "error payload must terminate the upstream stream");
+    assert!(
+        ctx.error_terminated,
+        "error payload must mark the stream error-terminated"
+    );
+    let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        .await
+        .expect("timed out waiting for the error event")
+        .expect("error event missing");
+    let debug = format!("{event:?}");
+    assert!(
+        debug.contains("error"),
+        "expected an error event, got: {debug}"
+    );
+    assert!(
+        !debug.contains("message_stop"),
+        "error must end the stream without message_stop, got: {debug}"
+    );
+    assert!(
+        !tracker.has_any_blocks_ever_opened(),
+        "an error payload must not open content blocks"
+    );
+}
+
+#[tokio::test]
+async fn compact_mode_still_strips_system_leak_tags() {
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    let builder = SseEventBuilder::new("msg_compact".to_string(), "model".to_string());
+    let mut tracker = SseBlockTracker::new();
+    let mut ctx = StreamContext::new(true);
+    ctx.message_started = true;
+    let payload = empty_messages_request();
+    let line = r#"data: {"choices":[{"delta":{"content":"<thinking>hidden</thinking>visible"},"finish_reason":null}]}"#;
+
+    let done = process_openai_sse_line(line, &mut ctx, &mut tracker, &tx, &builder, &payload).await;
+
+    assert!(!done);
+    assert_eq!(
+        ctx.accumulated_text, "hiddenvisible",
+        "compact mode must still strip leaked system tags"
+    );
+}
+
 #[test]
 fn test_get_correct_tool_name() {
     let req = MessagesRequest {
@@ -481,6 +543,163 @@ async fn search_arguments_received_before_name_are_preserved_by_index() {
     assert_eq!(ctx.search_tc_id, "call_search");
     assert_eq!(ctx.search_tc_name, "WebSearch");
     assert_eq!(ctx.search_tc_args, r#"{"query":"Claude Code security"}"#);
+}
+
+#[tokio::test]
+async fn native_tool_name_and_id_fragments_are_reassembled_by_index() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+    let builder = SseEventBuilder::new("msg_fragmented_identity".to_string(), "model".to_string());
+    let mut tracker = SseBlockTracker::new();
+    let mut ctx = StreamContext::new(false);
+    ctx.message_started = true;
+    let payload = MessagesRequest {
+        tools: Some(vec![AnthropicTool {
+            name: "Bash".to_string(),
+            description: "run a command".to_string(),
+            input_schema: serde_json::json!({
+                "type":"object",
+                "properties":{"command":{"type":"string"}}
+            }),
+            ..Default::default()
+        }]),
+        ..empty_messages_request()
+    };
+
+    let first = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_","function":{"name":"Ba","arguments":"{\"command\":\"printf frag"}}]},"finish_reason":null}]}"#;
+    let second = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"bash","function":{"name":"sh","arguments":"mented\"}"}}]},"finish_reason":"tool_calls"}]}"#;
+
+    process_openai_sse_line(first, &mut ctx, &mut tracker, &tx, &builder, &payload).await;
+    process_openai_sse_line(second, &mut ctx, &mut tracker, &tx, &builder, &payload).await;
+
+    let mut joined = String::new();
+    while let Ok(event) = rx.try_recv() {
+        joined.push_str(&format!("{event:?}\n"));
+    }
+
+    assert!(ctx.has_emitted_tool_use, "{joined}");
+    assert!(!ctx.compat_retry_requested, "{joined}");
+    assert!(joined.contains("call_bash"), "{joined}");
+    assert!(joined.contains("Bash"), "{joined}");
+    assert!(joined.contains("printf fragmented"), "{joined}");
+}
+
+#[tokio::test]
+async fn native_tool_cumulative_name_and_id_snapshots_do_not_duplicate_prefixes() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+    let builder = SseEventBuilder::new("msg_cumulative_identity".to_string(), "model".to_string());
+    let mut tracker = SseBlockTracker::new();
+    let mut ctx = StreamContext::new(false);
+    ctx.message_started = true;
+    let payload = MessagesRequest {
+        tools: Some(vec![AnthropicTool {
+            name: "Bash".to_string(),
+            description: "run a command".to_string(),
+            input_schema: serde_json::json!({"type":"object"}),
+            ..Default::default()
+        }]),
+        ..empty_messages_request()
+    };
+
+    let first = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_","function":{"name":"Ba","arguments":"{\"command\":\"printf cum"}}]},"finish_reason":null}]}"#;
+    let second = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_bash","function":{"name":"Bash","arguments":"ulative\"}"}}]},"finish_reason":"tool_calls"}]}"#;
+
+    process_openai_sse_line(first, &mut ctx, &mut tracker, &tx, &builder, &payload).await;
+    process_openai_sse_line(second, &mut ctx, &mut tracker, &tx, &builder, &payload).await;
+
+    let mut joined = String::new();
+    while let Ok(event) = rx.try_recv() {
+        joined.push_str(&format!("{event:?}\n"));
+    }
+
+    assert!(ctx.has_emitted_tool_use, "{joined}");
+    assert!(!ctx.compat_retry_requested, "{joined}");
+    assert!(joined.contains("call_bash"), "{joined}");
+    assert!(!joined.contains("call_call_bash"), "{joined}");
+    assert!(joined.contains("Bash"), "{joined}");
+    assert!(!joined.contains("BaBash"), "{joined}");
+    assert!(joined.contains("printf cumulative"), "{joined}");
+}
+
+#[tokio::test]
+async fn native_tool_cumulative_argument_snapshots_replace_the_previous_prefix() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+    let builder = SseEventBuilder::new("msg_cumulative_arguments".to_string(), "model".to_string());
+    let mut tracker = SseBlockTracker::new();
+    let mut ctx = StreamContext::new(false);
+    ctx.message_started = true;
+    let payload = MessagesRequest {
+        tools: Some(vec![AnthropicTool {
+            name: "Bash".to_string(),
+            description: "run a command".to_string(),
+            input_schema: serde_json::json!({"type":"object"}),
+            ..Default::default()
+        }]),
+        ..empty_messages_request()
+    };
+
+    let first = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_bash","function":{"name":"Bash","arguments":"{\"command\":\"printf "}}]},"finish_reason":null}]}"#;
+    let second = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_bash","function":{"name":"Bash","arguments":"{\"command\":\"printf cumulative\"}"}}]},"finish_reason":"tool_calls"}]}"#;
+
+    process_openai_sse_line(first, &mut ctx, &mut tracker, &tx, &builder, &payload).await;
+    process_openai_sse_line(second, &mut ctx, &mut tracker, &tx, &builder, &payload).await;
+
+    let mut joined = String::new();
+    while let Ok(event) = rx.try_recv() {
+        joined.push_str(&format!("{event:?}\n"));
+    }
+
+    assert!(ctx.has_emitted_tool_use, "{joined}");
+    assert!(!ctx.compat_retry_requested, "{joined}");
+    assert!(joined.contains("printf cumulative"), "{joined}");
+    assert_eq!(joined.matches("printf cumulative").count(), 1, "{joined}");
+}
+
+#[tokio::test]
+async fn interleaved_parallel_native_tool_identity_fragments_stay_isolated_by_index() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let builder = SseEventBuilder::new("msg_interleaved_identity".to_string(), "model".to_string());
+    let mut tracker = SseBlockTracker::new();
+    let mut ctx = StreamContext::new(false);
+    ctx.message_started = true;
+    let payload = MessagesRequest {
+        tools: Some(vec![
+            AnthropicTool {
+                name: "Bash".to_string(),
+                description: "run a command".to_string(),
+                input_schema: serde_json::json!({"type":"object"}),
+                ..Default::default()
+            },
+            AnthropicTool {
+                name: "Read".to_string(),
+                description: "read a file".to_string(),
+                input_schema: serde_json::json!({"type":"object"}),
+                ..Default::default()
+            },
+        ]),
+        ..empty_messages_request()
+    };
+
+    let first = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_","function":{"name":"Ba","arguments":"{\"command\":\"printf one"}}]},"finish_reason":null}]}"#;
+    let second = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"read_","function":{"name":"Re","arguments":"{\"file_path\":\"/tmp/fi"}}]},"finish_reason":null}]}"#;
+    let final_chunk = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"bash","function":{"name":"sh","arguments":"\"}"}},{"index":1,"id":"one","function":{"name":"ad","arguments":"le\"}"}}]},"finish_reason":"tool_calls"}]}"#;
+
+    process_openai_sse_line(first, &mut ctx, &mut tracker, &tx, &builder, &payload).await;
+    process_openai_sse_line(second, &mut ctx, &mut tracker, &tx, &builder, &payload).await;
+    process_openai_sse_line(final_chunk, &mut ctx, &mut tracker, &tx, &builder, &payload).await;
+
+    let mut joined = String::new();
+    while let Ok(event) = rx.try_recv() {
+        joined.push_str(&format!("{event:?}\n"));
+    }
+
+    assert!(ctx.has_emitted_tool_use, "{joined}");
+    assert!(!ctx.compat_retry_requested, "{joined}");
+    assert!(joined.contains("call_bash"), "{joined}");
+    assert!(joined.contains("read_one"), "{joined}");
+    assert!(joined.contains("Bash"), "{joined}");
+    assert!(joined.contains("Read"), "{joined}");
+    assert!(joined.contains("printf one"), "{joined}");
+    assert!(joined.contains("/tmp/file"), "{joined}");
 }
 
 #[tokio::test]
@@ -2818,4 +3037,709 @@ async fn malformed_tv_toolcalls_structures_fail_closed_without_leaking_xml() {
         assert!(!joined.contains("tvInvoke"), "case={index}: {joined}");
         assert!(!joined.contains("/tmp/a"), "case={index}: {joined}");
     }
+}
+
+#[test]
+fn generic_tool_calls_xml_parses_bash_call_without_leaking_markup() {
+    let marker = concat!(
+        "<tool_calls>",
+        "<invoke name=\"Bash\">",
+        "<parameter name=\"command\">/home/light/.local/cache/claude-plugins-official/superpowers/6.2.0/skills/subagent-driven-development/scripts/review-package docs/superpowers/plans/2026-08-03-ctf-workspace.md dacd2db 5659e91</parameter>",
+        "<parameter name=\"description\">Generate review package for Task 1 fix round 2</parameter>",
+        "</invoke>",
+        "</tool_calls>",
+        "</think>"
+    );
+
+    let extraction = extract_compat_tool_requests_detailed(marker);
+
+    assert!(!extraction.malformed_intent, "{extraction:?}");
+    assert_eq!(extraction.calls.len(), 1, "{extraction:?}");
+    let (name, arguments) = &extraction.calls[0];
+    assert_eq!(name, "Bash");
+    let arguments: serde_json::Value = serde_json::from_str(arguments).unwrap();
+    assert_eq!(
+        arguments["command"],
+        "/home/light/.local/cache/claude-plugins-official/superpowers/6.2.0/skills/subagent-driven-development/scripts/review-package docs/superpowers/plans/2026-08-03-ctf-workspace.md dacd2db 5659e91"
+    );
+    assert_eq!(
+        arguments["description"],
+        "Generate review package for Task 1 fix round 2"
+    );
+    assert!(!extraction.cleaned_text.contains("tool_calls"));
+    assert!(!extraction.cleaned_text.contains("invoke"));
+    assert!(!extraction.cleaned_text.contains("parameter"));
+}
+
+#[tokio::test]
+async fn generic_tool_calls_xml_streams_agent_as_one_tool_use() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let builder = SseEventBuilder::new("msg_generic_agent".to_string(), "model".to_string());
+    let mut tracker = SseBlockTracker::new();
+    let mut ctx = StreamContext::new(false);
+    ctx.message_started = true;
+    let payload = MessagesRequest {
+        tools: Some(vec![AnthropicTool {
+            name: "Agent".to_string(),
+            description: "spawn an agent".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "description": {"type": "string"},
+                    "prompt": {"type": "string"},
+                    "subagent_type": {"type": "string"}
+                }
+            }),
+            ..Default::default()
+        }]),
+        ..empty_messages_request()
+    };
+    let marker = concat!(
+        "<tool_calls><invoke name=\"Agent\">",
+        "<parameter name=\"description\">Review parser fix</parameter>",
+        "<parameter name=\"prompt\">Inspect the tool-call lifecycle and return evidence.</parameter>",
+        "<parameter name=\"subagent_type\">general-purpose</parameter>",
+        "</invoke></tool_calls>"
+    );
+
+    for chunk in marker.as_bytes().chunks(11) {
+        let content = std::str::from_utf8(chunk).unwrap();
+        let line = format!(
+            "data: {}",
+            serde_json::json!({
+                "choices": [{"delta": {"content": content}, "finish_reason": null}]
+            })
+        );
+        process_openai_sse_line(&line, &mut ctx, &mut tracker, &tx, &builder, &payload).await;
+    }
+    ctx.flush_remaining(&mut tracker, &tx, &builder, &payload)
+        .await;
+
+    assert!(ctx.has_emitted_tool_use);
+    assert_eq!(ctx.final_stop_reason, "tool_use");
+    assert!(!ctx.compat_retry_requested);
+    assert!(ctx.accumulated_text.is_empty(), "{}", ctx.accumulated_text);
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(format!("{event:?}"));
+    }
+    let joined = events.join("\n");
+    assert_eq!(
+        joined.matches("\\\"name\\\":\\\"Agent\\\"").count(),
+        1,
+        "{joined}"
+    );
+    assert!(joined.contains("Review parser fix"), "{joined}");
+    assert!(joined.contains("general-purpose"), "{joined}");
+    assert!(!joined.contains("tool_calls"), "{joined}");
+    assert!(!joined.contains("<invoke"), "{joined}");
+}
+
+#[tokio::test]
+async fn malformed_generic_tool_call_xml_fails_closed_without_leaking() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let builder = SseEventBuilder::new("msg_generic_malformed".to_string(), "model".to_string());
+    let mut tracker = SseBlockTracker::new();
+    let mut ctx = StreamContext::new(false);
+    ctx.message_started = true;
+    let payload = MessagesRequest {
+        tools: Some(vec![AnthropicTool {
+            name: "Bash".to_string(),
+            description: "run a command".to_string(),
+            input_schema: serde_json::json!({"type":"object"}),
+            ..Default::default()
+        }]),
+        ..empty_messages_request()
+    };
+    let marker = concat!(
+        "<tool_call><invoke name=\"Bash\">\n",
+        "Command: /home/light/.cli/cache/claude-plugins-official/super24/6.4.0/skills/agent-driven/review-package docs/superpowers/plans/2026-08-03-ctf-workspace.md dacd2db 5659e91\n",
+        "Description: Tạo review package cho Task 1 fix round 2\n",
+        "</parameter>\n</invoke>\n</tool_call></think>"
+    );
+    let line = format!(
+        "data: {}",
+        serde_json::json!({
+            "choices": [{"delta": {"content": marker}, "finish_reason": "stop"}]
+        })
+    );
+
+    process_openai_sse_line(&line, &mut ctx, &mut tracker, &tx, &builder, &payload).await;
+    ctx.flush_remaining(&mut tracker, &tx, &builder, &payload)
+        .await;
+
+    assert!(ctx.compat_retry_requested);
+    assert!(!ctx.has_emitted_tool_use);
+    assert!(ctx.accumulated_text.is_empty(), "{}", ctx.accumulated_text);
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(format!("{event:?}"));
+    }
+    let joined = events.join("\n");
+    assert!(!joined.contains("review-package"), "{joined}");
+    assert!(!joined.contains("tool_call"), "{joined}");
+    assert!(!joined.contains("invoke"), "{joined}");
+}
+
+#[tokio::test]
+async fn incomplete_generic_tool_calls_xml_requests_retry_without_leaking() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let builder = SseEventBuilder::new("msg_generic_incomplete".to_string(), "model".to_string());
+    let mut tracker = SseBlockTracker::new();
+    let mut ctx = StreamContext::new(false);
+    ctx.message_started = true;
+    let payload = MessagesRequest {
+        tools: Some(vec![AnthropicTool {
+            name: "Bash".to_string(),
+            description: "run a command".to_string(),
+            input_schema: serde_json::json!({"type":"object"}),
+            ..Default::default()
+        }]),
+        ..empty_messages_request()
+    };
+    let marker = "<tool_calls><invoke name=\"Bash\">";
+    for chunk in marker.as_bytes().chunks(5) {
+        let content = std::str::from_utf8(chunk).unwrap();
+        let line = format!(
+            "data: {}",
+            serde_json::json!({
+                "choices": [{"delta": {"content": content}, "finish_reason": null}]
+            })
+        );
+        process_openai_sse_line(&line, &mut ctx, &mut tracker, &tx, &builder, &payload).await;
+    }
+    ctx.flush_remaining(&mut tracker, &tx, &builder, &payload)
+        .await;
+
+    assert!(ctx.compat_retry_requested);
+    assert!(!ctx.has_emitted_tool_use);
+    assert!(ctx.accumulated_text.is_empty(), "{}", ctx.accumulated_text);
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(format!("{event:?}"));
+    }
+    let joined = events.join("\n");
+    assert!(!joined.contains("tool_calls"), "{joined}");
+    assert!(!joined.contains("invoke"), "{joined}");
+}
+
+#[tokio::test]
+async fn generic_tool_calls_xml_bash_survives_seventeen_byte_wire_chunks() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(128);
+    let builder = SseEventBuilder::new("msg_generic_bash_17".to_string(), "model".to_string());
+    let mut tracker = SseBlockTracker::new();
+    let mut ctx = StreamContext::new(false);
+    ctx.message_started = true;
+    let payload = MessagesRequest {
+        tools: Some(vec![AnthropicTool {
+            name: "Bash".to_string(),
+            description: "run a command".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string"},
+                    "description": {"type": "string"}
+                },
+                "required": ["command"]
+            }),
+            ..Default::default()
+        }]),
+        ..empty_messages_request()
+    };
+    let marker = concat!(
+        "<tool_calls><invoke name=\"Bash\">",
+        "<parameter name=\"command\">printf GENERIC_XML_BASH_SIDE_EFFECT &gt; /tmp/bash-side-effect.txt</parameter>",
+        "<parameter name=\"description\">Verify generic XML Bash exact once</parameter>",
+        "</invoke></tool_calls></think>"
+    );
+
+    for chunk in marker.as_bytes().chunks(17) {
+        let content = std::str::from_utf8(chunk).unwrap();
+        let line = format!(
+            "data: {}",
+            serde_json::json!({
+                "choices": [{"delta": {"content": content}, "finish_reason": null}]
+            })
+        );
+        process_openai_sse_line(&line, &mut ctx, &mut tracker, &tx, &builder, &payload).await;
+    }
+    ctx.flush_remaining(&mut tracker, &tx, &builder, &payload)
+        .await;
+
+    assert!(ctx.has_emitted_tool_use);
+    assert_eq!(ctx.final_stop_reason, "tool_use");
+    assert!(!ctx.compat_retry_requested);
+    assert!(ctx.accumulated_text.is_empty(), "{}", ctx.accumulated_text);
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(format!("{event:?}"));
+    }
+    let joined = events.join("\n");
+    assert_eq!(
+        joined.matches("\\\"name\\\":\\\"Bash\\\"").count(),
+        1,
+        "{joined}"
+    );
+    assert!(joined.contains("GENERIC_XML_BASH_SIDE_EFFECT"), "{joined}");
+    assert!(joined.contains("/tmp/bash-side-effect.txt"), "{joined}");
+    assert!(!joined.contains("tool_calls"), "{joined}");
+    assert!(!joined.contains("<invoke"), "{joined}");
+}
+
+#[tokio::test]
+async fn generic_agent_placeholder_prompt_requests_retry_without_tool_use() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let builder = SseEventBuilder::new("msg_agent_placeholder".to_string(), "model".to_string());
+    let mut tracker = SseBlockTracker::new();
+    let mut ctx = StreamContext::new(false);
+    ctx.message_started = true;
+    let payload = MessagesRequest {
+        tools: Some(vec![AnthropicTool {
+            name: "Agent".to_string(),
+            description: "spawn an agent".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "description": {"type": "string"},
+                    "prompt": {"type": "string"}
+                },
+                "required": ["description", "prompt"]
+            }),
+            ..Default::default()
+        }]),
+        ..empty_messages_request()
+    };
+    let marker = concat!(
+        "<tool_calls><invoke name=\"Agent\">",
+        "<parameter name=\"description\">Re-review Task 1</parameter>",
+        "<parameter name=\"prompt\">...</parameter>",
+        "</invoke></tool_calls>"
+    );
+    let line = format!(
+        "data: {}",
+        serde_json::json!({
+            "choices": [{"delta": {"content": marker}, "finish_reason": "stop"}]
+        })
+    );
+
+    process_openai_sse_line(&line, &mut ctx, &mut tracker, &tx, &builder, &payload).await;
+    ctx.flush_remaining(&mut tracker, &tx, &builder, &payload)
+        .await;
+
+    assert!(ctx.compat_retry_requested);
+    assert!(!ctx.has_emitted_tool_use);
+    let mut joined = String::new();
+    while let Ok(event) = rx.try_recv() {
+        joined.push_str(&format!("{event:?}\n"));
+    }
+    assert!(!joined.contains("\\\"name\\\":\\\"Agent\\\""), "{joined}");
+    assert!(!joined.contains("..."), "{joined}");
+}
+
+#[tokio::test]
+async fn generic_sendmessage_placeholder_message_requests_retry_without_tool_use() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let builder = SseEventBuilder::new("msg_send_placeholder".to_string(), "model".to_string());
+    let mut tracker = SseBlockTracker::new();
+    let mut ctx = StreamContext::new(false);
+    ctx.message_started = true;
+    let payload = MessagesRequest {
+        tools: Some(vec![AnthropicTool {
+            name: "SendMessage".to_string(),
+            description: "continue an agent".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "to": {"type": "string"},
+                    "message": {"type": "string"}
+                },
+                "required": ["to", "message"]
+            }),
+            ..Default::default()
+        }]),
+        ..empty_messages_request()
+    };
+    let marker = concat!(
+        "<tool_calls><invoke name=\"SendMessage\">",
+        "<parameter name=\"to\">agent-a40116a5229e783e6</parameter>",
+        "<parameter name=\"message\">...</parameter>",
+        "</invoke></tool_calls>"
+    );
+    let line = format!(
+        "data: {}",
+        serde_json::json!({
+            "choices": [{"delta": {"content": marker}, "finish_reason": "stop"}]
+        })
+    );
+
+    process_openai_sse_line(&line, &mut ctx, &mut tracker, &tx, &builder, &payload).await;
+    ctx.flush_remaining(&mut tracker, &tx, &builder, &payload)
+        .await;
+
+    assert!(ctx.compat_retry_requested);
+    assert!(!ctx.has_emitted_tool_use);
+    let mut joined = String::new();
+    while let Ok(event) = rx.try_recv() {
+        joined.push_str(&format!("{event:?}\n"));
+    }
+    assert!(
+        !joined.contains("\\\"name\\\":\\\"SendMessage\\\""),
+        "{joined}"
+    );
+    assert!(!joined.contains("..."), "{joined}");
+}
+
+#[tokio::test]
+async fn native_tool_call_discards_unfinished_visible_sentence_tail() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let builder = SseEventBuilder::new(
+        "msg_native_clipped_preamble".to_string(),
+        "model".to_string(),
+    );
+    let mut tracker = SseBlockTracker::new();
+    let mut ctx = StreamContext::new(false);
+    ctx.message_started = true;
+    let payload = MessagesRequest {
+        tools: Some(vec![AnthropicTool {
+            name: "Bash".to_string(),
+            description: "run a shell command".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string"}
+                },
+                "required": ["command"]
+            }),
+            ..Default::default()
+        }]),
+        ..empty_messages_request()
+    };
+
+    let arguments = serde_json::json!({"command": "printf PRE_TOOL_OK"}).to_string();
+    let tool_line = format!(
+        "data: {}",
+        serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "content": "Proxy up (200), env đủ. Copy tinyctfer sang tools/ và đọc code container conf",
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_native_clipped_preamble",
+                        "type": "function",
+                        "function": {"name": "Bash", "arguments": arguments}
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        })
+    );
+    process_openai_sse_line(&tool_line, &mut ctx, &mut tracker, &tx, &builder, &payload).await;
+    ctx.flush_remaining(&mut tracker, &tx, &builder, &payload)
+        .await;
+    drop(tx);
+
+    let mut events = Vec::new();
+    while let Some(event) = rx.recv().await {
+        events.push(event);
+    }
+    let body = serialize_sse_events(events).await;
+
+    assert_eq!(ctx.accumulated_text, "Proxy up (200), env đủ. ");
+    assert!(body.contains("Proxy up (200), env đủ."), "{body}");
+    assert!(!body.contains("Copy tinyctfer"), "{body}");
+    assert!(body.contains("tool_use"), "{body}");
+    assert!(body.contains("Bash"), "{body}");
+    assert!(body.contains("printf PRE_TOOL_OK"), "{body}");
+}
+
+#[tokio::test]
+async fn native_agent_placeholder_prompt_requests_retry_without_tool_use() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let builder = SseEventBuilder::new(
+        "msg_native_agent_placeholder".to_string(),
+        "model".to_string(),
+    );
+    let mut tracker = SseBlockTracker::new();
+    let mut ctx = StreamContext::new(false);
+    ctx.message_started = true;
+    let payload = MessagesRequest {
+        tools: Some(vec![AnthropicTool {
+            name: "Agent".to_string(),
+            description: "spawn an agent".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "description": {"type": "string"},
+                    "prompt": {"type": "string"}
+                },
+                "required": ["description", "prompt"]
+            }),
+            ..Default::default()
+        }]),
+        ..empty_messages_request()
+    };
+    let arguments = serde_json::json!({
+        "description": "Re-review Task 1",
+        "prompt": "..."
+    })
+    .to_string();
+    let line = format!(
+        "data: {}",
+        serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_native_agent_placeholder",
+                        "type": "function",
+                        "function": {"name": "Agent", "arguments": arguments}
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        })
+    );
+
+    process_openai_sse_line(&line, &mut ctx, &mut tracker, &tx, &builder, &payload).await;
+    ctx.flush_remaining(&mut tracker, &tx, &builder, &payload)
+        .await;
+
+    assert!(ctx.compat_retry_requested);
+    assert!(!ctx.has_emitted_tool_use);
+    let mut joined = String::new();
+    while let Ok(event) = rx.try_recv() {
+        joined.push_str(&format!("{event:?}\n"));
+    }
+    assert!(
+        !joined.contains("call_native_agent_placeholder"),
+        "{joined}"
+    );
+    assert!(!joined.contains("\\\"name\\\":\\\"Agent\\\""), "{joined}");
+}
+
+async fn serialize_sse_events(events: Vec<axum::response::sse::Event>) -> String {
+    let response = Sse::new(stream::iter(
+        events
+            .into_iter()
+            .map(Ok::<axum::response::sse::Event, Infallible>),
+    ))
+    .into_response();
+    String::from_utf8(
+        to_bytes(response.into_body(), 2 * 1024 * 1024)
+            .await
+            .expect("serialize SSE body")
+            .to_vec(),
+    )
+    .expect("SSE body must be UTF-8")
+}
+
+#[tokio::test]
+async fn one_large_reasoning_sse_line_is_split_into_bounded_anthropic_deltas() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(128);
+    let builder = SseEventBuilder::new("msg_direct_big_thinking".to_string(), "model".to_string());
+    let mut tracker = SseBlockTracker::new();
+    let mut ctx = StreamContext::new(false);
+    ctx.message_started = true;
+    let payload = empty_messages_request();
+    let reasoning = "lập luận Unicode tiếng Việt — ".repeat(700);
+    let line = format!(
+        "data: {}",
+        serde_json::json!({
+            "choices": [{
+                "delta": {"reasoning_content": reasoning},
+                "finish_reason": null
+            }]
+        })
+    );
+
+    process_openai_sse_line(&line, &mut ctx, &mut tracker, &tx, &builder, &payload).await;
+
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+    let body = serialize_sse_events(events).await;
+    let mut fragments = Vec::new();
+    let mut wire_lengths = Vec::new();
+    for line in body.lines().filter(|line| line.starts_with("data: ")) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line[6..]) else {
+            continue;
+        };
+        if value["type"] == "content_block_delta" && value["delta"]["type"] == "thinking_delta" {
+            fragments.push(
+                value["delta"]["thinking"]
+                    .as_str()
+                    .expect("thinking fragment")
+                    .to_string(),
+            );
+            wire_lengths.push(line.len());
+        }
+    }
+
+    assert!(
+        fragments.len() > 1,
+        "one provider event must not become one TUI-blocking delta; lengths={wire_lengths:?}"
+    );
+    assert!(
+        wire_lengths.iter().all(|length| *length <= 2_048),
+        "outgoing thinking delta exceeded render bound: {wire_lengths:?}"
+    );
+    assert_eq!(fragments.concat(), reasoning);
+    assert_eq!(ctx.accumulated_thinking, reasoning);
+}
+
+#[tokio::test]
+async fn one_large_text_sse_line_is_split_without_corrupting_utf8() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(128);
+    let builder = SseEventBuilder::new("msg_direct_big_text".to_string(), "model".to_string());
+    let mut tracker = SseBlockTracker::new();
+    let mut ctx = StreamContext::new(false);
+    ctx.message_started = true;
+    let payload = empty_messages_request();
+    let text = "Báo cáo chuyên gia hoàn tất — dữ liệu được giữ nguyên.\n".repeat(180);
+    let line = format!(
+        "data: {}",
+        serde_json::json!({
+            "choices": [{
+                "delta": {"content": text},
+                "finish_reason": null
+            }]
+        })
+    );
+
+    process_openai_sse_line(&line, &mut ctx, &mut tracker, &tx, &builder, &payload).await;
+
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+    let body = serialize_sse_events(events).await;
+    let mut fragments = Vec::new();
+    let mut wire_lengths = Vec::new();
+    for line in body.lines().filter(|line| line.starts_with("data: ")) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line[6..]) else {
+            continue;
+        };
+        if value["type"] == "content_block_delta" && value["delta"]["type"] == "text_delta" {
+            fragments.push(
+                value["delta"]["text"]
+                    .as_str()
+                    .expect("text fragment")
+                    .to_string(),
+            );
+            wire_lengths.push(line.len());
+        }
+    }
+
+    assert!(
+        fragments.len() > 1,
+        "one provider event must not become one TUI-blocking delta; lengths={wire_lengths:?}"
+    );
+    assert!(
+        wire_lengths.iter().all(|length| *length <= 2_048),
+        "outgoing text delta exceeded render bound: {wire_lengths:?}"
+    );
+    assert_eq!(fragments.concat(), text);
+    assert_eq!(ctx.accumulated_text, text);
+}
+
+#[tokio::test(start_paused = true)]
+async fn one_large_text_sse_line_is_paced_across_scheduler_ticks() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(256);
+    let text = "Báo cáo khổng lồ cần chảy dần — ".repeat(160);
+    let line = format!(
+        "data: {}",
+        serde_json::json!({
+            "choices": [{
+                "delta": {"content": text},
+                "finish_reason": null
+            }]
+        })
+    );
+    let expected = text.clone();
+
+    let task = tokio::spawn(async move {
+        let builder = SseEventBuilder::new("msg_paced_big_text".to_string(), "model".to_string());
+        let mut tracker = SseBlockTracker::new();
+        let mut ctx = StreamContext::new(false);
+        ctx.message_started = true;
+        let payload = empty_messages_request();
+        process_openai_sse_line(&line, &mut ctx, &mut tracker, &tx, &builder, &payload).await;
+        ctx
+    });
+
+    tokio::task::yield_now().await;
+    assert!(
+        !task.is_finished(),
+        "one giant provider text event was enqueued in a single scheduler burst"
+    );
+
+    let mut immediate_text_deltas = 0usize;
+    while let Ok(event) = rx.try_recv() {
+        if format!("{event:?}").contains("text_delta") {
+            immediate_text_deltas += 1;
+        }
+    }
+    assert_eq!(
+        immediate_text_deltas, 1,
+        "pacing should enqueue one text delta before yielding"
+    );
+
+    while !task.is_finished() {
+        tokio::time::advance(std::time::Duration::from_millis(5)).await;
+        tokio::task::yield_now().await;
+    }
+    let ctx = task.await.expect("paced text task");
+    assert_eq!(ctx.accumulated_text, expected);
+}
+
+#[tokio::test(start_paused = true)]
+async fn one_large_reasoning_sse_line_is_paced_across_scheduler_ticks() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(256);
+    let reasoning = "Lập luận khổng lồ cần chảy dần — ".repeat(160);
+    let line = format!(
+        "data: {}",
+        serde_json::json!({
+            "choices": [{
+                "delta": {"reasoning_content": reasoning},
+                "finish_reason": null
+            }]
+        })
+    );
+    let expected = reasoning.clone();
+
+    let task = tokio::spawn(async move {
+        let builder =
+            SseEventBuilder::new("msg_paced_big_reasoning".to_string(), "model".to_string());
+        let mut tracker = SseBlockTracker::new();
+        let mut ctx = StreamContext::new(false);
+        ctx.message_started = true;
+        let payload = empty_messages_request();
+        process_openai_sse_line(&line, &mut ctx, &mut tracker, &tx, &builder, &payload).await;
+        ctx
+    });
+
+    tokio::task::yield_now().await;
+    assert!(
+        !task.is_finished(),
+        "one giant provider reasoning event was enqueued in a single scheduler burst"
+    );
+
+    let mut immediate_thinking_deltas = 0usize;
+    while let Ok(event) = rx.try_recv() {
+        if format!("{event:?}").contains("thinking_delta") {
+            immediate_thinking_deltas += 1;
+        }
+    }
+    assert_eq!(
+        immediate_thinking_deltas, 1,
+        "pacing should enqueue one thinking delta before yielding"
+    );
+
+    while !task.is_finished() {
+        tokio::time::advance(std::time::Duration::from_millis(5)).await;
+        tokio::task::yield_now().await;
+    }
+    let ctx = task.await.expect("paced reasoning task");
+    assert_eq!(ctx.accumulated_thinking, expected);
 }

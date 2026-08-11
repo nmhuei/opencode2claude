@@ -42,6 +42,9 @@ pub enum BridgeError {
     #[error("OpenCode daemon unavailable on port {0}")]
     DaemonUnavailable(u16),
 
+    #[error("Payment required: {0}")]
+    PaymentRequired(String),
+
     #[error("Upstream API error: {0}")]
     UpstreamError(String),
 }
@@ -86,6 +89,11 @@ impl IntoResponse for BridgeError {
             BridgeError::DaemonUnavailable(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "server_error",
+                self.to_string(),
+            ),
+            BridgeError::PaymentRequired(_) => (
+                StatusCode::PAYMENT_REQUIRED,
+                "billing_error",
                 self.to_string(),
             ),
             BridgeError::UpstreamError(_) => {
@@ -139,5 +147,12 @@ mod tests {
         let err = BridgeError::InvalidRequest("bad input".to_string());
         let resp = err.into_response();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn test_bridge_error_into_response_payment_required() {
+        let err = BridgeError::PaymentRequired("no credits".to_string());
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::PAYMENT_REQUIRED);
     }
 }

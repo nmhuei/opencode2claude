@@ -937,3 +937,76 @@ fn parallel_tool_calls_false_is_serialized_when_tools_present() {
         "parallel_tool_calls should be omitted without tools: {serialized_no_tools}"
     );
 }
+
+#[test]
+fn dflash_free_json_schema_reaches_the_system_prompt() {
+    let payload = MessagesRequest {
+        model: Some("opencode/deepseek-v4-flash-free".to_string()),
+        messages: vec![Message {
+            role: "user".to_string(),
+            content: ContentVal::Single("list users".to_string()),
+        }],
+        system: None,
+        tools: None,
+        tool_choice: None,
+        stream: false,
+        temperature: None,
+        max_tokens: Some(100),
+        output_config: Some(crate::handlers::OutputConfig {
+            format: Some(serde_json::json!({
+                "type": "json_schema",
+                "schema": {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}}
+                }
+            })),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let mapped = map_anthropic_to_openai(&payload, "opencode/deepseek-v4-flash-free".to_string());
+    assert_eq!(
+        mapped.response_format, None,
+        "free DFLASH must not receive an upstream grammar constraint"
+    );
+    let system = mapped
+        .messages
+        .iter()
+        .find_map(|m| (m.role == "system").then_some(m.content.clone()).flatten())
+        .expect("mapped request must carry a system message");
+    assert!(
+        system.contains("\"properties\""),
+        "dropped json_schema must be preserved in the system prompt: {system}"
+    );
+}
+
+#[test]
+fn parallel_tool_calls_omitted_for_non_search_tool_sets() {
+    let payload = MessagesRequest {
+        model: Some("claude-sonnet-4-6".to_string()),
+        messages: vec![Message {
+            role: "user".to_string(),
+            content: ContentVal::Single("hi".to_string()),
+        }],
+        system: None,
+        tools: Some(vec![AnthropicTool {
+            name: "Bash".to_string(),
+            description: "run a command".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+            ..Default::default()
+        }]),
+        tool_choice: None,
+        stream: true,
+        temperature: None,
+        max_tokens: Some(100),
+        ..Default::default()
+    };
+
+    let mapped = map_anthropic_to_openai(&payload, "claude-sonnet-4-6".to_string());
+    let serialized = serde_json::to_string(&mapped).unwrap();
+    assert!(
+        !serialized.contains("parallel_tool_calls"),
+        "non-search tool sets must not force serial emission: {serialized}"
+    );
+}

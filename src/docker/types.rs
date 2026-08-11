@@ -87,7 +87,6 @@ pub enum ContainerSetupState {
     Migrated,
     Resumed,
     Running,
-    ProtectedStopped,
     ProtectedLegacy,
 }
 
@@ -111,12 +110,20 @@ pub trait ContainerRuntime: Send + Sync + fmt::Debug {
     async fn inspect(&self, spec: &ProxySpec) -> DockerResult<ContainerState>;
     async fn create_missing(&self, spec: &ProxySpec) -> DockerResult<()>;
     async fn recreate_managed(&self, spec: &ProxySpec) -> DockerResult<()>;
+    async fn rotate_managed(&self, spec: &ProxySpec) -> DockerResult<()> {
+        self.recreate_managed(spec).await
+    }
     async fn remove_managed(&self, spec: &ProxySpec) -> DockerResult<()>;
     async fn restart_managed(&self, spec: &ProxySpec) -> DockerResult<()>;
     async fn stop_managed(&self, spec: &ProxySpec) -> DockerResult<()>;
     async fn start_managed(&self, spec: &ProxySpec) -> DockerResult<()>;
     async fn logs(&self, spec: &ProxySpec, tail: usize) -> DockerResult<String>;
     async fn list(&self, specs: &[ProxySpec]) -> DockerResult<Vec<ContainerSummary>>;
+    /// Probe proxy reachability. The default performs one network check;
+    /// adapters may retry internally before reporting offline.
+    async fn verify_online(&self, spec: &ProxySpec) -> bool {
+        super::health::verify_proxy(spec.port).await
+    }
 }
 
 pub fn container_name(port: u16) -> String {
@@ -142,6 +149,12 @@ pub fn validate_managed_port(port: u16) -> DockerResult<()> {
         )));
     }
     Ok(())
+}
+
+/// Validation for non-destructive start/restart: allowed on every known port,
+/// including protected standbys (starting a proxy never destroys it).
+pub fn validate_startable_port(port: u16) -> DockerResult<()> {
+    validate_known_port(port)
 }
 
 #[cfg(test)]
@@ -172,6 +185,17 @@ mod tests {
         assert!(matches!(
             validate_managed_port(40004),
             Err(DockerError::Protected(_))
+        ));
+    }
+
+    #[test]
+    fn protected_spec_allows_startable_validation() {
+        for port in [40004_u16, 40005] {
+            assert!(validate_startable_port(port).is_ok());
+        }
+        assert!(matches!(
+            validate_startable_port(40099),
+            Err(DockerError::InvalidPort(_))
         ));
     }
 }

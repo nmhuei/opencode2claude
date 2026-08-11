@@ -104,6 +104,16 @@ pub(super) fn parse_retry_after(value: &str, now: SystemTime) -> Option<Duration
     when.duration_since(now).ok()
 }
 
+/// Keep provider quota deadlines internally, but never tell a foreground
+/// client to sleep for hours while managed proxy recovery keeps rotating exits.
+/// The recovery worker retries exhausted rotations every 30 seconds, so this
+/// is the longest useful client-visible delay.
+pub(super) fn client_retry_after(remaining: Duration) -> Duration {
+    remaining
+        .max(Duration::from_secs(1))
+        .min(Duration::from_secs(30))
+}
+
 pub(super) fn bounded_backoff(retry: &RetryConfig, attempt: u32, jitter_seed: u64) -> Duration {
     let factor = 1_u32.checked_shl(attempt.min(16)).unwrap_or(u32::MAX);
     let base_ms = retry

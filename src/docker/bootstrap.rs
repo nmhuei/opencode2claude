@@ -1,6 +1,5 @@
 //! Interactive bootstrap of the local WARP proxy pool.
 
-use super::health::verify_proxy;
 use super::lifecycle::{default_runtime, ensure_proxy};
 use super::types::{ContainerRuntime, ContainerSetupState, DockerResult, ProxySpec};
 use crate::config::BridgeConfig;
@@ -52,15 +51,6 @@ pub async fn bootstrap_proxy_pool_with_runtime(
             Ok(ContainerSetupState::New | ContainerSetupState::Migrated) => {
                 registration_needed += 1;
             }
-            Ok(ContainerSetupState::ProtectedStopped) => {
-                if !quiet {
-                    eprintln!(
-                        "{} protected standby port {} exists but is stopped; no automatic lifecycle action was taken",
-                        "⚠".yellow(),
-                        port
-                    );
-                }
-            }
             Ok(ContainerSetupState::ProtectedLegacy) => {
                 if !quiet {
                     eprintln!(
@@ -95,17 +85,11 @@ pub async fn bootstrap_proxy_pool_with_runtime(
         tokio::time::sleep(Duration::from_secs(20)).await;
     }
 
-    let verification = join_all(specs.iter().map(|spec| async move {
-        let mut online = false;
-        for _ in 0..15 {
-            if verify_proxy(spec.port).await {
-                online = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_secs(2)).await;
-        }
-        (spec, online)
-    }))
+    let verification = join_all(
+        specs
+            .iter()
+            .map(|spec| async move { (spec, runtime.verify_online(spec).await) }),
+    )
     .await;
 
     for (spec, online) in verification {
@@ -115,11 +99,17 @@ pub async fn bootstrap_proxy_pool_with_runtime(
             }
         } else if spec.is_protected() {
             if !quiet {
-                eprintln!(
-                    "{} protected standby {} is offline; no restart attempted",
-                    "⚠".yellow(),
-                    spec.name
-                );
+                eprintln!("{} restarting offline standby {}", "⚠".yellow(), spec.name);
+            }
+            if let Err(error) = runtime.restart_managed(spec).await {
+                if !quiet {
+                    eprintln!(
+                        "{} standby {} restart failed: {}",
+                        "✗".red(),
+                        spec.name,
+                        error
+                    );
+                }
             }
         } else {
             if !quiet {
@@ -157,6 +147,8 @@ mod tests {
     struct FakeRuntime {
         states: HashMap<u16, super::super::types::ContainerState>,
         mutations: Arc<Mutex<Vec<(u16, &'static str)>>>,
+        offline_ports: Vec<u16>,
+        restart_fails: bool,
     }
 
     #[async_trait]
@@ -190,6 +182,11 @@ mod tests {
         }
         async fn restart_managed(&self, spec: &ProxySpec) -> DockerResult<()> {
             self.mutations.lock().unwrap().push((spec.port, "restart"));
+            if self.restart_fails {
+                return Err(super::super::types::DockerError::CommandFailed(
+                    "boom".into(),
+                ));
+            }
             Ok(())
         }
         async fn stop_managed(&self, spec: &ProxySpec) -> DockerResult<()> {
@@ -199,6 +196,9 @@ mod tests {
         async fn start_managed(&self, spec: &ProxySpec) -> DockerResult<()> {
             self.mutations.lock().unwrap().push((spec.port, "start"));
             Ok(())
+        }
+        async fn verify_online(&self, spec: &ProxySpec) -> bool {
+            !self.offline_ports.contains(&spec.port)
         }
         async fn logs(&self, _spec: &ProxySpec, _tail: usize) -> DockerResult<String> {
             Ok(String::new())
@@ -212,7 +212,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn protected_stopped_or_legacy_nodes_are_not_mutated() {
+    async fn stopped_protected_node_is_started_but_legacy_is_never_mutated() {
         let mut runtime = FakeRuntime::default();
         runtime.states.insert(
             40004,
@@ -235,6 +235,48 @@ mod tests {
             let spec = ProxySpec::new(port, config.runtime.warp_image.clone()).unwrap();
             let _ = ensure_proxy(&runtime, &spec).await.unwrap();
         }
-        assert!(runtime.mutations.lock().unwrap().is_empty());
+        let mutations = runtime.mutations.lock().unwrap();
+        assert!(
+            mutations.iter().any(|(p, a)| *p == 40004 && *a == "start"),
+            "stopped protected node must be started"
+        );
+        assert!(
+            !mutations.iter().any(|(p, _)| *p == 40005),
+            "running legacy protected node must not be mutated"
+        );
+    }
+
+    #[tokio::test]
+    async fn offline_standbys_are_restarted_best_effort() {
+        let mut runtime = FakeRuntime::default();
+        for port in [40004_u16, 40005] {
+            runtime.states.insert(
+                port,
+                super::super::types::ContainerState {
+                    exists: true,
+                    running: false,
+                    has_expected_volume: true,
+                },
+            );
+        }
+        runtime.offline_ports = vec![40004, 40005];
+        runtime.restart_fails = true;
+        let config = BridgeConfig::default();
+        let (primary, standby) = bootstrap_proxy_pool_with_runtime(&runtime, &config, true)
+            .await
+            .expect("bootstrap must not abort when standby restart fails");
+        assert!(primary.contains("40001"));
+        assert!(standby.contains("40004") && standby.contains("40005"));
+        let mutations = runtime.mutations.lock().unwrap();
+        assert!(
+            mutations.iter().any(|(p, a)| *p == 40004 && *a == "start"),
+            "stopped standby is resumed before verification"
+        );
+        assert!(
+            mutations
+                .iter()
+                .any(|(p, a)| *p == 40005 && *a == "restart"),
+            "offline standby restart is attempted despite expected failure"
+        );
     }
 }

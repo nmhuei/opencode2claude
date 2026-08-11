@@ -4,10 +4,10 @@ use super::transport::send_sse;
 use crate::handlers::MessagesRequest;
 use crate::opencode::forward::common::{
     compat_tool_marker_pending_suffix_len, find_compat_tool_intent_marker_in_context,
-    find_literal_marker_in_context, looks_like_unverified_tool_success, matching_tool_name,
-    normalize_dsml_arguments, parse_compat_tool_requests_at_eof,
-    parse_compat_tool_requests_with_consumed, tool_call_fingerprint, CompatMarkdownState,
-    CompatToolCall,
+    find_literal_marker_in_context, invalid_semantic_tool_argument,
+    looks_like_unverified_tool_success, matching_tool_name, normalize_dsml_arguments,
+    parse_compat_tool_requests_at_eof, parse_compat_tool_requests_with_consumed,
+    split_completed_pre_tool_text, tool_call_fingerprint, CompatMarkdownState, CompatToolCall,
 };
 use crate::opencode::mapper::is_bridge_search_tool;
 use crate::opencode::sanitize::{parse_dsml_tool_calls_detailed, strip_system_tags_with_context};
@@ -16,6 +16,7 @@ use crate::sse::SseEventBuilder;
 use crate::stream_tracker::SseBlockTracker;
 use axum::response::sse::Event;
 use std::collections::{BTreeMap, HashSet};
+use std::time::Duration;
 use tracing::{trace, warn};
 
 const MAX_DSML_BUFFER_SIZE: usize = 256 * 1024;
@@ -24,8 +25,62 @@ const MAX_COMPAT_TOOL_BUFFER_SIZE: usize = 64 * 1024;
 // until content_block_stop. Segment long reasoning into bounded blocks so the
 // user sees completed reasoning portions while the model is still working.
 const THINKING_RENDER_CHUNK_BYTES: usize = 16384;
+// Bound each outgoing Anthropic delta even when the provider emits one large
+// OpenAI SSE event. Pathological multi-kilobyte provider deltas are also paced
+// very briefly between chunks so Claude Code can visibly render progress
+// instead of repainting the whole report in one scheduler burst.
+const RENDER_DELTA_CHUNK_BYTES: usize = 256;
+const LARGE_DELTA_PACING_DELAY: Duration = Duration::from_millis(2);
 const DSML_OPEN_TAG: &str = "<｜DSML｜tool_calls>";
 const DSML_CLOSE_TAG: &str = "</｜DSML｜tool_calls>";
+
+fn split_utf8_prefix(text: &str, max_bytes: usize) -> (&str, &str) {
+    if text.len() <= max_bytes {
+        return (text, "");
+    }
+
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.split_at(end)
+}
+
+/// Merge an identifier carried across OpenAI streaming deltas.
+///
+/// Providers normally send disjoint fragments (`"Ba"`, then `"sh"`), while
+/// some OpenAI-compatible gateways resend a cumulative snapshot (`"Ba"`, then
+/// `"Bash"`). Supporting both avoids either dropping the prefix or producing
+/// `"BaBash"`. Exact repeats are ignored; every other fragment is appended.
+fn merge_streamed_identifier(slot: &mut Option<String>, fragment: &str) {
+    if fragment.is_empty() {
+        return;
+    }
+
+    match slot {
+        None => *slot = Some(fragment.to_string()),
+        Some(current) if current == fragment => {}
+        Some(current) if fragment.starts_with(current.as_str()) => {
+            current.clear();
+            current.push_str(fragment);
+        }
+        Some(current) => current.push_str(fragment),
+    }
+}
+
+/// Merge streamed JSON arguments while tolerating gateways that resend the
+/// complete argument snapshot on every chunk instead of true deltas.
+fn merge_streamed_arguments(current: &mut String, fragment: &str) {
+    if fragment.is_empty() || current == fragment {
+        return;
+    }
+    if fragment.starts_with(current.as_str()) {
+        current.clear();
+        current.push_str(fragment);
+    } else {
+        current.push_str(fragment);
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 struct PendingToolCall {
@@ -34,12 +89,14 @@ struct PendingToolCall {
     arguments: String,
 }
 
-/// Finalize the stream by emitting a fallback text block, message_delta, and message_stop.
+/// Finalize the stream.
 ///
 /// Used on error paths (stream_failed, search loop protection, empty upstream)
 /// when `message_start` has already been emitted but no content blocks or
-/// `message_stop` have been sent. This ensures the Anthropic SSE protocol
-/// sequence is always completed.
+/// `message_stop` have been sent. A fatal/errored stream is closed with a
+/// single Anthropic `error` event that ENDS the stream — no `message_delta`
+/// and no `message_stop` follow it, per the Messages API spec. Only a healthy
+/// end of message emits `message_delta` + `message_stop`.
 pub(super) async fn finalize_stream(
     reason: &str,
     tx: &tokio::sync::mpsc::Sender<Event>,
@@ -63,54 +120,40 @@ pub(super) async fn finalize_stream(
         let _ = send_sse(tx, crate::sse::emit_block_stop(idx)).await;
     }
 
-    // If no content block was ever opened, emit an error event instead of a fake system text block
-    // to prevent client-side model output validation crashes.
-    if !tracker.has_any_blocks_ever_opened() {
-        let error_msg = format!(
-            "Upstream response did not contain content blocks (reason: {})",
-            reason
-        );
-        let error_ev = Event::default()
-            .event("error")
-            .json_data(serde_json::json!({
-                "type": "error",
-                "error": {
-                    "type": "api_error",
-                    "message": error_msg
-                }
-            }))
-            .unwrap_or_else(|_| Event::default().data("{}"));
-        let _ = send_sse(tx, error_ev).await;
-    } else if had_pending_tool_calls && !ctx.has_emitted_tool_use {
-        // A tool call was still streaming when the stream failed. It cannot be
-        // finalized (never executed) and emitting it partially would let the
-        // client run a broken tool. Close with an error event instead of a
-        // clean end_turn that would hide the loss.
-        let error_msg = format!(
-            "Upstream stream ended before a pending tool call completed (reason: {})",
-            reason
-        );
-        let error_ev = Event::default()
-            .event("error")
-            .json_data(serde_json::json!({
-                "type": "error",
-                "error": {
-                    "type": "api_error",
-                    "message": error_msg
-                }
-            }))
-            .unwrap_or_else(|_| Event::default().data("{}"));
-        let _ = send_sse(tx, error_ev).await;
-    } else {
-        let stop_reason = if ctx.has_emitted_tool_use {
-            "tool_use".to_string()
+    let stranded = !tracker.has_any_blocks_ever_opened()
+        || (had_pending_tool_calls && !ctx.has_emitted_tool_use)
+        || ctx.stream_failed;
+    if stranded {
+        // No usable assistant content survived (nothing was opened, the tool
+        // call never completed, or the stream broke mid-flight). Report the
+        // failure honestly as a terminal error event instead of a clean
+        // end_turn that would hide a truncated/corrupted message.
+        let error_msg = if ctx.stream_failed
+            && !tracker.has_any_blocks_ever_opened()
+            && !had_pending_tool_calls
+        {
+            format!(
+                "Upstream response did not contain content blocks (reason: {})",
+                reason
+            )
+        } else if had_pending_tool_calls && !ctx.has_emitted_tool_use {
+            format!(
+                "Upstream stream ended before a pending tool call completed (reason: {})",
+                reason
+            )
         } else {
-            "end_turn".to_string()
+            format!("Upstream stream ended with a read error (reason: {reason})")
         };
-
-        let _ = send_sse(tx, builder.message_delta_with_stop(&stop_reason, 1)).await;
+        let _ = send_sse(tx, builder.api_error(&error_msg)).await;
+        return;
     }
 
+    let stop_reason = if ctx.has_emitted_tool_use {
+        "tool_use".to_string()
+    } else {
+        "end_turn".to_string()
+    };
+    let _ = send_sse(tx, builder.message_delta_with_stop(&stop_reason, 1)).await;
     let _ = send_sse(tx, builder.message_stop()).await;
 }
 
@@ -172,6 +215,24 @@ pub(super) async fn process_openai_sse_line(
         }
     };
 
+    // A mid-stream upstream error payload (`{"error": {...}}`) is a definitive
+    // terminal signal: surface it as an Anthropic error event that ends the
+    // stream. Silently dropping it let truncated messages exit as clean
+    // end_turn, hiding the failure from the client.
+    if let Some(upstream_error) = &chunk.error {
+        let message = upstream_error
+            .message
+            .as_deref()
+            .unwrap_or("Upstream streaming error")
+            .chars()
+            .take(200)
+            .collect::<String>();
+        let _ = send_sse(tx, builder.api_error(&message)).await;
+        ctx.error_terminated = true;
+        ctx.stream_failed = true;
+        return true;
+    }
+
     if let Some(choice) = chunk.choices.first() {
         trace!(
             content_bytes = choice.delta.content.as_deref().map(str::len).unwrap_or(0),
@@ -194,9 +255,32 @@ pub(super) async fn process_openai_sse_line(
                 .await;
         }
 
+        let native_tool_transition = choice
+            .delta
+            .tool_calls
+            .as_ref()
+            .is_some_and(|calls| !calls.is_empty())
+            || (choice.finish_reason.as_deref() == Some("tool_calls")
+                && !ctx.pending_tool_calls.is_empty());
+
         if let Some(content) = &choice.delta.content {
-            ctx.process_content_delta(content, tracker, tx, builder, payload)
-                .await;
+            if native_tool_transition {
+                let (completed, unfinished) = split_completed_pre_tool_text(content);
+                if !completed.is_empty() {
+                    ctx.process_content_delta(completed, tracker, tx, builder, payload)
+                        .await;
+                }
+                if !unfinished.trim().is_empty() {
+                    warn!(
+                        dropped_bytes = unfinished.len(),
+                        preview = ?unfinished.chars().take(160).collect::<String>(),
+                        "Dropping unfinished visible text tail before native tool call"
+                    );
+                }
+            } else {
+                ctx.process_content_delta(content, tracker, tx, builder, payload)
+                    .await;
+            }
         }
 
         if let Some(tool_calls) = &choice.delta.tool_calls {
@@ -250,6 +334,10 @@ pub(super) struct StreamContext {
     pub(super) accumulated_text: String,
     /// Whether the stream encountered a fatal read error.
     pub(super) stream_failed: bool,
+    /// Whether an outgoing Anthropic `error` event was already emitted. The
+    /// stream must end at that event: no `message_delta`/`message_stop` and
+    /// no further content may follow it.
+    pub(super) error_terminated: bool,
     /// Whether any `tool_use` content block has been emitted.
     pub(super) has_emitted_tool_use: bool,
     /// Semantic tool calls already emitted during this assistant turn. This
@@ -272,12 +360,10 @@ pub(super) struct StreamContext {
     pub(super) compat_retry_requested: bool,
     /// Determined from `finish_reason` in the last stream chunk.
     pub(super) final_stop_reason: String,
-    /// Whether this is a compaction/summarization request.
-    pub(super) is_compact: bool,
 }
 
 impl StreamContext {
-    pub(super) fn new(is_compact: bool) -> Self {
+    pub(super) fn new(_is_compact: bool) -> Self {
         Self {
             message_started: false,
             intercepting_search: false,
@@ -293,6 +379,7 @@ impl StreamContext {
             thinking_block_bytes: 0,
             accumulated_text: String::new(),
             stream_failed: false,
+            error_terminated: false,
             has_emitted_tool_use: false,
             emitted_tool_fingerprints: HashSet::new(),
             dsml_mode: false,
@@ -302,7 +389,6 @@ impl StreamContext {
             discarding_text_compat: false,
             compat_retry_requested: false,
             final_stop_reason: "end_turn".to_string(),
-            is_compact,
         }
     }
 
@@ -338,34 +424,44 @@ impl StreamContext {
             return;
         }
         self.accumulated_thinking.push_str(&cleaned);
-        let (thinking_idx, thinking_is_new, closed_text) = tracker.ensure_thinking();
-        if let Some(closed) = closed_text {
-            let _ = tx.send(crate::sse::emit_block_stop(closed)).await;
-        }
-        if thinking_is_new {
-            let _ = tx
-                .send(builder.content_block_start_at(thinking_idx, "thinking", None, None))
-                .await;
-        }
-        let _ = tx
-            .send(builder.thinking_delta(thinking_idx, &cleaned))
-            .await;
-        self.thinking_block_bytes = self.thinking_block_bytes.saturating_add(cleaned.len());
-        trace!(
-            block_index = thinking_idx,
-            bytes = cleaned.len(),
-            "stream_timing anthropic_thinking_delta_enqueued"
-        );
-        if self.thinking_block_bytes >= THINKING_RENDER_CHUNK_BYTES {
-            if let Some(closed) = tracker.close_thinking() {
+
+        let mut remaining = cleaned.as_str();
+        while !remaining.is_empty() {
+            let (fragment, rest) = split_utf8_prefix(remaining, RENDER_DELTA_CHUNK_BYTES);
+            remaining = rest;
+
+            let (thinking_idx, thinking_is_new, closed_text) = tracker.ensure_thinking();
+            if let Some(closed) = closed_text {
                 let _ = tx.send(crate::sse::emit_block_stop(closed)).await;
-                trace!(
-                    block_index = closed,
-                    bytes = self.thinking_block_bytes,
-                    "stream_timing thinking_block_segment_closed"
-                );
             }
-            self.thinking_block_bytes = 0;
+            if thinking_is_new {
+                let _ = tx
+                    .send(builder.content_block_start_at(thinking_idx, "thinking", None, None))
+                    .await;
+            }
+            let _ = tx
+                .send(builder.thinking_delta(thinking_idx, fragment))
+                .await;
+            self.thinking_block_bytes = self.thinking_block_bytes.saturating_add(fragment.len());
+            trace!(
+                block_index = thinking_idx,
+                bytes = fragment.len(),
+                "stream_timing anthropic_thinking_delta_enqueued"
+            );
+            if self.thinking_block_bytes >= THINKING_RENDER_CHUNK_BYTES {
+                if let Some(closed) = tracker.close_thinking() {
+                    let _ = tx.send(crate::sse::emit_block_stop(closed)).await;
+                    trace!(
+                        block_index = closed,
+                        bytes = self.thinking_block_bytes,
+                        "stream_timing thinking_block_segment_closed"
+                    );
+                }
+                self.thinking_block_bytes = 0;
+            }
+            if !remaining.is_empty() {
+                tokio::time::sleep(LARGE_DELTA_PACING_DELAY).await;
+            }
         }
     }
 
@@ -414,7 +510,10 @@ impl StreamContext {
                 if let Some(parsed) =
                     parse_compat_tool_requests_with_consumed(&self.reasoning_stream_buffer)
                 {
-                    let remaining = self.reasoning_stream_buffer[parsed.consumed..].to_string();
+                    let remaining = strip_system_tags_with_context(
+                        &self.reasoning_stream_buffer[parsed.consumed..],
+                        &CompatMarkdownState::default(),
+                    );
                     self.reasoning_stream_buffer.clear();
                     if !parsed.prefix.is_empty() {
                         self.emit_thinking_fragment(&parsed.prefix, tracker, tx, builder)
@@ -483,11 +582,7 @@ impl StreamContext {
         tx: &tokio::sync::mpsc::Sender<Event>,
         builder: &SseEventBuilder,
     ) {
-        let cleaned = if self.is_compact {
-            text.to_string()
-        } else {
-            strip_system_tags_with_context(text, &self.text_markdown_state)
-        };
+        let cleaned = strip_system_tags_with_context(text, &self.text_markdown_state);
         if cleaned.is_empty() {
             return;
         }
@@ -511,12 +606,21 @@ impl StreamContext {
                 .send(builder.content_block_start_at(text_idx, "text", None, None))
                 .await;
         }
-        let _ = tx.send(builder.text_delta_at(text_idx, &cleaned)).await;
-        trace!(
-            block_index = text_idx,
-            bytes = cleaned.len(),
-            "stream_timing anthropic_text_delta_enqueued"
-        );
+
+        let mut remaining = cleaned.as_str();
+        while !remaining.is_empty() {
+            let (fragment, rest) = split_utf8_prefix(remaining, RENDER_DELTA_CHUNK_BYTES);
+            remaining = rest;
+            let _ = tx.send(builder.text_delta_at(text_idx, fragment)).await;
+            trace!(
+                block_index = text_idx,
+                bytes = fragment.len(),
+                "stream_timing anthropic_text_delta_enqueued"
+            );
+            if !remaining.is_empty() {
+                tokio::time::sleep(LARGE_DELTA_PACING_DELAY).await;
+            }
+        }
     }
 
     async fn emit_compat_tool_calls(
@@ -544,6 +648,13 @@ impl StreamContext {
                 return;
             };
             let arguments = normalize_dsml_arguments(&correct_name, call.arguments, payload);
+            if let Some(field) = invalid_semantic_tool_argument(&correct_name, &arguments) {
+                warn!(tool = %correct_name, field, "Compatibility marker used an empty or placeholder tool argument");
+                if !self.has_emitted_tool_use {
+                    self.compat_retry_requested = true;
+                }
+                return;
+            }
             resolved.push((correct_name, arguments));
         }
 
@@ -779,7 +890,10 @@ impl StreamContext {
                 if let Some(parsed) =
                     parse_compat_tool_requests_with_consumed(&self.text_stream_buffer)
                 {
-                    let remaining = self.text_stream_buffer[parsed.consumed..].to_string();
+                    let remaining = strip_system_tags_with_context(
+                        &self.text_stream_buffer[parsed.consumed..],
+                        &CompatMarkdownState::default(),
+                    );
                     self.text_stream_buffer.clear();
                     if !parsed.prefix.is_empty() {
                         self.emit_text_fragment(&parsed.prefix, tracker, tx, builder)
@@ -849,21 +963,21 @@ impl StreamContext {
         for tc in tool_calls {
             let pending = self.pending_tool_calls.entry(tc.index).or_default();
             if let Some(id) = &tc.id {
-                pending.id = Some(id.clone());
+                merge_streamed_identifier(&mut pending.id, id);
             }
             if let Some(name) = tc
                 .function
                 .as_ref()
                 .and_then(|function| function.name.as_ref())
             {
-                pending.name = Some(name.clone());
+                merge_streamed_identifier(&mut pending.name, name);
             }
             if let Some(arguments) = tc
                 .function
                 .as_ref()
                 .and_then(|function| function.arguments.as_ref())
             {
-                pending.arguments.push_str(arguments);
+                merge_streamed_arguments(&mut pending.arguments, arguments);
             }
         }
     }
@@ -924,6 +1038,19 @@ impl StreamContext {
                 return;
             }
             let arguments = normalize_dsml_arguments(&correct_name, arguments, payload);
+            if let Some(field) = invalid_semantic_tool_argument(&correct_name, &arguments) {
+                warn!(
+                    tool = %correct_name,
+                    field,
+                    source_index,
+                    "Native tool call used an empty or placeholder tool argument"
+                );
+                if !self.has_emitted_tool_use {
+                    self.compat_retry_requested = true;
+                    self.final_stop_reason = "end_turn".to_string();
+                }
+                return;
+            }
             let id = call
                 .id
                 .unwrap_or_else(|| format!("toolu_native_{source_index}"));
@@ -1150,7 +1277,18 @@ pub(super) fn split_pending_text(text: &str) -> (String, String) {
 }
 
 fn split_pending_text_for_markers(text: &str, payload: &MessagesRequest) -> (String, String) {
-    split_pending_text_with_compat_prefixes(text, &[DSML_OPEN_TAG], payload, true)
+    split_pending_text_with_compat_prefixes(
+        text,
+        &[
+            DSML_OPEN_TAG,
+            "</thinking>",
+            "<thinking>",
+            "</think>",
+            "<think>",
+        ],
+        payload,
+        true,
+    )
 }
 
 fn split_pending_text_with_compat_prefixes(

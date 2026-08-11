@@ -21,6 +21,12 @@ pub async fn create_container(port: u16) -> DockerResult<()> {
     runtime.recreate_managed(&spec).await
 }
 
+pub async fn rotate_container(port: u16) -> DockerResult<()> {
+    let runtime = default_runtime();
+    let spec = runtime.proxy_spec(port)?;
+    runtime.rotate_managed(&spec).await
+}
+
 pub async fn remove_container(port: u16) -> DockerResult<()> {
     let runtime = default_runtime();
     let spec = runtime.proxy_spec(port)?;

@@ -52,8 +52,9 @@ fn take_next_sse_line(
 }
 
 /// Close a failed turn with one complete error lifecycle: message_start (unless
-/// a previous search-loop iteration already started it), a single error event,
-/// then message_stop.
+/// a previous search-loop iteration already started it) and a single error
+/// event. Per the Messages API spec an error event ends the stream — no
+/// message_delta or message_stop may follow it.
 async fn finalize_transport_error(
     message: &str,
     tx: &tokio::sync::mpsc::Sender<Event>,
@@ -63,18 +64,7 @@ async fn finalize_transport_error(
     if !message_started {
         let _ = send_sse(tx, builder.message_start(0)).await;
     }
-    let error_ev = Event::default()
-        .event("error")
-        .json_data(serde_json::json!({
-            "type": "error",
-            "error": {
-                "type": "api_error",
-                "message": message
-            }
-        }))
-        .unwrap_or_else(|_| Event::default().data("{}"));
-    let _ = send_sse(tx, error_ev).await;
-    let _ = send_sse(tx, builder.message_stop()).await;
+    let _ = send_sse(tx, builder.api_error(message)).await;
 }
 
 /// Perform a streaming completions request to upstream OpenCode API and stream Anthropic SSE chunks.
@@ -132,6 +122,12 @@ pub async fn forward_to_llm_stream(
 
                 upstream_turns = upstream_turns.saturating_add(1);
                 let is_compact = is_compact_request(&current_payload);
+                // Per-attempt baseline for retry gates: block indices are
+                // monotonic within one message (never reset), so the gates
+                // below compare this attempt's allocations instead of the
+                // turn-global ever_opened flag, which earlier search or
+                // interception rounds may have set.
+                let attempt_start_allocated = tracker.allocated_blocks();
                 if upstream_turns
                     > max_search_loops
                         .saturating_add(MAX_COMPAT_TOOL_RETRIES)
@@ -265,6 +261,8 @@ pub async fn forward_to_llm_stream(
                     ctx.message_started = true;
                 }
 
+                let mut line_limit_exceeded = false;
+
                 loop {
                     let next_chunk = tokio::select! {
                         biased;
@@ -311,18 +309,16 @@ pub async fn forward_to_llm_stream(
                                     max_bytes = max_sse_line_bytes,
                                     "Upstream SSE line exceeded configured byte limit"
                                 );
-                                let error_ev = Event::default()
-                                    .event("error")
-                                    .json_data(serde_json::json!({
-                                        "type": "error",
-                                        "error": {
-                                            "type": "api_error",
-                                            "message": "Upstream SSE line exceeded configured byte limit"
-                                        }
-                                    }))
-                                    .unwrap_or_else(|_| Event::default().data("{}"));
-                                let _ = send_sse(&tx, error_ev).await;
+                                let _ = send_sse(
+                                    &tx,
+                                    builder.api_error(
+                                        "Upstream SSE line exceeded configured byte limit",
+                                    ),
+                                )
+                                .await;
                                 ctx.stream_failed = true;
+                                ctx.error_terminated = true;
+                                line_limit_exceeded = true;
                                 stream_done = true;
                                 break;
                             }
@@ -379,6 +375,33 @@ pub async fn forward_to_llm_stream(
                     line_buffer.clear();
                 }
 
+                // An error event is terminal per the Messages spec: once emitted,
+                // the stream must end at it — no message_delta, message_stop, or
+                // retry/continuation may follow, or the receiving SDK treats the
+                // turn as truncated mid-render. Break immediately and record the
+                // failure instead of replaying or finalizing a clean end_turn.
+                if ctx.error_terminated {
+                    capture.append_reasoning(&ctx.accumulated_thinking);
+                    capture.append_response(&ctx.accumulated_text);
+                    capture.attempt_finished(
+                        None,
+                        "failed",
+                        None,
+                        Some("mid_stream_upstream_error"),
+                        Some("upstream ended the stream with an error event"),
+                    );
+                    capture.fail(
+                        None,
+                        "mid_stream_upstream_error",
+                        "upstream ended the stream with an error event",
+                    );
+                    stream_metrics.failed();
+                    info!(
+                        "mid-stream upstream error event; stream ended at the error (no message_delta/message_stop)"
+                    );
+                    break;
+                }
+
                 if ctx.stream_failed {
                     capture.append_reasoning(&ctx.accumulated_thinking);
                     capture.append_response(&ctx.accumulated_text);
@@ -391,11 +414,15 @@ pub async fn forward_to_llm_stream(
                     );
 
                     // Retrying after any content block was emitted can duplicate
-                    // visible text or execute a tool twice. Before the first
-                    // content block, however, only message_start reached the
-                    // client, so the same request can be replayed safely while
-                    // preserving one Anthropic message lifecycle.
-                    if !tracker.has_any_blocks_ever_opened()
+                    // visible text or execute a tool twice. When nothing was
+                    // emitted this attempt, however, only message_start reached
+                    // the client, so the same request can be replayed safely
+                    // while preserving one Anthropic message lifecycle. A
+                    // line-limit failure is never retryable: the client already
+                    // received the SSE error event, so a replay would orphan
+                    // content after a terminal error.
+                    if !line_limit_exceeded
+                        && tracker.allocated_blocks() == attempt_start_allocated
                         && stream_read_retries < MAX_STREAM_READ_RETRIES
                     {
                         stream_read_retries = stream_read_retries.saturating_add(1);
@@ -404,7 +431,9 @@ pub async fn forward_to_llm_stream(
                             max_retries = MAX_STREAM_READ_RETRIES,
                             "retrying upstream stream after pre-content read failure"
                         );
-                        tracker.reset();
+                        // No reset(): block indices stay monotonic within the
+                        // message, even when earlier search rounds allocated
+                        // blocks.
                         continue;
                     }
 
@@ -542,12 +571,14 @@ pub async fn forward_to_llm_stream(
                 }
 
                 if ctx.compat_retry_requested {
-                    // Retrying after any content block was emitted would append
-                    // the retried stream's text to blocks the client already
-                    // received, merging two upstream responses into one message
-                    // (visible duplicate content). Only replay when nothing
-                    // content-visible reached the client.
-                    if !tracker.has_any_blocks_ever_opened()
+                    // Retrying after any content block was emitted this attempt
+                    // would append the retried stream's text to blocks the
+                    // client already received, merging two upstream responses
+                    // into one message (visible duplicate content). Only replay
+                    // when nothing content-visible reached the client in this
+                    // attempt; blocks from earlier search/interception rounds
+                    // do not make the replay unsafe.
+                    if tracker.allocated_blocks() == attempt_start_allocated
                         && compat_tool_retries < MAX_COMPAT_TOOL_RETRIES
                     {
                         compat_tool_retries = compat_tool_retries.saturating_add(1);
@@ -721,5 +752,32 @@ mod line_buffer_tests {
 
         buffer.extend_from_slice(b"de\n");
         assert_eq!(take_next_sse_line(&mut buffer, 4), Err(6));
+    }
+
+    #[tokio::test]
+    async fn transport_error_ends_stream_at_error_event_without_message_stop() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let builder = SseEventBuilder::new("msg_error".to_string(), "model".to_string());
+
+        finalize_transport_error("boom", &tx, &builder, true).await;
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(format!("{event:?}"));
+        }
+        assert_eq!(
+            events.len(),
+            1,
+            "an error event must end the stream; got: {events:?}"
+        );
+        assert!(
+            events[0].contains("error"),
+            "the terminal event must be the error, got: {}",
+            events[0]
+        );
+        assert!(
+            !events.iter().any(|event| event.contains("message_stop")),
+            "no message_stop may follow an error event, got: {events:?}"
+        );
     }
 }

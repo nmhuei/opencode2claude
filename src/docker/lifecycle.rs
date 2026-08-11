@@ -5,6 +5,7 @@ use crate::config::BridgeConfig;
 use crate::infrastructure::command::{CommandRequest, CommandRunner, SystemCommandRunner};
 use async_trait::async_trait;
 use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Debug)]
 pub struct DockerCliRuntime {
@@ -157,6 +158,49 @@ impl ContainerRuntime for DockerCliRuntime {
         Ok(())
     }
 
+    async fn rotate_managed(&self, spec: &ProxySpec) -> DockerResult<()> {
+        validate_managed_port(spec.port)?;
+
+        let removed_container = self
+            .command(vec!["rm".into(), "-f".into(), spec.name.clone()])
+            .await?;
+        let container_missing = {
+            let stderr = removed_container.stderr_text().to_ascii_lowercase();
+            stderr.contains("no such container") || stderr.contains("no such object")
+        };
+        if !removed_container.success && !container_missing {
+            return Err(DockerError::CommandFailed(format!(
+                "docker rm {}: {}",
+                spec.name,
+                removed_container.stderr_text()
+            )));
+        }
+
+        let removed_volume = self
+            .command(vec![
+                "volume".into(),
+                "rm".into(),
+                "-f".into(),
+                spec.volume_name.clone(),
+            ])
+            .await?;
+        let volume_missing = removed_volume
+            .stderr_text()
+            .to_ascii_lowercase()
+            .contains("no such volume");
+        if !removed_volume.success && !volume_missing {
+            return Err(DockerError::CommandFailed(format!(
+                "docker volume rm {}: {}",
+                spec.volume_name,
+                removed_volume.stderr_text()
+            )));
+        }
+
+        self.require_success(spec.run_args(), &format!("docker run {}", spec.name))
+            .await?;
+        Ok(())
+    }
+
     async fn remove_managed(&self, spec: &ProxySpec) -> DockerResult<()> {
         validate_managed_port(spec.port)?;
         let output = self
@@ -177,7 +221,7 @@ impl ContainerRuntime for DockerCliRuntime {
     }
 
     async fn restart_managed(&self, spec: &ProxySpec) -> DockerResult<()> {
-        validate_managed_port(spec.port)?;
+        validate_startable_port(spec.port)?;
         self.require_success(
             vec!["restart".into(), spec.name.clone()],
             &format!("docker restart {}", spec.name),
@@ -197,13 +241,23 @@ impl ContainerRuntime for DockerCliRuntime {
     }
 
     async fn start_managed(&self, spec: &ProxySpec) -> DockerResult<()> {
-        validate_managed_port(spec.port)?;
+        validate_startable_port(spec.port)?;
         self.require_success(
             vec!["start".into(), spec.name.clone()],
             &format!("docker start {}", spec.name),
         )
         .await?;
         Ok(())
+    }
+
+    async fn verify_online(&self, spec: &ProxySpec) -> bool {
+        for _ in 0..15 {
+            if super::health::verify_proxy(spec.port).await {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        false
     }
 
     async fn logs(&self, spec: &ProxySpec, tail: usize) -> DockerResult<String> {
@@ -264,7 +318,10 @@ pub async fn ensure_proxy(
                 has_expected_volume: true,
                 ..
             } => Ok(ContainerSetupState::Running),
-            ContainerState { running: false, .. } => Ok(ContainerSetupState::ProtectedStopped),
+            ContainerState { running: false, .. } => {
+                runtime.start_managed(spec).await?;
+                Ok(ContainerSetupState::Resumed)
+            }
             _ => Ok(ContainerSetupState::ProtectedLegacy),
         };
     }
@@ -326,6 +383,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rotate_managed_replaces_container_and_registration_volume() {
+        let runner = RecordingCommandRunner::with_outputs(vec![
+            CommandOutput::successful(Vec::new()),
+            CommandOutput::successful(Vec::new()),
+            CommandOutput::successful(b"container-id\n".to_vec()),
+        ]);
+        let runtime = DockerCliRuntime::with_runner(
+            "docker-test",
+            "example/warp:1",
+            Arc::new(runner.clone()),
+        );
+        let spec = runtime.proxy_spec(40001).expect("spec");
+
+        runtime.rotate_managed(&spec).await.expect("rotate");
+
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[0].args, vec!["rm", "-f", "opencode-warp-1"]);
+        assert_eq!(
+            calls[1].args,
+            vec!["volume", "rm", "-f", "opencode-warp-1-config"]
+        );
+        assert_eq!(calls[2].args, spec.run_args());
+    }
+
+    #[tokio::test]
     async fn protected_destructive_actions_do_not_reach_runner() {
         let runner = RecordingCommandRunner::default();
         let runtime = DockerCliRuntime::with_runner(
@@ -339,11 +422,11 @@ mod tests {
             Err(DockerError::Protected(_))
         ));
         assert!(matches!(
-            runtime.remove_managed(&spec).await,
+            runtime.rotate_managed(&spec).await,
             Err(DockerError::Protected(_))
         ));
         assert!(matches!(
-            runtime.restart_managed(&spec).await,
+            runtime.remove_managed(&spec).await,
             Err(DockerError::Protected(_))
         ));
         assert!(matches!(
@@ -354,10 +437,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn protected_existing_container_is_never_mutated_by_ensure() {
-        let runner = RecordingCommandRunner::with_outputs(vec![CommandOutput::successful(
-            b"false|legacy-volume\n".to_vec(),
-        )]);
+    async fn protected_start_and_restart_reach_runner() {
+        let runner = RecordingCommandRunner::with_outputs(vec![
+            CommandOutput::successful(Vec::new()),
+            CommandOutput::successful(Vec::new()),
+        ]);
+        let runtime = DockerCliRuntime::with_runner(
+            "docker-test",
+            "example/warp:1",
+            Arc::new(runner.clone()),
+        );
+        let spec = runtime.proxy_spec(40004).expect("spec");
+        runtime.start_managed(&spec).await.expect("start");
+        runtime.restart_managed(&spec).await.expect("restart");
+        let calls = runner.calls();
+        assert_eq!(calls[0].args, vec!["start", "opencode-warp-4"]);
+        assert_eq!(calls[1].args, vec!["restart", "opencode-warp-4"]);
+    }
+
+    #[tokio::test]
+    async fn protected_stopped_node_is_resumed_by_ensure() {
+        let runner = RecordingCommandRunner::with_outputs(vec![
+            CommandOutput::successful(b"false|opencode-warp-4-config\n".to_vec()),
+            CommandOutput::successful(Vec::new()),
+        ]);
         let runtime = DockerCliRuntime::with_runner(
             "docker-test",
             "example/warp:1",
@@ -366,9 +469,31 @@ mod tests {
         let spec = runtime.proxy_spec(40004).expect("spec");
         assert_eq!(
             ensure_proxy(&runtime, &spec).await.expect("ensure"),
-            ContainerSetupState::ProtectedStopped
+            ContainerSetupState::Resumed
         );
-        assert_eq!(runner.calls().len(), 1, "only inspect is allowed");
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1].args, vec!["start", "opencode-warp-4"]);
+    }
+
+    #[tokio::test]
+    async fn protected_stopped_legacy_volume_is_still_started() {
+        let runner = RecordingCommandRunner::with_outputs(vec![
+            CommandOutput::successful(b"false|legacy-volume\n".to_vec()),
+            CommandOutput::successful(Vec::new()),
+        ]);
+        let runtime = DockerCliRuntime::with_runner(
+            "docker-test",
+            "example/warp:1",
+            Arc::new(runner.clone()),
+        );
+        let spec = runtime.proxy_spec(40005).expect("spec");
+        assert_eq!(
+            ensure_proxy(&runtime, &spec).await.expect("ensure"),
+            ContainerSetupState::Resumed
+        );
+        let calls = runner.calls();
+        assert_eq!(calls[1].args, vec!["start", "opencode-warp-5"]);
     }
 }
 

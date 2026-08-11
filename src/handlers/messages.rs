@@ -1,6 +1,6 @@
 //! POST /v1/messages orchestration.
 
-use super::prompt::extract_prompt;
+use super::prompt::{extract_prompt, last_user_shell_cmd};
 use super::shell;
 use super::{MessagesRequest, OutputConfig, ThinkingConfig};
 use crate::api_key::{is_web_search_tool, ApiKeyPolicyError, AuthenticatedClient, ReasoningMode};
@@ -56,8 +56,7 @@ pub async fn handle_messages(
     };
     log_request(&payload, &model, client.as_ref());
 
-    let prompt = extract_prompt(&payload.messages);
-    let operation_kind = if prompt.trim_start().starts_with('!') {
+    let operation_kind = if last_user_shell_cmd(&payload.messages).is_some() {
         "shell"
     } else {
         "messages"
@@ -373,8 +372,7 @@ fn apply_client_policy(
         }
     }
 
-    let prompt = extract_prompt(&payload.messages);
-    if prompt.trim_start().starts_with('!') && !policy.permissions.shell {
+    if last_user_shell_cmd(&payload.messages).is_some() && !policy.permissions.shell {
         return Err(policy_error(ApiKeyPolicyError::ShellDisabled));
     }
 
@@ -523,6 +521,30 @@ mod policy_tests {
     fn policy_blocks_tools_and_shell() {
         let mut payload = request();
         payload.messages[0].content = ContentVal::Single("!pwd".to_string());
+        let policy = ApiKeyPolicy {
+            permissions: ApiKeyPermissions {
+                shell: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(matches!(
+            apply_client_policy(&client(policy), &mut payload),
+            Err(BridgeError::Forbidden(_))
+        ));
+    }
+
+    #[test]
+    fn policy_blocks_shell_after_claude_code_system_reminders() {
+        let mut payload = request();
+        payload.messages[0].content = ContentVal::Single(
+            concat!(
+                "<system-reminder>Available tools...</system-reminder>\n",
+                "<system-reminder>Available skills...</system-reminder>\n\n",
+                "!pwd"
+            )
+            .to_string(),
+        );
         let policy = ApiKeyPolicy {
             permissions: ApiKeyPermissions {
                 shell: false,

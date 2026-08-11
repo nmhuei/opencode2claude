@@ -2,10 +2,10 @@
 
 use super::policy::{
     bounded_backoff, build_model_retry_list, classify_reqwest_error, classify_status,
-    is_rate_limit_body, is_reasoning_heavy_model, parse_retry_after, FailureClass,
+    client_retry_after, is_rate_limit_body, is_reasoning_heavy_model, parse_retry_after,
+    FailureClass,
 };
 use super::response::LeasedResponse;
-use super::warp::reconnect_warp;
 use crate::error::BridgeError;
 use crate::observability::RetryMetricClass;
 use crate::opencode::types::{OpenAiInboundRequest, OpenAiRequest};
@@ -27,6 +27,9 @@ trait RetryableOpenAiRequest: Serialize + Clone {
     fn model(&self) -> &str;
     fn stream(&self) -> bool;
     fn set_model(&mut self, model: String);
+    fn repair_missing_tool_reasoning(&mut self) -> bool;
+    fn disable_reasoning_compatibility(&mut self) -> bool;
+    fn strip_response_format(&mut self) -> bool;
 }
 
 impl RetryableOpenAiRequest for OpenAiRequest {
@@ -41,6 +44,52 @@ impl RetryableOpenAiRequest for OpenAiRequest {
     fn set_model(&mut self, model: String) {
         self.model = model;
     }
+
+    fn repair_missing_tool_reasoning(&mut self) -> bool {
+        let mut changed = false;
+        for message in &mut self.messages {
+            let has_tool_calls = message
+                .tool_calls
+                .as_ref()
+                .is_some_and(|tool_calls| !tool_calls.is_empty());
+            let missing_reasoning = message
+                .reasoning_content
+                .as_deref()
+                .is_none_or(str::is_empty);
+            if message.role == "assistant" && has_tool_calls && missing_reasoning {
+                message.reasoning_content = Some("Tool call continuation.".to_string());
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn disable_reasoning_compatibility(&mut self) -> bool {
+        let mut changed = false;
+        if self
+            .thinking
+            .as_ref()
+            .is_none_or(|thinking| thinking.thinking_type != "disabled")
+        {
+            self.thinking = Some(crate::opencode::types::OpenAiThinkingConfig {
+                thinking_type: "disabled".to_string(),
+            });
+            changed = true;
+        }
+        changed |= self.reasoning_effort.take().is_some();
+        if self.include_reasoning != Some(false) {
+            self.include_reasoning = Some(false);
+            changed = true;
+        }
+        for message in &mut self.messages {
+            changed |= message.reasoning_content.take().is_some();
+        }
+        changed
+    }
+
+    fn strip_response_format(&mut self) -> bool {
+        self.response_format.take().is_some()
+    }
 }
 
 impl RetryableOpenAiRequest for OpenAiInboundRequest {
@@ -54,6 +103,56 @@ impl RetryableOpenAiRequest for OpenAiInboundRequest {
 
     fn set_model(&mut self, model: String) {
         self.model = model;
+    }
+
+    fn repair_missing_tool_reasoning(&mut self) -> bool {
+        let mut changed = false;
+        for message in &mut self.messages {
+            let Some(object) = message.as_object_mut() else {
+                continue;
+            };
+            let is_assistant =
+                object.get("role").and_then(serde_json::Value::as_str) == Some("assistant");
+            let has_tool_calls = object
+                .get("tool_calls")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|tool_calls| !tool_calls.is_empty());
+            let missing_reasoning = object
+                .get("reasoning_content")
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(str::is_empty);
+            if is_assistant && has_tool_calls && missing_reasoning {
+                object.insert(
+                    "reasoning_content".to_string(),
+                    serde_json::Value::String("Tool call continuation.".to_string()),
+                );
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn disable_reasoning_compatibility(&mut self) -> bool {
+        let mut changed = false;
+        let disabled = serde_json::json!({"type":"disabled"});
+        if self.extra.get("thinking") != Some(&disabled) {
+            self.extra.insert("thinking".to_string(), disabled);
+            changed = true;
+        }
+        changed |= self.extra.remove("reasoning_effort").is_some();
+        changed |= self.extra.remove("include_reasoning").is_some();
+        for message in &mut self.messages {
+            if let Some(object) = message.as_object_mut() {
+                for field in ["reasoning_content", "reasoning", "thinking"] {
+                    changed |= object.remove(field).is_some();
+                }
+            }
+        }
+        changed
+    }
+
+    fn strip_response_format(&mut self) -> bool {
+        self.extra.remove("response_format").is_some()
     }
 }
 
@@ -73,13 +172,16 @@ pub(crate) async fn execute_openai_with_warp_retry(
     execute_retryable_request(state, routing_key, request).await
 }
 
+/// Bound contradictory request sanitizations: repair and strip are inverse on
+/// reasoning_content, so a persistent 400 must not re-sanitize without a cap.
+const MAX_COMPAT_SANITIZE_ROUNDS: u32 = 2;
+
 async fn execute_retryable_request<T: RetryableOpenAiRequest>(
     state: &AppState,
     routing_key: &str,
     request: &T,
 ) -> Result<LeasedResponse, BridgeError> {
     let max_retries = state.config.retry.max_network_attempts as u32;
-    let max_provider_retries = state.config.retry.max_provider_attempts;
     let models = build_model_retry_list(request.model(), request.stream(), &state.config.retry);
     let upstream_url = format!(
         "{}/chat/completions",
@@ -95,14 +197,16 @@ async fn execute_retryable_request<T: RetryableOpenAiRequest>(
 
     let mut model_index = 0usize;
     let mut retry_count = 0u32;
+    let mut compat_sanitize_rounds = 0u32;
     let mut last_failed_proxy = None;
+    let mut compatible_request = request.clone();
 
     loop {
         let current_model = models
             .get(model_index)
             .cloned()
             .unwrap_or_else(|| request.model().to_string());
-        let mut attempt_request = request.clone();
+        let mut attempt_request = compatible_request.clone();
         attempt_request.set_model(current_model.clone());
 
         let mut route = select_route(state, routing_key, last_failed_proxy).await?;
@@ -165,21 +269,14 @@ async fn execute_retryable_request<T: RetryableOpenAiRequest>(
                         continue;
                     }
 
-                    if retry_count < max_retries {
-                        state.metrics.record_retry(RetryMetricClass::ProviderServer);
-                        retry_count += 1;
-                        warn!(
-                            %status,
-                            retry_count,
-                            max_retries,
-                            "upstream server error; retrying without penalizing egress"
-                        );
-                        sleep_backoff(state, retry_count, route.proxy_index).await;
-                        continue;
-                    }
-
+                    // Server errors are transient on the provider side, not on
+                    // this bridge: sleep-backoff retrying here multiplies with
+                    // the client's own retry loop and produces a minutes-long
+                    // "Retrying …" hang. Fail fast at the API error so the
+                    // client's single retry succeeds immediately against a
+                    // recovered upstream — matching the reference behavior.
                     return Err(BridgeError::UpstreamError(format!(
-                        "Upstream server error after {retry_count} retries (status {status})"
+                        "Upstream server error after model fallback (status {status})"
                     )));
                 }
 
@@ -218,6 +315,32 @@ async fn execute_retryable_request<T: RetryableOpenAiRequest>(
                         )));
                     }
 
+                    let mut compatibility_changed = false;
+                    if is_reasoning_content_compatibility_error(&body_text)
+                        && compat_sanitize_rounds < MAX_COMPAT_SANITIZE_ROUNDS
+                    {
+                        compatibility_changed |= compatible_request.repair_missing_tool_reasoning();
+                        if !compatibility_changed {
+                            compatibility_changed |=
+                                compatible_request.disable_reasoning_compatibility();
+                        }
+                    }
+                    if is_grammar_constraint_compatibility_error(&body_text)
+                        && compat_sanitize_rounds < MAX_COMPAT_SANITIZE_ROUNDS
+                    {
+                        compatibility_changed |= compatible_request.strip_response_format();
+                    }
+                    if compatibility_changed {
+                        compat_sanitize_rounds += 1;
+                        state.metrics.record_retry(RetryMetricClass::ProviderClient);
+                        warn!(
+                            body = %body_text.chars().take(240).collect::<String>(),
+                            round = compat_sanitize_rounds,
+                            "sanitized provider-incompatible request fields after HTTP 400"
+                        );
+                        continue;
+                    }
+
                     if advance_model(
                         state,
                         &models,
@@ -230,22 +353,27 @@ async fn execute_retryable_request<T: RetryableOpenAiRequest>(
                         continue;
                     }
 
-                    if retry_count < max_provider_retries {
-                        state.metrics.record_retry(RetryMetricClass::ProviderClient);
-                        retry_count += 1;
-                        warn!(
-                            retry_count,
-                            max_retries = max_provider_retries,
-                            body = %body_text.chars().take(200).collect::<String>(),
-                            "upstream returned a non-rate-limit 400; retrying without penalizing egress"
-                        );
-                        sleep_backoff(state, retry_count, route.proxy_index).await;
-                        continue;
-                    }
+                    // Non-rate-limit 400s are deterministic request errors —
+                    // retrying only multiplies latency. Surface the API error
+                    // immediately (see ProviderServer branch).
+                    return Err(BridgeError::UpstreamError(
+                        "Upstream returned HTTP 400 after model fallback".to_string(),
+                    ));
+                }
 
-                    return Err(BridgeError::UpstreamError(format!(
-                        "Upstream returned HTTP 400 after {max_provider_retries} provider retry attempt(s)"
-                    )));
+                // HTTP 402 Payment Required: billing or credit issue on the
+                // upstream provider. This is never retryable — surface it
+                // immediately with a clear error instead of masking it as 502.
+                if status == StatusCode::PAYMENT_REQUIRED {
+                    let body = response.bytes().await.unwrap_or_default();
+                    let body_text = String::from_utf8_lossy(&body);
+                    warn!(
+                        body = %body_text.chars().take(300).collect::<String>(),
+                        "upstream returned 402 Payment Required — likely exhausted credits or missing billing"
+                    );
+                    return Err(BridgeError::PaymentRequired(
+                        "Upstream API requires payment. Check your API credits/billing on the provider dashboard.".to_string(),
+                    ));
                 }
 
                 return Ok(LeasedResponse::new(response, route.lease.take()));
@@ -275,9 +403,8 @@ async fn execute_retryable_request<T: RetryableOpenAiRequest>(
                             ?failure_class,
                             retry_count,
                             max_retries,
-                            "direct upstream network error; reconnecting host WARP"
+                            "direct upstream network error; host WARP mutation is forbidden"
                         );
-                        reconnect_warp(state.warp_controller.as_ref()).await;
                     }
                     sleep_backoff(state, retry_count, route.proxy_index).await;
                     continue;
@@ -303,6 +430,21 @@ async fn execute_retryable_request<T: RetryableOpenAiRequest>(
     }
 }
 
+fn is_reasoning_content_compatibility_error(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    lower.contains("reasoning_content")
+        && (lower.contains("invalid_request")
+            || lower.contains("unsupported")
+            || lower.contains("must"))
+}
+
+fn is_grammar_constraint_compatibility_error(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    lower.contains("grammar-constrained")
+        || lower.contains("grammar constrained")
+        || (lower.contains("response_format") && lower.contains("unsupported"))
+}
+
 async fn select_route(
     state: &AppState,
     routing_key: &str,
@@ -319,7 +461,7 @@ async fn select_route(
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
-        let (selection, recovery_in_progress, retry_after) = {
+        let (selection, recovery_in_progress, route_availability_pending, retry_after) = {
             let mut pool = state.proxy_pool.write().await;
             if pool.proxies.is_empty() {
                 return Err(BridgeError::UpstreamError(
@@ -336,8 +478,14 @@ async fn select_route(
                     .map(|lease| (client, proxy_url, proxy_index, lease))
             });
             let recovery_in_progress = pool.recovery_in_progress();
+            let route_availability_pending = pool.route_availability_pending();
             let retry_after = pool.minimum_rate_limit_remaining();
-            (selection, recovery_in_progress, retry_after)
+            (
+                selection,
+                recovery_in_progress,
+                route_availability_pending,
+                retry_after,
+            )
         };
 
         if let Some((client, proxy_url, proxy_index, lease)) = selection {
@@ -349,15 +497,18 @@ async fn select_route(
             });
         }
 
-        if recovery_in_progress && tokio::time::Instant::now() < deadline {
+        if (recovery_in_progress || route_availability_pending)
+            && tokio::time::Instant::now() < deadline
+        {
             tokio::time::sleep(Duration::from_millis(250)).await;
             continue;
         }
 
         if let Some(remaining) = retry_after {
+            let retry_after = client_retry_after(remaining);
             return Err(BridgeError::RateLimited(format!(
-                "no unique healthy proxy exit is currently available; retry after {} second(s)",
-                remaining.as_secs().max(1)
+                "no unique healthy proxy exit is currently available; managed recovery is still running; retry after {} second(s)",
+                retry_after.as_secs()
             )));
         }
 
@@ -392,7 +543,10 @@ async fn apply_rate_limit_penalty(
             pool.mark_rate_limited_adaptive(index, retry_count);
         }
     } else {
-        reconnect_warp(state.warp_controller.as_ref()).await;
+        warn!(
+            retry_count,
+            "direct upstream rate limit received; host WARP mutation is forbidden"
+        );
     }
 }
 
@@ -442,7 +596,158 @@ async fn sleep_backoff(state: &AppState, retry_count: u32, proxy_index: Option<u
 mod tests {
     use super::*;
     use crate::config::BridgeConfig;
+    use crate::infrastructure::warp::{WarpController, WarpError, WarpStatus};
     use crate::proxy_pool::{CircuitState, HealthState};
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[derive(Debug, Default)]
+    struct CountingWarpController {
+        reconnects: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl WarpController for CountingWarpController {
+        async fn connect(&self) -> Result<(), WarpError> {
+            Ok(())
+        }
+
+        async fn disconnect(&self) -> Result<(), WarpError> {
+            Ok(())
+        }
+
+        async fn status(&self) -> Result<WarpStatus, WarpError> {
+            Ok(WarpStatus::Connected)
+        }
+
+        async fn reconnect(&self) -> Result<(), WarpError> {
+            self.reconnects.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn detects_provider_compatibility_errors() {
+        assert!(is_reasoning_content_compatibility_error(
+            r#"{"error":{"type":"invalid_request_error","message":"The `reasoning_content` is invalid"}}"#
+        ));
+        assert!(is_grammar_constraint_compatibility_error(
+            "DFLASH speculative decoding does not support grammar-constrained decoding"
+        ));
+        assert!(!is_grammar_constraint_compatibility_error(
+            "ordinary bad request"
+        ));
+    }
+
+    #[test]
+    fn sanitizes_mapped_request_for_provider_retry() {
+        let mut request = OpenAiRequest {
+            model: "deepseek-v4-flash-free".to_string(),
+            messages: vec![crate::opencode::types::OpenAiMessage {
+                role: "assistant".to_string(),
+                content: Some("visible".to_string()),
+                reasoning_content: None,
+                tool_calls: Some(vec![crate::opencode::types::OpenAiToolCall {
+                    id: "call_1".to_string(),
+                    tool_type: "function".to_string(),
+                    function: crate::opencode::types::OpenAiFunctionCall {
+                        name: "Read".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }]),
+                tool_call_id: None,
+                name: None,
+            }],
+            thinking: Some(crate::opencode::types::OpenAiThinkingConfig {
+                thinking_type: "enabled".to_string(),
+            }),
+            reasoning_effort: Some("max".to_string()),
+            response_format: Some(serde_json::json!({"type":"json_object"})),
+            ..OpenAiRequest::default()
+        };
+        assert!(request.repair_missing_tool_reasoning());
+        assert_eq!(
+            request.messages[0].reasoning_content.as_deref(),
+            Some("Tool call continuation.")
+        );
+        assert!(!request.repair_missing_tool_reasoning());
+        assert!(request.disable_reasoning_compatibility());
+        assert!(request.messages[0].reasoning_content.is_none());
+        assert_eq!(
+            request
+                .thinking
+                .as_ref()
+                .map(|value| value.thinking_type.as_str()),
+            Some("disabled")
+        );
+        assert!(request.reasoning_effort.is_none());
+        assert!(request.strip_response_format());
+        assert!(request.response_format.is_none());
+        assert!(!request.strip_response_format());
+    }
+
+    #[test]
+    fn sanitizes_openai_passthrough_request_for_provider_retry() {
+        let mut request = OpenAiInboundRequest {
+            model: "deepseek-v4-flash-free".to_string(),
+            messages: vec![serde_json::json!({
+                "role":"assistant",
+                "content":"visible",
+                "tool_calls":[{"id":"call_1","type":"function","function":{"name":"Read","arguments":"{}"}}]
+            })],
+            stream: false,
+            extra: std::collections::BTreeMap::from([
+                (
+                    "thinking".to_string(),
+                    serde_json::json!({"type":"enabled"}),
+                ),
+                ("reasoning_effort".to_string(), serde_json::json!("max")),
+                (
+                    "response_format".to_string(),
+                    serde_json::json!({"type":"json_object"}),
+                ),
+            ]),
+        };
+        assert!(request.repair_missing_tool_reasoning());
+        assert_eq!(
+            request.messages[0]
+                .get("reasoning_content")
+                .and_then(serde_json::Value::as_str),
+            Some("Tool call continuation.")
+        );
+        assert!(request.disable_reasoning_compatibility());
+        assert!(request.messages[0].get("reasoning_content").is_none());
+        assert_eq!(
+            request.extra.get("thinking"),
+            Some(&serde_json::json!({"type":"disabled"}))
+        );
+        assert!(!request.extra.contains_key("reasoning_effort"));
+        assert!(request.strip_response_format());
+        assert!(!request.extra.contains_key("response_format"));
+    }
+
+    #[tokio::test]
+    async fn direct_rate_limit_never_reconnects_host_warp() {
+        let mut config = BridgeConfig::default();
+        config.egress.mode = crate::config::EgressMode::Direct;
+        let warp = Arc::new(CountingWarpController::default());
+        let state = AppState::new_with_adapters(
+            config.clone(),
+            Arc::new(crate::docker::DockerCliRuntime::from_config(&config)),
+            warp.clone(),
+        );
+        let route = SelectedRoute {
+            client: state.http_client.clone(),
+            proxy_url: None,
+            proxy_index: None,
+            lease: None,
+        };
+
+        apply_rate_limit_penalty(&state, &route, 1, Some(Duration::from_secs(60))).await;
+
+        assert_eq!(warp.reconnects.load(Ordering::SeqCst), 0);
+    }
 
     #[tokio::test]
     async fn direct_mode_ignores_configured_proxy_pool() {
@@ -459,6 +764,46 @@ mod tests {
         assert!(route.proxy_url.is_none());
         assert!(route.proxy_index.is_none());
         assert!(route.lease.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rate_limited_route_reports_recovery_cadence_not_quota_deadline() {
+        let mut config = BridgeConfig {
+            primary_proxies: Some(vec!["socks5://127.0.0.1:40001".to_string()]),
+            ..BridgeConfig::default()
+        };
+        config.egress.mode = crate::config::EgressMode::Proxy;
+        let state = AppState::new(config);
+        {
+            let mut pool = state.proxy_pool.write().await;
+            pool.mark_rate_limited(0, Duration::from_secs(47_897));
+            assert!(
+                pool.minimum_rate_limit_remaining()
+                    .is_some_and(|remaining| remaining.as_secs() > 47_000),
+                "provider quota deadline must remain quarantined internally"
+            );
+        }
+
+        let error = select_route(&state, "test", None)
+            .await
+            .err()
+            .expect("rate-limited proxy pool should fail closed");
+        let message = error.to_string();
+        assert!(
+            message.contains("managed recovery is still running"),
+            "{message}"
+        );
+        assert!(message.contains("retry after 30 second(s)"), "{message}");
+        assert!(!message.contains("47897"), "{message}");
+        assert!(
+            state
+                .proxy_pool
+                .read()
+                .await
+                .minimum_rate_limit_remaining()
+                .is_some_and(|remaining| remaining.as_secs() > 47_000),
+            "client-facing cap must not shorten internal quota quarantine"
+        );
     }
 
     #[tokio::test]

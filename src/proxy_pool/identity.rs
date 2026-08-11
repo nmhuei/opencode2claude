@@ -364,9 +364,16 @@ impl ProxyPool {
             match node.recovery_cause {
                 Some(RecoveryCause::RateLimit) => {
                     if node.restart_attempts >= self.max_restart_attempts.max(1) {
-                        let until = node
+                        let quota_until = node
                             .rate_limit_until
                             .unwrap_or_else(|| now + Duration::from_secs(120));
+                        // The restart worker may have deferred rotation to a
+                        // nearer deadline; overwriting it with the full quota
+                        // deadline would cancel the pending requeue.
+                        let until = match node.circuit {
+                            CircuitState::Open { until } if until < quota_until => until,
+                            _ => quota_until,
+                        };
                         node.health = HealthState::Degraded;
                         node.circuit = CircuitState::Open { until };
                         node.cooldown_until = Some(until);
@@ -506,6 +513,39 @@ mod tests {
     }
 
     #[test]
+    fn rate_limit_exhausted_keeps_nearer_deferred_rotation_deadline() {
+        let mut pool = ProxyPool::new_with_egress_policy(
+            &["socks5h://127.0.0.1:40001".to_string()],
+            1,
+            true,
+            Duration::from_secs(300),
+        );
+        {
+            let node = &mut pool.proxies[0];
+            node.lifecycle = LifecyclePolicy::Managed;
+            node.recovery_cause = Some(RecoveryCause::RateLimit);
+            node.restart_attempts = 3;
+            node.rate_limit_until = Some(Instant::now() + Duration::from_secs(3600));
+            // Simulate the restart worker's deferred rotation (maintenance.rs
+            // apply_restart_failure with an exhausted budget under an active
+            // rate limit): a nearer deadline with a pending requeue.
+            let deferred = Instant::now() + Duration::from_secs(30);
+            node.circuit = CircuitState::Open { until: deferred };
+            node.cooldown_until = Some(deferred);
+        }
+        pool.finalize_identity_recovery();
+        match pool.proxies[0].circuit {
+            CircuitState::Open { until } => {
+                assert!(
+                    until < Instant::now() + Duration::from_secs(60),
+                    "identity monitor must preserve the deferred rotation deadline"
+                );
+            }
+            _ => panic!("exhausted rate-limit recovery must keep the circuit open"),
+        }
+    }
+
+    #[test]
     fn transient_probe_failure_preserves_fresh_last_known_good_identity() {
         let mut pool = ProxyPool::new_with_egress_policy(
             &["socks5h://127.0.0.1:40001".to_string()],
@@ -518,7 +558,6 @@ mod tests {
         pool.proxies[0].circuit = CircuitState::Closed;
         pool.suppress_duplicate_exits();
         let node_id = pool.proxies[0].id.clone();
-
         pool.apply_identity_results(vec![(
             0,
             node_id,

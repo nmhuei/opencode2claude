@@ -8,6 +8,7 @@ use axum::{Json, Router};
 use futures_util::{stream, StreamExt};
 use opencode2api::config::{BridgeConfig, EgressMode};
 use opencode2api::server::build_router;
+use opencode2api::shell::ShellPolicy;
 use opencode2api::state::AppState;
 use serde_json::{json, Value};
 use std::collections::VecDeque;
@@ -294,6 +295,54 @@ async fn sync_native_and_dsml_tool_calls_map_to_tool_use() {
 }
 
 #[tokio::test]
+async fn sync_native_tool_call_discards_unfinished_visible_sentence_tail() {
+    let fixture = json!({
+        "id":"chatcmpl-sync-clipped-preamble",
+        "model":"upstream-model",
+        "choices":[{
+            "message":{
+                "content":"Proxy up (200), env đủ. Copy tinyctfer sang tools/ và đọc code container conf",
+                "reasoning_content":null,
+                "tool_calls":[{
+                    "id":"call-sync-clipped-preamble",
+                    "function":{
+                        "name":"Bash",
+                        "arguments":"{\"command\":\"printf PRE_TOOL_SYNC_OK\"}"
+                    }
+                }]
+            },
+            "finish_reason":"tool_calls"
+        }],
+        "usage":{"prompt_tokens":1,"completion_tokens":1}
+    });
+    let (app, _state) = harness(vec![Fixture::Json(fixture)]).await;
+    let mut request = anthropic_request(false);
+    request["tools"] = json!([{
+        "name":"Bash",
+        "description":"Run a harmless command",
+        "input_schema":{
+            "type":"object",
+            "properties":{"command":{"type":"string"}},
+            "required":["command"]
+        }
+    }]);
+
+    let (status, body) = call(app, request).await;
+    assert_eq!(status, StatusCode::OK);
+    let response: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(response["content"][0]["type"], "text");
+    assert_eq!(response["content"][0]["text"], "Proxy up (200), env đủ. ");
+    assert_eq!(response["content"][1]["type"], "tool_use");
+    assert_eq!(response["content"][1]["name"], "Bash");
+    assert_eq!(
+        response["content"][1]["input"]["command"],
+        "printf PRE_TOOL_SYNC_OK"
+    );
+    assert_eq!(response["stop_reason"], "tool_use");
+    assert!(!body.contains("Copy tinyctfer"), "{body}");
+}
+
+#[tokio::test]
 async fn fragmented_utf8_stream_preserves_reasoning_then_text_order() {
     let wire = concat!(
         "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Suy nghĩ \"},\"finish_reason\":null}]}\n\n",
@@ -386,6 +435,33 @@ async fn streaming_native_tool_arguments_can_be_fragmented() {
 }
 
 #[tokio::test]
+async fn streaming_native_tool_identity_fragments_and_cumulative_arguments_reassemble() {
+    let chunks = vec![
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_\",\"function\":{\"name\":\"Ba\",\"arguments\":\"{\\\"command\\\":\\\"printf \"}}]},\"finish_reason\":null}]}\n\n".to_vec(),
+        b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"bash\",\"function\":{\"name\":\"sh\",\"arguments\":\"{\\\"command\\\":\\\"printf fragmented\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n".to_vec(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+    let (app, state) = harness(vec![Fixture::Sse(chunks)]).await;
+    let mut request = anthropic_request(true);
+    request["tools"] = json!([{
+        "name":"Bash",
+        "description":"Run a command",
+        "input_schema":{"type":"object","properties":{"command":{"type":"string"}}}
+    }]);
+
+    let (status, body) = call(app, request).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body.matches("\"type\":\"tool_use\"").count(), 1, "{body}");
+    assert!(body.contains("\"id\":\"call_bash\""), "{body}");
+    assert!(body.contains("\"name\":\"Bash\""), "{body}");
+    assert!(body.contains("printf fragmented"), "{body}");
+    assert!(!body.contains("BaBash"), "{body}");
+    assert!(!body.contains("call_call_bash"), "{body}");
+    assert!(body.contains("\"stop_reason\":\"tool_use\""), "{body}");
+    assert_eq!(state.requests.lock().await.len(), 1);
+}
+
+#[tokio::test]
 async fn malformed_lines_and_duplicate_done_do_not_break_finalization() {
     let chunks = vec![
         b"event: ignored\ndata: {not-json}\n\n".to_vec(),
@@ -453,7 +529,10 @@ async fn post_content_stream_read_error_is_not_replayed() {
     assert!(!body.contains("MUST_NOT_REPLAY"), "{body}");
     assert_eq!(body.matches("VISIBLE_ONCE").count(), 1, "{body}");
     assert_eq!(body.matches("event: message_start").count(), 1, "{body}");
-    assert_eq!(body.matches("event: message_stop").count(), 1, "{body}");
+    // A mid-stream failure is reported via the terminal error event, not a
+    // clean end_turn: message_stop must never follow an error event.
+    assert!(body.contains("event: error"), "{body}");
+    assert_eq!(body.matches("event: message_stop").count(), 0, "{body}");
     assert_eq!(state.requests.lock().await.len(), 1);
 }
 
@@ -519,7 +598,9 @@ async fn upstream_non_2xx_emits_single_error_after_message_start() {
         "message_start must precede the error event: {body}"
     );
     assert_eq!(body.matches("event: error").count(), 1, "{body}");
-    assert_eq!(body.matches("event: message_stop").count(), 1, "{body}");
+    // The error event is terminal: no message_delta or message_stop may follow.
+    assert_eq!(body.matches("event: message_delta").count(), 0, "{body}");
+    assert_eq!(body.matches("event: message_stop").count(), 0, "{body}");
 }
 
 #[tokio::test]
@@ -552,10 +633,11 @@ async fn post_content_failure_with_pending_tool_call_emits_error_not_clean_end_t
     assert!(body.contains("VISIBLE_PARTIAL"), "{body}");
     // The client must be told the message is incomplete rather than receiving a
     // clean end_turn that implies the tool call was not executed when it was
-    // never completed. The dropped tool call must never be emitted partially.
+    // never completed. The dropped tool call must never be emitted partially,
+    // and the terminal error event carries no message_stop after it.
     assert!(body.contains("event: error"), "{body}");
     assert!(!body.contains("\"name\":\"Read\""), "{body}");
-    assert_eq!(body.matches("event: message_stop").count(), 1, "{body}");
+    assert_eq!(body.matches("event: message_stop").count(), 0, "{body}");
 }
 
 #[tokio::test]
@@ -604,7 +686,7 @@ async fn oversized_sync_body_is_rejected_before_json_allocation() {
 }
 
 #[tokio::test]
-async fn oversized_sse_line_emits_error_and_single_terminal_stop() {
+async fn oversized_sse_line_emits_terminal_error_without_message_stop() {
     let huge = format!(
         "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{}\"}},\"finish_reason\":null}}]}}\n\n",
         "x".repeat(4096)
@@ -615,7 +697,10 @@ async fn oversized_sse_line_emits_error_and_single_terminal_stop() {
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("event: error"));
     assert!(body.contains("exceeded configured byte limit"));
-    assert_eq!(body.matches("event: message_stop").count(), 1);
+    // The error event is terminal — a single error, no message_stop after it.
+    assert_eq!(body.matches("event: error").count(), 1, "{body}");
+    assert_eq!(body.matches("event: message_delta").count(), 0, "{body}");
+    assert_eq!(body.matches("event: message_stop").count(), 0, "{body}");
 }
 
 #[tokio::test]
@@ -715,16 +800,7 @@ async fn dropping_client_stream_cancels_upstream_body() {
 }
 
 #[tokio::test]
-async fn completed_stream_and_provider_retry_are_counted() {
-    let success = json!({
-        "id":"chatcmpl-after-retry",
-        "model":"upstream-model",
-        "choices":[{
-            "message":{"content":"recovered","reasoning_content":null,"tool_calls":null},
-            "finish_reason":"stop"
-        }],
-        "usage":{"prompt_tokens":1,"completion_tokens":1}
-    });
+async fn provider_server_error_fails_fast_and_completed_streams_are_counted() {
     let stream_chunks = vec![
         b"data: {\"choices\":[{\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\n"
             .to_vec(),
@@ -736,26 +812,28 @@ async fn completed_stream_and_provider_retry_are_counted() {
             content_type: "text/plain",
             chunks: vec![b"temporary".to_vec()],
         },
-        Fixture::Json(success),
         Fixture::Sse(stream_chunks),
     ];
     let (app, _state, metrics) = harness_core(fixtures, 256 * 1024, 4 * 1024 * 1024, |config| {
         config.retry.base_backoff = std::time::Duration::ZERO;
         config.retry.max_backoff = std::time::Duration::ZERO;
-        config.retry.max_network_attempts = 1;
+        config.retry.max_network_attempts = 5;
     })
     .await;
 
+    // A 5xx is a provider-side transient: the bridge fails fast (after the
+    // model-fallback chain) instead of sleep-backoff retrying — the client's
+    // own retry loop is what recovers from it. No provider retry is recorded.
     let (status, body) = call(app.clone(), anthropic_request(false)).await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(body.contains("recovered"));
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(body.contains("error"), "{body}");
     let (status, body) = call(app, anthropic_request(true)).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("done"));
 
     tokio::task::yield_now().await;
     let snapshot = metrics.snapshot();
-    assert_eq!(snapshot.retry_provider_server, 1);
+    assert_eq!(snapshot.retry_provider_server, 0);
     assert_eq!(snapshot.streams_started, 1);
     assert_eq!(snapshot.streams_completed, 1);
     assert_eq!(snapshot.active_streams, 0);
@@ -1045,4 +1123,423 @@ async fn sync_reasoning_marker_and_false_success_text_emit_only_tool_use() {
     assert!(!body.contains("Requesting CronCreate"), "{body}");
     assert!(!body.contains("tạo thành công"), "{body}");
     assert_eq!(state.requests.lock().await.len(), 1);
+}
+
+#[tokio::test]
+async fn sync_generic_xml_bash_marker_maps_to_one_tool_use() {
+    let marker = concat!(
+        "<tool_calls><invoke name=\"Bash\">",
+        "<parameter name=\"command\">printf GENERIC_XML_BASH_OK</parameter>",
+        "<parameter name=\"description\">Verify generic XML Bash</parameter>",
+        "</invoke></tool_calls></think>"
+    );
+    let fixture = json!({
+        "id":"generic-xml-sync",
+        "model":"upstream-model",
+        "choices":[{
+            "message":{"content":marker,"reasoning_content":null,"tool_calls":null},
+            "finish_reason":"stop"
+        }],
+        "usage":{"prompt_tokens":1,"completion_tokens":1}
+    });
+    let (app, state) = harness(vec![Fixture::Json(fixture)]).await;
+    let mut request = anthropic_request(false);
+    request["tools"] = json!([{
+        "name":"Bash",
+        "description":"Run a command",
+        "input_schema":{
+            "type":"object",
+            "properties":{
+                "command":{"type":"string"},
+                "description":{"type":"string"}
+            },
+            "required":["command"]
+        }
+    }]);
+
+    let (status, body) = call(app, request).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let response: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(response["stop_reason"], "tool_use");
+    assert_eq!(response["content"].as_array().unwrap().len(), 1);
+    assert_eq!(response["content"][0]["type"], "tool_use");
+    assert_eq!(response["content"][0]["name"], "Bash");
+    assert_eq!(
+        response["content"][0]["input"]["command"],
+        "printf GENERIC_XML_BASH_OK"
+    );
+    assert_eq!(
+        response["content"][0]["input"]["description"],
+        "Verify generic XML Bash"
+    );
+    assert!(!body.contains("tool_calls"), "{body}");
+    assert!(!body.contains("<invoke"), "{body}");
+    assert_eq!(state.requests.lock().await.len(), 1);
+}
+
+#[tokio::test]
+async fn streaming_generic_xml_agent_marker_is_fragment_safe_and_exact_once() {
+    let marker = concat!(
+        "<tool_calls><invoke name=\"Agent\">",
+        "<parameter name=\"description\">Review parser recovery</parameter>",
+        "<parameter name=\"prompt\">Inspect the patch and return evidence.</parameter>",
+        "<parameter name=\"subagent_type\">general-purpose</parameter>",
+        "</invoke></tool_calls>"
+    );
+    let mut chunks = Vec::new();
+    for part in marker.as_bytes().chunks(13) {
+        let content = std::str::from_utf8(part).unwrap();
+        chunks.push(
+            format!(
+                "data: {}\n\n",
+                json!({
+                    "choices":[{
+                        "delta":{"content":content},
+                        "finish_reason":null
+                    }]
+                })
+            )
+            .into_bytes(),
+        );
+    }
+    chunks.push(
+        format!(
+            "data: {}\n\n",
+            json!({"choices":[{"delta":{},"finish_reason":"stop"}]})
+        )
+        .into_bytes(),
+    );
+    chunks.push(b"data: [DONE]\n\n".to_vec());
+    let (app, state) = harness(vec![Fixture::Sse(chunks)]).await;
+    let mut request = anthropic_request(true);
+    request["tools"] = json!([{
+        "name":"Agent",
+        "description":"Spawn an agent",
+        "input_schema":{
+            "type":"object",
+            "properties":{
+                "description":{"type":"string"},
+                "prompt":{"type":"string"},
+                "subagent_type":{"type":"string"}
+            },
+            "required":["description","prompt"]
+        }
+    }]);
+
+    let (status, body) = call(app, request).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body.matches("\"type\":\"tool_use\"").count(), 1, "{body}");
+    assert_eq!(body.matches("\"name\":\"Agent\"").count(), 1, "{body}");
+    assert_eq!(
+        body.matches("event: content_block_stop").count(),
+        1,
+        "{body}"
+    );
+    assert!(body.contains("Review parser recovery"), "{body}");
+    assert!(body.contains("general-purpose"), "{body}");
+    assert!(body.contains("\"stop_reason\":\"tool_use\""), "{body}");
+    assert!(!body.contains("tool_calls"), "{body}");
+    assert!(!body.contains("<invoke"), "{body}");
+    assert_eq!(state.requests.lock().await.len(), 1);
+}
+
+#[tokio::test]
+async fn streaming_malformed_generic_xml_retries_then_emits_one_tool_use() {
+    let malformed_marker = concat!(
+        "<tool_call><invoke name=\"Bash\">\n",
+        "Command: printf BROKEN\n",
+        "Description: malformed generic XML\n",
+        "</parameter>\n</invoke>\n</tool_call></think>"
+    );
+    let valid_marker = concat!(
+        "<tool_calls><invoke name=\"Bash\">",
+        "<parameter name=\"command\">printf GENERIC_XML_RETRY_OK</parameter>",
+        "<parameter name=\"description\">Recovered generic XML</parameter>",
+        "</invoke></tool_calls>"
+    );
+    let malformed = vec![
+        format!(
+            "data: {}\n\n",
+            json!({
+                "choices":[{
+                    "delta":{"content":malformed_marker},
+                    "finish_reason":"stop"
+                }]
+            })
+        )
+        .into_bytes(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+    let valid = vec![
+        format!(
+            "data: {}\n\n",
+            json!({
+                "choices":[{
+                    "delta":{"content":valid_marker},
+                    "finish_reason":"stop"
+                }]
+            })
+        )
+        .into_bytes(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+    let (app, state) = harness(vec![Fixture::Sse(malformed), Fixture::Sse(valid)]).await;
+    let mut request = anthropic_request(true);
+    request["tools"] = json!([{
+        "name":"Bash",
+        "description":"Run a command",
+        "input_schema":{
+            "type":"object",
+            "properties":{
+                "command":{"type":"string"},
+                "description":{"type":"string"}
+            },
+            "required":["command"]
+        }
+    }]);
+
+    let (status, body) = call(app, request).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body.matches("\"type\":\"tool_use\"").count(), 1, "{body}");
+    assert_eq!(body.matches("event: message_start").count(), 1, "{body}");
+    assert!(body.contains("GENERIC_XML_RETRY_OK"), "{body}");
+    assert!(!body.contains("BROKEN"), "{body}");
+    assert!(!body.contains("tool_call"), "{body}");
+    assert!(!body.contains("<invoke"), "{body}");
+    assert_eq!(state.requests.lock().await.len(), 2);
+}
+
+#[tokio::test]
+async fn sync_fenced_generic_xml_example_remains_inert_text() {
+    let example = concat!(
+        "```xml\n",
+        "<tool_calls><invoke name=\"Bash\">",
+        "<parameter name=\"command\">printf MUST_NOT_RUN</parameter>",
+        "</invoke></tool_calls>\n",
+        "```"
+    );
+    let fixture = json!({
+        "id":"generic-xml-code-example",
+        "model":"upstream-model",
+        "choices":[{
+            "message":{"content":example,"reasoning_content":null,"tool_calls":null},
+            "finish_reason":"stop"
+        }],
+        "usage":{"prompt_tokens":1,"completion_tokens":1}
+    });
+    let (app, state) = harness(vec![Fixture::Json(fixture)]).await;
+    let mut request = anthropic_request(false);
+    request["tools"] = json!([{
+        "name":"Bash",
+        "description":"Run a command",
+        "input_schema":{"type":"object","properties":{"command":{"type":"string"}}}
+    }]);
+
+    let (status, body) = call(app, request).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let response: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(response["stop_reason"], "end_turn");
+    assert_eq!(response["content"][0]["type"], "text");
+    assert_eq!(response["content"][0]["text"], example);
+    assert_eq!(state.requests.lock().await.len(), 1);
+}
+
+#[tokio::test]
+async fn claude_code_wrapped_bang_command_bypasses_upstream_and_emits_bash_tool() {
+    let (app, state, _metrics) = harness_core(Vec::new(), 256 * 1024, 4 * 1024 * 1024, |config| {
+        config.shell_policy = ShellPolicy::Unrestricted
+    })
+    .await;
+    let request = json!({
+        "model": "fixture-model",
+        "messages": [{
+            "role": "user",
+            "content": concat!(
+                "<system-reminder>Available agent types...</system-reminder>\n",
+                "<system-reminder>Available skills...</system-reminder>\n\n",
+                "!printf PTY_SHELL_OK"
+            )
+        }],
+        "tools": [{
+            "name": "Bash",
+            "description": "Run a shell command",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string"},
+                    "description": {"type": "string"}
+                },
+                "required": ["command"]
+            }
+        }],
+        "stream": true,
+        "max_tokens": 128
+    });
+
+    let (status, body) = call(app, request).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body.matches("\"type\":\"tool_use\"").count(), 1, "{body}");
+    assert_eq!(body.matches("\"name\":\"Bash\"").count(), 1, "{body}");
+    assert!(body.contains("printf PTY_SHELL_OK"), "{body}");
+    assert!(!body.contains("system-reminder"), "{body}");
+    assert!(body.contains("\"stop_reason\":\"tool_use\""), "{body}");
+    assert!(state.requests.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn sync_agent_placeholder_retries_then_emits_nonempty_prompt() {
+    let placeholder = concat!(
+        "<tool_calls><invoke name=\"Agent\">",
+        "<parameter name=\"description\">Re-review Task 1</parameter>",
+        "<parameter name=\"prompt\">...</parameter>",
+        "</invoke></tool_calls>"
+    );
+    let valid = concat!(
+        "<tool_calls><invoke name=\"Agent\">",
+        "<parameter name=\"description\">Re-review Task 1</parameter>",
+        "<parameter name=\"prompt\">Inspect the complete review package and report concrete evidence.</parameter>",
+        "<parameter name=\"run_in_background\">false</parameter>",
+        "</invoke></tool_calls>"
+    );
+    let first = json!({
+        "id":"sync-agent-placeholder",
+        "model":"upstream-model",
+        "choices":[{
+            "message":{"content":placeholder,"reasoning_content":null,"tool_calls":null},
+            "finish_reason":"stop"
+        }],
+        "usage":{"prompt_tokens":1,"completion_tokens":1}
+    });
+    let second = json!({
+        "id":"sync-agent-valid",
+        "model":"upstream-model",
+        "choices":[{
+            "message":{"content":valid,"reasoning_content":null,"tool_calls":null},
+            "finish_reason":"stop"
+        }],
+        "usage":{"prompt_tokens":1,"completion_tokens":1}
+    });
+    let (app, state) = harness(vec![Fixture::Json(first), Fixture::Json(second)]).await;
+    let mut request = anthropic_request(false);
+    request["tools"] = json!([{
+        "name":"Agent",
+        "description":"Spawn an agent",
+        "input_schema":{
+            "type":"object",
+            "properties":{
+                "description":{"type":"string"},
+                "prompt":{"type":"string"},
+                "run_in_background":{"type":"boolean"}
+            },
+            "required":["description","prompt"]
+        }
+    }]);
+
+    let (status, body) = call(app, request).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let response: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(response["stop_reason"], "tool_use");
+    assert_eq!(response["content"].as_array().unwrap().len(), 1);
+    assert_eq!(response["content"][0]["name"], "Agent");
+    assert_eq!(
+        response["content"][0]["input"]["prompt"],
+        "Inspect the complete review package and report concrete evidence."
+    );
+    assert_eq!(response["content"][0]["input"]["run_in_background"], false);
+    assert!(!body.contains("\"prompt\":\"...\""), "{body}");
+    assert_eq!(state.requests.lock().await.len(), 2);
+}
+
+#[tokio::test]
+async fn large_upstream_reasoning_chunk_is_split_into_bounded_anthropic_deltas() {
+    let reasoning = "lập luận Unicode tiếng Việt — ".repeat(700);
+    let upstream = format!(
+        "data: {}\n\ndata: [DONE]\n\n",
+        serde_json::json!({
+            "choices": [{
+                "delta": {"reasoning_content": reasoning},
+                "finish_reason": null
+            }]
+        })
+    );
+    let (app, _state) = harness(vec![Fixture::Sse(vec![upstream.into_bytes()])]).await;
+    let (status, body) = call(app, anthropic_request(true)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let mut fragments = Vec::new();
+    let mut wire_lengths = Vec::new();
+    for line in body.lines().filter(|line| line.starts_with("data: ")) {
+        let Ok(value) = serde_json::from_str::<Value>(&line[6..]) else {
+            continue;
+        };
+        if value["type"] == "content_block_delta" && value["delta"]["type"] == "thinking_delta" {
+            fragments.push(
+                value["delta"]["thinking"]
+                    .as_str()
+                    .expect("thinking fragment")
+                    .to_string(),
+            );
+            wire_lengths.push(line.len());
+        }
+    }
+
+    assert!(
+        fragments.len() > 1,
+        "a single large upstream chunk must not become one TUI-blocking delta; lengths={wire_lengths:?}"
+    );
+    assert!(
+        wire_lengths.iter().all(|length| *length <= 2_048),
+        "outgoing thinking delta exceeded render bound: {wire_lengths:?}"
+    );
+    assert_eq!(fragments.concat(), reasoning);
+}
+
+#[tokio::test]
+async fn large_upstream_text_chunk_is_split_without_corrupting_utf8() {
+    let text = "Báo cáo chuyên gia hoàn tất — dữ liệu được giữ nguyên.\n".repeat(180);
+    let upstream = format!(
+        "data: {}\n\ndata: [DONE]\n\n",
+        serde_json::json!({
+            "choices": [{
+                "delta": {"content": text},
+                "finish_reason": null
+            }]
+        })
+    );
+    let (app, _state) = harness(vec![Fixture::Sse(vec![upstream.into_bytes()])]).await;
+    let (status, body) = call(app, anthropic_request(true)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let mut fragments = Vec::new();
+    let mut wire_lengths = Vec::new();
+    for line in body.lines().filter(|line| line.starts_with("data: ")) {
+        let Ok(value) = serde_json::from_str::<Value>(&line[6..]) else {
+            continue;
+        };
+        if value["type"] == "content_block_delta" && value["delta"]["type"] == "text_delta" {
+            fragments.push(
+                value["delta"]["text"]
+                    .as_str()
+                    .expect("text fragment")
+                    .to_string(),
+            );
+            wire_lengths.push(line.len());
+        }
+    }
+
+    assert!(
+        fragments.len() > 1,
+        "a single large upstream chunk must not become one TUI-blocking delta; lengths={wire_lengths:?}"
+    );
+    assert!(
+        wire_lengths.iter().all(|length| *length <= 2_048),
+        "outgoing text delta exceeded render bound: {wire_lengths:?}"
+    );
+    assert_eq!(fragments.concat(), text);
 }

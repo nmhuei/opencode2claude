@@ -20,6 +20,10 @@ impl LeasedResponse {
         self.response.status()
     }
 
+    pub fn proxy_index(&self) -> Option<usize> {
+        self.lease.as_ref().map(EgressLease::index)
+    }
+
     pub async fn text(self) -> Result<String, reqwest::Error> {
         let Self { response, lease } = self;
         let _lease = lease;
@@ -88,6 +92,7 @@ mod body_lifetime_tests {
             .await
             .expect("response");
         let leased = LeasedResponse::new(response, Some(lease));
+        assert_eq!(leased.proxy_index(), Some(0));
         assert_eq!(pool.proxies[0].active_request_count(), 1);
         assert_eq!(leased.text().await.expect("text"), "hello");
         assert_eq!(pool.proxies[0].active_request_count(), 0);
