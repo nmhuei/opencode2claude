@@ -295,7 +295,7 @@ async fn sync_native_and_dsml_tool_calls_map_to_tool_use() {
 }
 
 #[tokio::test]
-async fn sync_native_tool_call_discards_unfinished_visible_sentence_tail() {
+async fn sync_native_tool_call_preserves_visible_text_with_tool_call() {
     let fixture = json!({
         "id":"chatcmpl-sync-clipped-preamble",
         "model":"upstream-model",
@@ -331,7 +331,10 @@ async fn sync_native_tool_call_discards_unfinished_visible_sentence_tail() {
     assert_eq!(status, StatusCode::OK);
     let response: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(response["content"][0]["type"], "text");
-    assert_eq!(response["content"][0]["text"], "Proxy up (200), env đủ. ");
+    assert_eq!(
+        response["content"][0]["text"],
+        "Proxy up (200), env đủ. Copy tinyctfer sang tools/ và đọc code container conf"
+    );
     assert_eq!(response["content"][1]["type"], "tool_use");
     assert_eq!(response["content"][1]["name"], "Bash");
     assert_eq!(
@@ -339,7 +342,7 @@ async fn sync_native_tool_call_discards_unfinished_visible_sentence_tail() {
         "printf PRE_TOOL_SYNC_OK"
     );
     assert_eq!(response["stop_reason"], "tool_use");
-    assert!(!body.contains("Copy tinyctfer"), "{body}");
+    assert!(body.contains("Copy tinyctfer"), "{body}");
 }
 
 #[tokio::test]

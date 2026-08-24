@@ -7,7 +7,7 @@ use crate::opencode::forward::common::{
     find_literal_marker_in_context, invalid_semantic_tool_argument,
     looks_like_unverified_tool_success, matching_tool_name, normalize_dsml_arguments,
     parse_compat_tool_requests_at_eof, parse_compat_tool_requests_with_consumed,
-    split_completed_pre_tool_text, tool_call_fingerprint, CompatMarkdownState, CompatToolCall,
+    tool_call_fingerprint, CompatMarkdownState, CompatToolCall,
 };
 use crate::opencode::mapper::is_bridge_search_tool;
 use crate::opencode::sanitize::{parse_dsml_tool_calls_detailed, strip_system_tags_with_context};
@@ -255,32 +255,9 @@ pub(super) async fn process_openai_sse_line(
                 .await;
         }
 
-        let native_tool_transition = choice
-            .delta
-            .tool_calls
-            .as_ref()
-            .is_some_and(|calls| !calls.is_empty())
-            || (choice.finish_reason.as_deref() == Some("tool_calls")
-                && !ctx.pending_tool_calls.is_empty());
-
         if let Some(content) = &choice.delta.content {
-            if native_tool_transition {
-                let (completed, unfinished) = split_completed_pre_tool_text(content);
-                if !completed.is_empty() {
-                    ctx.process_content_delta(completed, tracker, tx, builder, payload)
-                        .await;
-                }
-                if !unfinished.trim().is_empty() {
-                    warn!(
-                        dropped_bytes = unfinished.len(),
-                        preview = ?unfinished.chars().take(160).collect::<String>(),
-                        "Dropping unfinished visible text tail before native tool call"
-                    );
-                }
-            } else {
-                ctx.process_content_delta(content, tracker, tx, builder, payload)
-                    .await;
-            }
+            ctx.process_content_delta(content, tracker, tx, builder, payload)
+                .await;
         }
 
         if let Some(tool_calls) = &choice.delta.tool_calls {
