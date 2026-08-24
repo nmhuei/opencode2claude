@@ -10,8 +10,8 @@ use crate::opencode::forward::common::{
     tool_call_fingerprint, CompatMarkdownState, CompatToolCall,
 };
 use crate::opencode::forward::fallback_intent::{
-    classify_encoded_tool_intent, literal_meta_output_requested, FallbackDecision,
-    FallbackIntentContext,
+    classify_encoded_tool_intent, literal_meta_output_requested, safe_tool_intent_preamble,
+    FallbackDecision, FallbackIntentContext,
 };
 use crate::opencode::mapper::is_bridge_search_tool;
 use crate::opencode::sanitize::{parse_dsml_tool_calls_detailed, strip_system_tags_with_context};
@@ -976,6 +976,35 @@ impl StreamContext {
             if let Some((marker_pos, is_dsml)) = next_marker {
                 if marker_pos > 0 {
                     let safe_prefix = self.text_stream_buffer[..marker_pos].to_string();
+                    let no_visible_output = self.accumulated_text.is_empty()
+                        && self.accumulated_thinking.is_empty()
+                        && !self.has_emitted_tool_use;
+                    if no_visible_output
+                        && safe_tool_intent_preamble(&safe_prefix)
+                        && !literal_meta_output_requested(payload)
+                    {
+                        let raw_candidate = self.text_stream_buffer.clone();
+                        match self.classify_encoded_candidate(&raw_candidate, payload) {
+                            FallbackDecision::RetryNative | FallbackDecision::Reject => {
+                                self.text_stream_buffer.clear();
+                                return;
+                            }
+                            FallbackDecision::ParseEncoded => {
+                                // The preamble only describes the intended tool
+                                // invocation; suppress it before strict fallback.
+                                self.text_stream_buffer.drain(..marker_pos);
+                                continue;
+                            }
+                            FallbackDecision::PassThrough => {
+                                // A safe execution preamble followed by an
+                                // incomplete marker may be split across SSE
+                                // chunks. Keep both buffered until the candidate
+                                // becomes complete or EOF decides it is malformed.
+                                return;
+                            }
+                        }
+                    }
+
                     self.text_stream_buffer.drain(..marker_pos);
                     if looks_like_unverified_tool_success(&safe_prefix) {
                         warn!("Suppressing unverified success claim before tool_use");

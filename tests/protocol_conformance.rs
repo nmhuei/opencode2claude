@@ -1639,6 +1639,62 @@ async fn streaming_encoded_candidate_retries_native_before_tool_use() {
 }
 
 #[tokio::test]
+async fn streaming_prefixed_encoded_candidate_retries_without_leaking_marker_text() {
+    let marker = r#"[Requesting Read with arguments: {"file_path":"./compat_read.txt"}]"#;
+    let first_text = format!(
+        "I'll emit the Read request in bridge compatibility-marker syntax so the proxy recovers it as a tool call.\n\n{marker}"
+    );
+    let first = vec![
+        format!(
+            "data: {}\n\n",
+            json!({"choices":[{"delta":{"content":first_text},"finish_reason":"stop"}]})
+        )
+        .into_bytes(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+    let native = vec![
+        format!(
+            "data: {}\n\n",
+            json!({
+                "choices":[{
+                    "delta":{"tool_calls":[{
+                        "index":0,
+                        "id":"call_native_read_recovery",
+                        "function":{
+                            "name":"Read",
+                            "arguments":"{\"file_path\":\"./compat_read.txt\"}"
+                        }
+                    }]},
+                    "finish_reason":"tool_calls"
+                }]
+            })
+        )
+        .into_bytes(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+    let (app, state) = harness(vec![Fixture::Sse(first), Fixture::Sse(native)]).await;
+    let mut request = anthropic_request(true);
+    request["tools"] = json!([{
+        "name":"Read",
+        "description":"Read a file",
+        "input_schema":{
+            "type":"object",
+            "properties":{"file_path":{"type":"string"}},
+            "required":["file_path"]
+        }
+    }]);
+
+    let (status, body) = call(app, request).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(state.requests.lock().await.len(), 2, "{body}");
+    assert_eq!(body.matches("\"type\":\"tool_use\"").count(), 1, "{body}");
+    assert!(body.contains("call_native_read_recovery"), "{body}");
+    assert!(!body.contains("Requesting Read"), "{body}");
+    assert!(!body.contains("I'll emit the Read request"), "{body}");
+}
+
+#[tokio::test]
 async fn streaming_native_call_wins_over_duplicate_encoded_marker_after_recovery() {
     let first_marker =
         r#"[Requesting Tool execution: 'Bash' with arguments: {"command":"printf NATIVE_WINS"}]"#;

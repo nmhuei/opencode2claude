@@ -55,7 +55,7 @@ pub(super) fn classify_encoded_tool_intent(
         .char_indices()
         .find_map(|(idx, ch)| (!ch.is_whitespace()).then_some(idx));
     if first_non_whitespace != Some(candidate_start)
-        && !is_safe_tool_intent_preamble(&text[..candidate_start])
+        && !safe_tool_intent_preamble(&text[..candidate_start])
     {
         return FallbackDecision::PassThrough;
     }
@@ -88,7 +88,7 @@ fn encoded_candidate_start(text: &str) -> Option<usize> {
     .min()
 }
 
-fn is_safe_tool_intent_preamble(prefix: &str) -> bool {
+pub(super) fn safe_tool_intent_preamble(prefix: &str) -> bool {
     let normalized = prefix
         .split_whitespace()
         .collect::<Vec<_>>()
