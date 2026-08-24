@@ -4,6 +4,7 @@ pub mod identity;
 pub mod maintenance;
 mod pool;
 pub mod routing;
+pub mod subsystem;
 pub mod types;
 
 pub use identity::*;
