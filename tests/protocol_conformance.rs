@@ -346,6 +346,56 @@ async fn sync_native_tool_call_preserves_visible_text_with_tool_call() {
 }
 
 #[tokio::test]
+async fn sync_native_call_ignores_unavailable_encoded_marker() {
+    let fixture = json!({
+        "id":"chatcmpl-sync-native-wins",
+        "model":"upstream-model",
+        "choices":[{
+            "message":{
+                "content":"[Requesting MissingTool with arguments: {\"value\":\"must-not-run\"}]",
+                "reasoning_content":null,
+                "tool_calls":[{
+                    "id":"call-sync-native-wins",
+                    "function":{
+                        "name":"Bash",
+                        "arguments":"{\"command\":\"printf SYNC_NATIVE_WINS\"}"
+                    }
+                }]
+            },
+            "finish_reason":"tool_calls"
+        }],
+        "usage":{"prompt_tokens":1,"completion_tokens":1}
+    });
+    let (app, state) = harness(vec![Fixture::Json(fixture)]).await;
+    let mut request = anthropic_request(false);
+    request["tools"] = json!([{
+        "name":"Bash",
+        "description":"Run a harmless command",
+        "input_schema":{
+            "type":"object",
+            "properties":{"command":{"type":"string"}},
+            "required":["command"]
+        }
+    }]);
+
+    let (status, body) = call(app, request).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(state.requests.lock().await.len(), 1);
+    let response: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(response["content"].as_array().unwrap().len(), 1, "{body}");
+    assert_eq!(response["content"][0]["type"], "tool_use");
+    assert_eq!(response["content"][0]["id"], "call-sync-native-wins");
+    assert_eq!(response["content"][0]["name"], "Bash");
+    assert_eq!(
+        response["content"][0]["input"]["command"],
+        "printf SYNC_NATIVE_WINS"
+    );
+    assert!(!body.contains("MissingTool"), "{body}");
+    assert!(!body.contains("must-not-run"), "{body}");
+}
+
+#[tokio::test]
 async fn fragmented_utf8_stream_preserves_reasoning_then_text_order() {
     let wire = concat!(
         "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Suy nghĩ \"},\"finish_reason\":null}]}\n\n",
@@ -1309,6 +1359,67 @@ async fn streaming_encoded_candidate_retries_native_before_tool_use() {
     assert!(!body.contains("ENCODED_SHOULD_NOT_EXECUTE"), "{body}");
     assert_eq!(body.matches("event: message_start").count(), 1, "{body}");
     assert_eq!(body.matches("event: message_stop").count(), 1, "{body}");
+}
+
+#[tokio::test]
+async fn streaming_native_call_wins_over_duplicate_encoded_marker_after_recovery() {
+    let first_marker =
+        r#"[Requesting Tool execution: 'Bash' with arguments: {"command":"printf NATIVE_WINS"}]"#;
+    let first = vec![
+        format!(
+            "data: {}\n\n",
+            json!({"choices":[{"delta":{"content":first_marker},"finish_reason":"stop"}]})
+        )
+        .into_bytes(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+    let duplicate_and_native = vec![
+        format!(
+            "data: {}\n\n",
+            json!({
+                "choices":[{
+                    "delta":{
+                        "content":first_marker,
+                        "tool_calls":[{
+                            "index":0,
+                            "id":"call_native_wins",
+                            "function":{
+                                "name":"Bash",
+                                "arguments":"{\"command\":\"printf NATIVE_WINS\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason":"tool_calls"
+                }]
+            })
+        )
+        .into_bytes(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+    let (app, state) = harness(vec![
+        Fixture::Sse(first),
+        Fixture::Sse(duplicate_and_native),
+    ])
+    .await;
+    let mut request = anthropic_request(true);
+    request["tools"] = json!([{
+        "name":"Bash",
+        "description":"Run a command",
+        "input_schema":{
+            "type":"object",
+            "properties":{"command":{"type":"string"}},
+            "required":["command"]
+        }
+    }]);
+
+    let (status, body) = call(app, request).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(state.requests.lock().await.len(), 2);
+    assert_eq!(body.matches("\"type\":\"tool_use\"").count(), 1, "{body}");
+    assert!(body.contains("\"id\":\"call_native_wins\""), "{body}");
+    assert!(!body.contains("toolu_compat_"), "{body}");
+    assert_eq!(body.matches("NATIVE_WINS").count(), 1, "{body}");
 }
 
 #[tokio::test]

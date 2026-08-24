@@ -216,6 +216,12 @@ pub async fn forward_to_llm_sync(
                 ));
             }
         };
+        // Native tool_calls have protocol precedence. Encoded channels are still
+        // sanitized so marker text cannot leak, but they must never influence
+        // validation or execution when native calls are present in this response.
+        let native_tool_calls = choice.message.tool_calls.as_deref().unwrap_or(&[]);
+        let native_precedence = !native_tool_calls.is_empty();
+
         // Extract text-encoded tool calls from both reasoning and visible text.
         // Free models can place the intent in either channel, and sometimes echo
         // the same marker in both. Raw marker text is never persisted or returned.
@@ -249,6 +255,22 @@ pub async fn forward_to_llm_sync(
                     }
                 }
             }
+        }
+
+        if native_precedence {
+            // Native protocol wins the turn. Complete encoded markers have
+            // already been removed from the cleaned text above; discard their
+            // parsed calls so they cannot affect availability/batch validation
+            // or create a duplicate side effect. If encoded syntax itself was
+            // malformed, fail closed on those text channels rather than retrying
+            // or leaking the marker beside an otherwise valid native call.
+            dsml_tool_calls.clear();
+            compat_tool_calls.clear();
+            if parse_error.is_some() {
+                cleaned_reasoning_content = None;
+                cleaned_message_content = None;
+            }
+            parse_error = None;
         }
 
         if let Some(error) = parse_error {
@@ -291,7 +313,6 @@ pub async fn forward_to_llm_sync(
         let mut search_tc_input = serde_json::Value::Null;
         let mut search_args_raw = String::new();
 
-        let native_tool_calls = choice.message.tool_calls.as_deref().unwrap_or(&[]);
         let unavailable_tool = native_tool_calls
             .iter()
             .map(|call| call.function.name.as_str())

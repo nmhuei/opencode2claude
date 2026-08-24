@@ -352,6 +352,10 @@ pub(super) struct StreamContext {
     /// Whether this upstream attempt is allowed to execute a strict encoded
     /// fallback after a previous native-recovery retry failed.
     encoded_fallback_permitted: bool,
+    /// Recovery attempts retain encoded candidates until native tool-call
+    /// fragments have had the full response to arrive. Native calls are
+    /// finalized first at EOF; only then may the encoded parser run.
+    defer_encoded_fallback_until_native_finalized: bool,
     /// Determined from `finish_reason` in the last stream chunk.
     pub(super) final_stop_reason: String,
 }
@@ -361,8 +365,11 @@ impl StreamContext {
     pub(super) fn new(is_compact: bool) -> Self {
         // Parser-focused unit tests use this constructor to exercise the strict
         // encoded compatibility parser directly. Production streaming chooses
-        // permission explicitly via `new_with_encoded_fallback`.
-        Self::new_with_encoded_fallback(is_compact, true)
+        // permission explicitly via `new_with_encoded_fallback` and defers
+        // encoded execution until native fragments have had the full attempt.
+        let mut context = Self::new_with_encoded_fallback(is_compact, true);
+        context.defer_encoded_fallback_until_native_finalized = false;
+        context
     }
 
     pub(super) fn new_with_encoded_fallback(
@@ -398,6 +405,7 @@ impl StreamContext {
             native_recovery_retry_requested: false,
             encoded_fallback_rejected: false,
             encoded_fallback_permitted,
+            defer_encoded_fallback_until_native_finalized: encoded_fallback_permitted,
             final_stop_reason: "end_turn".to_string(),
         }
     }
@@ -548,6 +556,9 @@ impl StreamContext {
                 if let Some(parsed) =
                     parse_compat_tool_requests_with_consumed(&self.reasoning_stream_buffer)
                 {
+                    if self.defer_encoded_fallback_until_native_finalized {
+                        return;
+                    }
                     let raw_candidate = self.reasoning_stream_buffer.clone();
                     match self.classify_encoded_candidate(&raw_candidate, payload) {
                         FallbackDecision::RetryNative | FallbackDecision::Reject => {
@@ -904,6 +915,9 @@ impl StreamContext {
                 let Some(end_pos) = self.dsml_stream_buffer.find(DSML_CLOSE_TAG) else {
                     return;
                 };
+                if self.defer_encoded_fallback_until_native_finalized {
+                    return;
+                }
                 let end_idx = end_pos + DSML_CLOSE_TAG.len();
                 let dsml_block = self.dsml_stream_buffer[..end_idx].to_string();
                 let remaining = self.dsml_stream_buffer[end_idx..].to_string();
@@ -961,6 +975,9 @@ impl StreamContext {
                 if let Some(parsed) =
                     parse_compat_tool_requests_with_consumed(&self.text_stream_buffer)
                 {
+                    if self.defer_encoded_fallback_until_native_finalized {
+                        return;
+                    }
                     let raw_candidate = self.text_stream_buffer.clone();
                     match self.classify_encoded_candidate(&raw_candidate, payload) {
                         FallbackDecision::RetryNative | FallbackDecision::Reject => {
@@ -1261,6 +1278,10 @@ impl StreamContext {
         if self.native_recovery_retry_requested || self.encoded_fallback_rejected {
             return;
         }
+
+        // No valid native call won this attempt. Release the strict encoded
+        // fallback only now, after native fragments have been finalized.
+        self.defer_encoded_fallback_until_native_finalized = false;
 
         // First give both rolling parsers one final chance to consume complete
         // compatibility markers already present in retained buffers.
