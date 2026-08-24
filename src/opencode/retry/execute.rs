@@ -9,7 +9,7 @@ use super::response::LeasedResponse;
 use crate::error::BridgeError;
 use crate::observability::RetryMetricClass;
 use crate::opencode::types::{OpenAiInboundRequest, OpenAiRequest};
-use crate::proxy_pool::EgressLease;
+use crate::proxy_pool::{EgressLease, EgressRole, RouteKind, RouteMetadata};
 use crate::state::AppState;
 use reqwest::{Client, RequestBuilder, StatusCode};
 use serde::Serialize;
@@ -23,6 +23,7 @@ struct SelectedRoute {
     proxy_index: Option<usize>,
     lease: Option<EgressLease>,
     upstream_real_ip: Option<String>,
+    metadata: RouteMetadata,
 }
 
 trait RetryableOpenAiRequest: Serialize + Clone {
@@ -404,7 +405,11 @@ async fn execute_retryable_request<T: RetryableOpenAiRequest>(
                     ));
                 }
 
-                return Ok(LeasedResponse::new(response, route.lease.take()));
+                return Ok(LeasedResponse::new(
+                    response,
+                    route.lease.take(),
+                    route.metadata.clone(),
+                ));
             }
             Err(error) => {
                 let failure_class = classify_reqwest_error(&error);
@@ -509,13 +514,50 @@ async fn select_route(
     excluded_proxy: Option<usize>,
 ) -> Result<SelectedRoute, BridgeError> {
     if state.config.egress.mode == crate::config::EgressMode::Direct {
-        return Ok(SelectedRoute {
-            client: state.http_client.clone(),
-            proxy_url: None,
-            proxy_index: None,
-            lease: None,
-            upstream_real_ip: None,
-        });
+        return Ok(direct_route(state, RouteKind::Direct));
+    }
+
+    if state.config.egress.mode == crate::config::EgressMode::Hybrid {
+        if !state.proxy_subsystem.read().await.is_ready() {
+            return Ok(direct_route(state, RouteKind::DirectHybridFallback));
+        }
+
+        let selection = {
+            let mut pool = state.proxy_pool.write().await;
+            let selected = match excluded_proxy {
+                Some(index) => pool.get_client_excluding(routing_key, index),
+                None => pool.get_client(routing_key),
+            };
+            selected.and_then(|(client, proxy_url, proxy_index)| {
+                pool.begin_lease(proxy_index).map(|lease| {
+                    let node = &pool.proxies[proxy_index];
+                    let upstream_real_ip = verified_exit_real_ip(node.exit_identity.as_ref());
+                    let metadata = proxy_route_metadata(node.role, node.id.clone());
+                    (
+                        client,
+                        proxy_url,
+                        proxy_index,
+                        lease,
+                        upstream_real_ip,
+                        metadata,
+                    )
+                })
+            })
+        };
+
+        if let Some((client, proxy_url, proxy_index, lease, upstream_real_ip, metadata)) = selection
+        {
+            return Ok(SelectedRoute {
+                client,
+                proxy_url: Some(proxy_url),
+                proxy_index: Some(proxy_index),
+                lease: Some(lease),
+                upstream_real_ip,
+                metadata,
+            });
+        }
+
+        return Ok(direct_route(state, RouteKind::DirectHybridFallback));
     }
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
@@ -535,9 +577,17 @@ async fn select_route(
             }
             .and_then(|(client, proxy_url, proxy_index)| {
                 pool.begin_lease(proxy_index).map(|lease| {
-                    let upstream_real_ip =
-                        verified_exit_real_ip(pool.proxies[proxy_index].exit_identity.as_ref());
-                    (client, proxy_url, proxy_index, lease, upstream_real_ip)
+                    let node = &pool.proxies[proxy_index];
+                    let upstream_real_ip = verified_exit_real_ip(node.exit_identity.as_ref());
+                    let metadata = proxy_route_metadata(node.role, node.id.clone());
+                    (
+                        client,
+                        proxy_url,
+                        proxy_index,
+                        lease,
+                        upstream_real_ip,
+                        metadata,
+                    )
                 })
             });
             let recovery_in_progress = pool.recovery_in_progress();
@@ -550,13 +600,15 @@ async fn select_route(
             )
         };
 
-        if let Some((client, proxy_url, proxy_index, lease, upstream_real_ip)) = selection {
+        if let Some((client, proxy_url, proxy_index, lease, upstream_real_ip, metadata)) = selection
+        {
             return Ok(SelectedRoute {
                 client,
                 proxy_url: Some(proxy_url),
                 proxy_index: Some(proxy_index),
                 lease: Some(lease),
                 upstream_real_ip,
+                metadata,
             });
         }
 
@@ -578,6 +630,30 @@ async fn select_route(
         return Err(BridgeError::UpstreamError(
             "Proxy pool is configured but no eligible egress route is available".to_string(),
         ));
+    }
+}
+
+fn direct_route(state: &AppState, kind: RouteKind) -> SelectedRoute {
+    SelectedRoute {
+        client: state.http_client.clone(),
+        proxy_url: None,
+        proxy_index: None,
+        lease: None,
+        upstream_real_ip: None,
+        metadata: RouteMetadata {
+            kind,
+            proxy_node: None,
+        },
+    }
+}
+
+fn proxy_route_metadata(role: EgressRole, node_id: String) -> RouteMetadata {
+    RouteMetadata {
+        kind: match role {
+            EgressRole::Primary => RouteKind::Proxy,
+            EgressRole::WarmStandby => RouteKind::Standby,
+        },
+        proxy_node: Some(node_id),
     }
 }
 
@@ -689,10 +765,92 @@ mod tests {
     use super::*;
     use crate::config::BridgeConfig;
     use crate::infrastructure::warp::{WarpController, WarpError, WarpStatus};
-    use crate::proxy_pool::{CircuitState, ExitIdentity, HealthState};
+    use crate::proxy_pool::{
+        CircuitState, ExitIdentity, HealthState, ProxySubsystemPhase, RouteKind,
+    };
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    #[derive(Debug, Default)]
+    struct NoopContainerRuntime;
+
+    #[async_trait]
+    impl crate::docker::ContainerRuntime for NoopContainerRuntime {
+        async fn daemon_version(&self) -> crate::docker::DockerResult<String> {
+            Ok("test".to_string())
+        }
+        async fn inspect(
+            &self,
+            _spec: &crate::docker::ProxySpec,
+        ) -> crate::docker::DockerResult<crate::docker::ContainerState> {
+            Err(crate::docker::DockerError::CommandFailed(
+                "test runtime unavailable".to_string(),
+            ))
+        }
+        async fn create_missing(
+            &self,
+            _spec: &crate::docker::ProxySpec,
+        ) -> crate::docker::DockerResult<()> {
+            Ok(())
+        }
+        async fn recreate_managed(
+            &self,
+            _spec: &crate::docker::ProxySpec,
+        ) -> crate::docker::DockerResult<()> {
+            Ok(())
+        }
+        async fn remove_managed(
+            &self,
+            _spec: &crate::docker::ProxySpec,
+        ) -> crate::docker::DockerResult<()> {
+            Ok(())
+        }
+        async fn restart_managed(
+            &self,
+            _spec: &crate::docker::ProxySpec,
+        ) -> crate::docker::DockerResult<()> {
+            Ok(())
+        }
+        async fn stop_managed(
+            &self,
+            _spec: &crate::docker::ProxySpec,
+        ) -> crate::docker::DockerResult<()> {
+            Ok(())
+        }
+        async fn start_managed(
+            &self,
+            _spec: &crate::docker::ProxySpec,
+        ) -> crate::docker::DockerResult<()> {
+            Ok(())
+        }
+        async fn logs(
+            &self,
+            _spec: &crate::docker::ProxySpec,
+            _tail: usize,
+        ) -> crate::docker::DockerResult<String> {
+            Ok(String::new())
+        }
+        async fn list(
+            &self,
+            _specs: &[crate::docker::ProxySpec],
+        ) -> crate::docker::DockerResult<Vec<crate::docker::ContainerSummary>> {
+            Ok(Vec::new())
+        }
+    }
+
+    async fn hybrid_test_state() -> AppState {
+        let mut config = BridgeConfig::default();
+        config.egress.mode = crate::config::EgressMode::Hybrid;
+        config.egress.require_verified_exit_ip = false;
+        config.primary_proxies = Some(vec!["socks5://127.0.0.1:40001".to_string()]);
+        config.warm_standby_proxies = Some(vec!["socks5://127.0.0.1:40004".to_string()]);
+        config.egress.active_proxy_count = 1;
+        let state = AppState::new_with_container_runtime(config, Arc::new(NoopContainerRuntime));
+        state.workers.cancel();
+        tokio::task::yield_now().await;
+        state
+    }
 
     #[derive(Debug, Default)]
     struct CountingWarpController {
@@ -820,6 +978,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hybrid_starting_selects_direct_immediately() {
+        let state = hybrid_test_state().await;
+        state
+            .proxy_subsystem
+            .write()
+            .await
+            .transition(ProxySubsystemPhase::Starting, None);
+
+        let route = select_route(&state, "hybrid-starting", None)
+            .await
+            .expect("hybrid direct fallback");
+        assert_eq!(route.metadata.kind, RouteKind::DirectHybridFallback);
+        assert!(route.metadata.proxy_node.is_none());
+        assert!(route.proxy_index.is_none());
+        assert!(route.proxy_url.is_none());
+        assert!(route.lease.is_none());
+    }
+
+    #[tokio::test]
+    async fn hybrid_degraded_selects_direct_immediately() {
+        let state = hybrid_test_state().await;
+        state
+            .proxy_subsystem
+            .write()
+            .await
+            .mark_degraded("test failure", Some(123));
+
+        let route = select_route(&state, "hybrid-degraded", None)
+            .await
+            .expect("hybrid direct fallback");
+        assert_eq!(route.metadata.kind, RouteKind::DirectHybridFallback);
+        assert!(route.proxy_index.is_none());
+    }
+
+    #[tokio::test]
+    async fn hybrid_ready_selects_verified_primary() {
+        let state = hybrid_test_state().await;
+        {
+            let mut pool = state.proxy_pool.write().await;
+            pool.proxies[0].health = HealthState::Healthy;
+            pool.proxies[0].circuit = CircuitState::Closed;
+        }
+        state.proxy_subsystem.write().await.mark_ready();
+
+        let route = select_route(&state, "hybrid-ready", None)
+            .await
+            .expect("hybrid proxy route");
+        assert_eq!(route.metadata.kind, RouteKind::Proxy);
+        assert_eq!(
+            route.metadata.proxy_node.as_deref(),
+            Some("opencode-warp-1")
+        );
+        assert_eq!(route.proxy_index, Some(0));
+        assert!(route.lease.is_some());
+    }
+
+    #[tokio::test]
+    async fn hybrid_ready_labels_verified_standby_route() {
+        let state = hybrid_test_state().await;
+        {
+            let mut pool = state.proxy_pool.write().await;
+            pool.proxies[0].health = HealthState::Unhealthy;
+            pool.proxies[0].circuit = CircuitState::Open {
+                until: std::time::Instant::now() + Duration::from_secs(60),
+            };
+            pool.proxies[1].health = HealthState::Healthy;
+            pool.proxies[1].circuit = CircuitState::Closed;
+            pool.proxies[1].exit_identity = Some(ExitIdentity {
+                public_ip: "203.0.113.44".to_string(),
+                provider: Some("test".to_string()),
+                colo: Some("TST".to_string()),
+                verified_at_unix_secs: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            });
+        }
+        state.proxy_subsystem.write().await.mark_ready();
+
+        let route = select_route(&state, "hybrid-standby", None)
+            .await
+            .expect("hybrid standby route");
+        assert_eq!(route.metadata.kind, RouteKind::Standby);
+        assert_eq!(
+            route.metadata.proxy_node.as_deref(),
+            Some("opencode-warp-4")
+        );
+        assert_eq!(route.proxy_index, Some(1));
+    }
+
+    #[tokio::test]
     async fn direct_rate_limit_never_reconnects_host_warp() {
         let mut config = BridgeConfig::default();
         config.egress.mode = crate::config::EgressMode::Direct;
@@ -835,6 +1084,10 @@ mod tests {
             proxy_index: None,
             lease: None,
             upstream_real_ip: None,
+            metadata: RouteMetadata {
+                kind: RouteKind::Direct,
+                proxy_node: None,
+            },
         };
 
         apply_rate_limit_penalty(&state, &route, 1, Some(Duration::from_secs(60))).await;
@@ -878,6 +1131,10 @@ mod tests {
             proxy_index: Some(0),
             lease: None,
             upstream_real_ip: Some("203.0.113.10".to_string()),
+            metadata: RouteMetadata {
+                kind: RouteKind::Proxy,
+                proxy_node: Some("opencode-warp-1".to_string()),
+            },
         };
 
         let request = prepare_upstream_request(
@@ -1015,6 +1272,10 @@ mod tests {
                 proxy_index: Some(0),
                 lease: Some(lease),
                 upstream_real_ip: None,
+                metadata: RouteMetadata {
+                    kind: RouteKind::Proxy,
+                    proxy_node: Some("opencode-warp-1".to_string()),
+                },
             }
         };
 

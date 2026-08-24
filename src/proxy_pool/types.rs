@@ -6,7 +6,7 @@
 //! one enum with unrelated dimensions.
 
 use reqwest::Client;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -23,6 +23,21 @@ pub enum EgressRole {
 }
 
 pub type ProxyRole = EgressRole;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RouteKind {
+    Direct,
+    Proxy,
+    Standby,
+    DirectHybridFallback,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteMetadata {
+    pub kind: RouteKind,
+    pub proxy_node: Option<String>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
