@@ -1078,6 +1078,129 @@ async fn split_websearch_marker_keeps_only_marker_prefix_buffered() {
 }
 
 #[tokio::test]
+async fn first_encoded_candidate_requests_native_recovery_without_tool_use() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+    let builder = SseEventBuilder::new("msg_native_recovery_gate".to_string(), "model".to_string());
+    let mut tracker = SseBlockTracker::new();
+    let mut ctx = StreamContext::new_with_encoded_fallback(false, false);
+    ctx.message_started = true;
+    let payload = MessagesRequest {
+        tools: Some(vec![AnthropicTool {
+            name: "Bash".to_string(),
+            description: "run shell command".to_string(),
+            input_schema: serde_json::json!({"type":"object"}),
+            ..Default::default()
+        }]),
+        ..empty_messages_request()
+    };
+    let marker =
+        r#"[Requesting Tool execution: 'Bash' with arguments: {"command":"printf FIRST_GATE"}]"#;
+    let line = format!(
+        "data: {}",
+        serde_json::json!({"choices":[{"delta":{"content":marker},"finish_reason":"stop"}]})
+    );
+
+    process_openai_sse_line(&line, &mut ctx, &mut tracker, &tx, &builder, &payload).await;
+    ctx.flush_remaining(&mut tracker, &tx, &builder, &payload)
+        .await;
+
+    assert!(ctx.encoded_candidate_seen);
+    assert!(ctx.native_recovery_retry_requested);
+    assert!(!ctx.has_emitted_tool_use);
+    assert_eq!(tracker.allocated_blocks(), 0);
+    let mut joined = String::new();
+    while let Ok(event) = rx.try_recv() {
+        joined.push_str(&format!("{event:?}\n"));
+    }
+    assert!(!joined.contains("tool_use"), "{joined}");
+}
+
+#[tokio::test]
+async fn encoded_candidate_after_native_recovery_may_execute_strict_fallback() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+    let builder = SseEventBuilder::new("msg_encoded_fallback".to_string(), "model".to_string());
+    let mut tracker = SseBlockTracker::new();
+    let mut ctx = StreamContext::new_with_encoded_fallback(false, true);
+    ctx.message_started = true;
+    let payload = MessagesRequest {
+        tools: Some(vec![AnthropicTool {
+            name: "Bash".to_string(),
+            description: "run shell command".to_string(),
+            input_schema: serde_json::json!({"type":"object"}),
+            ..Default::default()
+        }]),
+        ..empty_messages_request()
+    };
+    let marker =
+        r#"[Requesting Tool execution: 'Bash' with arguments: {"command":"printf FALLBACK_OK"}]"#;
+    let line = format!(
+        "data: {}",
+        serde_json::json!({"choices":[{"delta":{"content":marker},"finish_reason":"stop"}]})
+    );
+
+    process_openai_sse_line(&line, &mut ctx, &mut tracker, &tx, &builder, &payload).await;
+    ctx.flush_remaining(&mut tracker, &tx, &builder, &payload)
+        .await;
+
+    assert!(ctx.has_emitted_tool_use);
+    assert!(!ctx.native_recovery_retry_requested);
+    let mut joined = String::new();
+    while let Ok(event) = rx.try_recv() {
+        joined.push_str(&format!("{event:?}\n"));
+    }
+    assert!(joined.contains("tool_use"), "{joined}");
+    assert!(joined.contains("FALLBACK_OK"), "{joined}");
+}
+
+#[tokio::test]
+async fn native_tool_call_executes_during_recovery_attempt_without_encoded_fallback() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+    let builder = SseEventBuilder::new(
+        "msg_native_recovery_success".to_string(),
+        "model".to_string(),
+    );
+    let mut tracker = SseBlockTracker::new();
+    let mut ctx = StreamContext::new_with_encoded_fallback(false, true);
+    ctx.message_started = true;
+    let payload = MessagesRequest {
+        tools: Some(vec![AnthropicTool {
+            name: "Bash".to_string(),
+            description: "run shell command".to_string(),
+            input_schema: serde_json::json!({"type":"object"}),
+            ..Default::default()
+        }]),
+        ..empty_messages_request()
+    };
+    let line = format!(
+        "data: {}",
+        serde_json::json!({
+            "choices":[{
+                "delta":{"tool_calls":[{
+                    "index":0,
+                    "id":"call_native_recovery",
+                    "function":{"name":"Bash","arguments":"{\"command\":\"printf NATIVE_OK\"}"}
+                }]},
+                "finish_reason":"tool_calls"
+            }]
+        })
+    );
+
+    process_openai_sse_line(&line, &mut ctx, &mut tracker, &tx, &builder, &payload).await;
+    ctx.flush_remaining(&mut tracker, &tx, &builder, &payload)
+        .await;
+
+    assert!(ctx.has_emitted_tool_use);
+    assert!(!ctx.encoded_candidate_seen);
+    assert!(!ctx.native_recovery_retry_requested);
+    let mut joined = String::new();
+    while let Ok(event) = rx.try_recv() {
+        joined.push_str(&format!("{event:?}\n"));
+    }
+    assert!(joined.contains("tool_use"), "{joined}");
+    assert!(joined.contains("NATIVE_OK"), "{joined}");
+}
+
+#[tokio::test]
 async fn bash_compat_marker_becomes_tool_use_without_leaking_marker() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(32);
     let builder = SseEventBuilder::new("msg_bash_compat".to_string(), "model".to_string());

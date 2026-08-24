@@ -9,6 +9,9 @@ use crate::opencode::forward::common::{
     parse_compat_tool_requests_at_eof, parse_compat_tool_requests_with_consumed,
     tool_call_fingerprint, CompatMarkdownState, CompatToolCall,
 };
+use crate::opencode::forward::fallback_intent::{
+    classify_encoded_tool_intent, FallbackDecision, FallbackIntentContext,
+};
 use crate::opencode::mapper::is_bridge_search_tool;
 use crate::opencode::sanitize::{parse_dsml_tool_calls_detailed, strip_system_tags_with_context};
 use crate::opencode::types::*;
@@ -317,6 +320,9 @@ pub(super) struct StreamContext {
     pub(super) error_terminated: bool,
     /// Whether any `tool_use` content block has been emitted.
     pub(super) has_emitted_tool_use: bool,
+    /// Whether a tool_use came from the native OpenAI tool_calls protocol.
+    /// Encoded fallback tool_use blocks intentionally do not set this flag.
+    has_emitted_native_tool_use: bool,
     /// Semantic tool calls already emitted during this assistant turn. This
     /// prevents a marker echoed in both thinking and visible text, or repeated
     /// verbatim by the model, from executing twice.
@@ -335,12 +341,34 @@ pub(super) struct StreamContext {
     /// A prose-only or structurally incomplete tool marker was retained through
     /// EOF. The outer execution loop can retry upstream with a correction.
     pub(super) compat_retry_requested: bool,
+    /// A complete encoded tool candidate was observed in text/reasoning.
+    pub(super) encoded_candidate_seen: bool,
+    /// The first encoded candidate requested one upstream retry that must use
+    /// the native tool-calling protocol before encoded fallback is considered.
+    pub(super) native_recovery_retry_requested: bool,
+    /// A candidate was rejected by the lightweight gate (for example because
+    /// it named a tool that Claude Code did not provide). Rejects fail closed.
+    pub(super) encoded_fallback_rejected: bool,
+    /// Whether this upstream attempt is allowed to execute a strict encoded
+    /// fallback after a previous native-recovery retry failed.
+    encoded_fallback_permitted: bool,
     /// Determined from `finish_reason` in the last stream chunk.
     pub(super) final_stop_reason: String,
 }
 
 impl StreamContext {
-    pub(super) fn new(_is_compact: bool) -> Self {
+    #[cfg(test)]
+    pub(super) fn new(is_compact: bool) -> Self {
+        // Parser-focused unit tests use this constructor to exercise the strict
+        // encoded compatibility parser directly. Production streaming chooses
+        // permission explicitly via `new_with_encoded_fallback`.
+        Self::new_with_encoded_fallback(is_compact, true)
+    }
+
+    pub(super) fn new_with_encoded_fallback(
+        _is_compact: bool,
+        encoded_fallback_permitted: bool,
+    ) -> Self {
         Self {
             message_started: false,
             intercepting_search: false,
@@ -358,6 +386,7 @@ impl StreamContext {
             stream_failed: false,
             error_terminated: false,
             has_emitted_tool_use: false,
+            has_emitted_native_tool_use: false,
             emitted_tool_fingerprints: HashSet::new(),
             dsml_mode: false,
             dsml_stream_buffer: String::new(),
@@ -365,8 +394,36 @@ impl StreamContext {
             text_markdown_state: CompatMarkdownState::default(),
             discarding_text_compat: false,
             compat_retry_requested: false,
+            encoded_candidate_seen: false,
+            native_recovery_retry_requested: false,
+            encoded_fallback_rejected: false,
+            encoded_fallback_permitted,
             final_stop_reason: "end_turn".to_string(),
         }
+    }
+
+    fn classify_encoded_candidate(
+        &mut self,
+        text: &str,
+        payload: &MessagesRequest,
+    ) -> FallbackDecision {
+        self.encoded_candidate_seen = true;
+        let decision = classify_encoded_tool_intent(
+            text,
+            FallbackIntentContext {
+                payload,
+                visible_text_emitted: !self.accumulated_text.is_empty()
+                    || !self.accumulated_thinking.is_empty(),
+                native_tool_emitted: self.has_emitted_native_tool_use,
+                native_retry_attempted: self.encoded_fallback_permitted,
+            },
+        );
+        match decision {
+            FallbackDecision::RetryNative => self.native_recovery_retry_requested = true,
+            FallbackDecision::Reject => self.encoded_fallback_rejected = true,
+            FallbackDecision::PassThrough | FallbackDecision::ParseEncoded => {}
+        }
+        decision
     }
 
     /// Update the final stop reason from a stream chunk's `finish_reason`.
@@ -459,6 +516,8 @@ impl StreamContext {
         if self.intercepting_search
             || self.discarding_reasoning_compat
             || self.compat_retry_requested
+            || self.native_recovery_retry_requested
+            || self.encoded_fallback_rejected
         {
             return;
         }
@@ -467,6 +526,8 @@ impl StreamContext {
         loop {
             if self.intercepting_search
                 || self.compat_retry_requested
+                || self.native_recovery_retry_requested
+                || self.encoded_fallback_rejected
                 || self.reasoning_stream_buffer.is_empty()
             {
                 return;
@@ -487,6 +548,20 @@ impl StreamContext {
                 if let Some(parsed) =
                     parse_compat_tool_requests_with_consumed(&self.reasoning_stream_buffer)
                 {
+                    let raw_candidate = self.reasoning_stream_buffer.clone();
+                    match self.classify_encoded_candidate(&raw_candidate, payload) {
+                        FallbackDecision::RetryNative | FallbackDecision::Reject => {
+                            self.reasoning_stream_buffer.clear();
+                            return;
+                        }
+                        FallbackDecision::PassThrough => {
+                            self.reasoning_stream_buffer.clear();
+                            self.emit_thinking_fragment(&raw_candidate, tracker, tx, builder)
+                                .await;
+                            return;
+                        }
+                        FallbackDecision::ParseEncoded => {}
+                    }
                     let remaining = strip_system_tags_with_context(
                         &self.reasoning_stream_buffer[parsed.consumed..],
                         &CompatMarkdownState::default(),
@@ -742,6 +817,16 @@ impl StreamContext {
         builder: &SseEventBuilder,
         payload: &MessagesRequest,
     ) {
+        match self.classify_encoded_candidate(dsml_block, payload) {
+            FallbackDecision::RetryNative | FallbackDecision::Reject => return,
+            FallbackDecision::PassThrough => {
+                self.emit_text_fragment(dsml_block, tracker, tx, builder)
+                    .await;
+                return;
+            }
+            FallbackDecision::ParseEncoded => {}
+        }
+
         let (calls, malformed) = parse_dsml_tool_calls_detailed(dsml_block);
         if malformed || calls.is_empty() {
             warn!(
@@ -779,7 +864,12 @@ impl StreamContext {
         builder: &SseEventBuilder,
         payload: &MessagesRequest,
     ) {
-        if self.intercepting_search || self.discarding_text_compat || self.compat_retry_requested {
+        if self.intercepting_search
+            || self.discarding_text_compat
+            || self.compat_retry_requested
+            || self.native_recovery_retry_requested
+            || self.encoded_fallback_rejected
+        {
             return;
         }
         if self.dsml_mode {
@@ -789,7 +879,11 @@ impl StreamContext {
         }
 
         loop {
-            if self.intercepting_search || self.compat_retry_requested {
+            if self.intercepting_search
+                || self.compat_retry_requested
+                || self.native_recovery_retry_requested
+                || self.encoded_fallback_rejected
+            {
                 return;
             }
 
@@ -867,6 +961,20 @@ impl StreamContext {
                 if let Some(parsed) =
                     parse_compat_tool_requests_with_consumed(&self.text_stream_buffer)
                 {
+                    let raw_candidate = self.text_stream_buffer.clone();
+                    match self.classify_encoded_candidate(&raw_candidate, payload) {
+                        FallbackDecision::RetryNative | FallbackDecision::Reject => {
+                            self.text_stream_buffer.clear();
+                            return;
+                        }
+                        FallbackDecision::PassThrough => {
+                            self.text_stream_buffer.clear();
+                            self.emit_text_fragment(&raw_candidate, tracker, tx, builder)
+                                .await;
+                            return;
+                        }
+                        FallbackDecision::ParseEncoded => {}
+                    }
                     let remaining = strip_system_tags_with_context(
                         &self.text_stream_buffer[parsed.consumed..],
                         &CompatMarkdownState::default(),
@@ -1077,6 +1185,11 @@ impl StreamContext {
             .first()
             .filter(|(_, _, name, _)| is_bridge_search_tool(name))
         {
+            // A valid native call in the same upstream response always wins over
+            // any earlier encoded candidate. Do not replay or reject the turn.
+            self.native_recovery_retry_requested = false;
+            self.encoded_fallback_rejected = false;
+            self.has_emitted_native_tool_use = true;
             self.emitted_tool_fingerprints
                 .insert(tool_call_fingerprint(name, arguments));
             self.intercepting_search = true;
@@ -1094,6 +1207,14 @@ impl StreamContext {
         self.thinking_block_bytes = 0;
         if let Some(idx) = tracker.close_text() {
             let _ = tx.send(crate::sse::emit_block_stop(idx)).await;
+        }
+
+        if !resolved.is_empty() {
+            // Native tool protocol is authoritative even if encoded text was
+            // observed earlier in this same response.
+            self.native_recovery_retry_requested = false;
+            self.encoded_fallback_rejected = false;
+            self.has_emitted_native_tool_use = true;
         }
 
         for (source_index, id, correct_name, arguments) in resolved {
@@ -1134,7 +1255,10 @@ impl StreamContext {
     ) {
         self.finalize_pending_native_tool_calls(tracker, tx, builder, payload)
             .await;
-        if self.intercepting_search || self.compat_retry_requested {
+        if self.intercepting_search || self.has_emitted_tool_use || self.compat_retry_requested {
+            return;
+        }
+        if self.native_recovery_retry_requested || self.encoded_fallback_rejected {
             return;
         }
 

@@ -1523,6 +1523,27 @@ pub(super) fn normalize_search_query(query: &str) -> String {
         .to_lowercase()
 }
 
+pub(super) fn prepare_native_tool_retry(payload: &mut MessagesRequest) {
+    let available_tools = payload
+        .tools
+        .as_ref()
+        .map(|tools| {
+            tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .filter(|names| !names.is_empty())
+        .unwrap_or_else(|| "none".to_string());
+    append_system_instruction(
+        payload,
+        &format!(
+            "Your previous response expressed an intended tool call as encoded text instead of using the API's native tool-calling protocol. Re-evaluate the current task and reissue every intended tool invocation using native function/tool calls only. Use only tools available in this request: {available_tools}. Every tool argument payload must be one complete JSON object matching the supplied tool schema. Do not print `[Requesting ...]` markers, DSML, `<tool_calls>`, `<tvToolcalls>`, XML tool markup, or prose that merely describes a tool call. Invoke the native tool now if a tool is still required; otherwise answer normally."
+        ),
+    );
+}
+
 pub(super) fn prepare_compat_tool_retry(payload: &mut MessagesRequest) {
     let available_tools = payload
         .tools

@@ -9,8 +9,8 @@ use crate::handlers::MessagesRequest;
 use crate::history::HistoryCapture;
 use crate::opencode::forward::common::{
     estimate_input_tokens, estimate_string_tokens, inject_search_results, normalize_search_query,
-    prepare_compat_tool_retry, prepare_final_search_synthesis, resolve_search_query,
-    search_results_with_instruction,
+    prepare_compat_tool_retry, prepare_final_search_synthesis, prepare_native_tool_retry,
+    resolve_search_query, search_results_with_instruction,
 };
 use crate::opencode::mapper::{is_compact_request, map_anthropic_to_openai_with_policy};
 use crate::opencode::retry::execute_with_warp_retry;
@@ -28,6 +28,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::{error, info, trace};
 
 const MAX_COMPAT_TOOL_RETRIES: u32 = 2;
+const MAX_ENCODED_NATIVE_RETRIES: u32 = 1;
 const MAX_STREAM_READ_RETRIES: u32 = 2;
 
 /// Remove one complete logical SSE line without copying the unread tail.
@@ -106,6 +107,7 @@ pub async fn forward_to_llm_stream(
             let mut search_cache = HashMap::<String, String>::new();
             let mut synthesis_only = false;
             let mut compat_tool_retries = 0_u32;
+            let mut encoded_native_retries = 0_u32;
             let mut stream_read_retries = 0_u32;
             let mut message_emitted = false;
             let mut tracker = SseBlockTracker::new();
@@ -131,6 +133,7 @@ pub async fn forward_to_llm_stream(
                 if upstream_turns
                     > max_search_loops
                         .saturating_add(MAX_COMPAT_TOOL_RETRIES)
+                        .saturating_add(MAX_ENCODED_NATIVE_RETRIES)
                         .saturating_add(MAX_STREAM_READ_RETRIES)
                         .saturating_add(3)
                 {
@@ -248,7 +251,10 @@ pub async fn forward_to_llm_stream(
                 let mut client_cancelled = false;
                 let mut first_chunk_recorded = false;
 
-                let mut ctx = StreamContext::new(is_compact);
+                let mut ctx = StreamContext::new_with_encoded_fallback(
+                    is_compact,
+                    encoded_native_retries > 0,
+                );
 
                 if upstream_turns == 1 {
                     let input_tokens = estimate_input_tokens(&current_payload);
@@ -455,6 +461,84 @@ pub async fn forward_to_llm_stream(
                 // regular tool_use response, or final text response.
                 ctx.flush_remaining(&mut tracker, &tx, &builder, &current_payload)
                     .await;
+
+                if ctx.native_recovery_retry_requested {
+                    if tracker.allocated_blocks() == attempt_start_allocated
+                        && !ctx.has_emitted_tool_use
+                        && encoded_native_retries < MAX_ENCODED_NATIVE_RETRIES
+                    {
+                        encoded_native_retries = encoded_native_retries.saturating_add(1);
+                        info!(
+                            retry = encoded_native_retries,
+                            max_retries = MAX_ENCODED_NATIVE_RETRIES,
+                            "Retrying encoded tool candidate through native tool protocol"
+                        );
+                        capture.attempt_finished(
+                            Some(200),
+                            "retrying",
+                            Some("encoded_native_recovery"),
+                            Some("encoded_native_recovery"),
+                            Some("encoded tool candidate will be retried using native tool protocol"),
+                        );
+                        prepare_native_tool_retry(&mut current_payload);
+                        for (_, idx) in tracker.close_all() {
+                            let _ = send_sse(&tx, crate::sse::emit_block_stop(idx)).await;
+                        }
+                        continue;
+                    }
+
+                    let terminal = "The upstream model emitted an encoded tool request that could not be safely retried through the native tool protocol. No encoded tool call was executed.";
+                    finalize_stream_with_text(
+                        terminal,
+                        &tx,
+                        &builder,
+                        &mut tracker,
+                        message_emitted,
+                    )
+                    .await;
+                    capture.append_response(terminal);
+                    capture.attempt_finished(
+                        Some(200),
+                        "failed",
+                        Some("encoded_native_recovery"),
+                        Some("encoded_native_recovery"),
+                        Some("native recovery retry was unsafe or exhausted"),
+                    );
+                    capture.fail(
+                        Some(200),
+                        "encoded_native_recovery",
+                        "native recovery retry was unsafe or exhausted",
+                    );
+                    stream_metrics.completed();
+                    break;
+                }
+
+                if ctx.encoded_fallback_rejected {
+                    let terminal = "The upstream model emitted an encoded request for a tool that is not safely available in this request. No tool call was executed.";
+                    finalize_stream_with_text(
+                        terminal,
+                        &tx,
+                        &builder,
+                        &mut tracker,
+                        message_emitted,
+                    )
+                    .await;
+                    capture.append_response(terminal);
+                    capture.attempt_finished(
+                        Some(200),
+                        "failed",
+                        Some("encoded_fallback_rejected"),
+                        Some("encoded_fallback_rejected"),
+                        Some("encoded fallback candidate failed the safety gate"),
+                    );
+                    capture.fail(
+                        Some(200),
+                        "encoded_fallback_rejected",
+                        "encoded fallback candidate failed the safety gate",
+                    );
+                    stream_metrics.completed();
+                    break;
+                }
 
                 if ctx.intercepting_search && !ctx.compat_retry_requested {
                     capture.append_reasoning(&ctx.accumulated_thinking);

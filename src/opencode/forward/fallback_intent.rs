@@ -22,7 +22,7 @@ pub(super) fn classify_encoded_tool_intent(
     text: &str,
     context: FallbackIntentContext<'_>,
 ) -> FallbackDecision {
-    if context.native_tool_emitted || context.visible_text_emitted {
+    if context.native_tool_emitted {
         return FallbackDecision::PassThrough;
     }
 
@@ -30,7 +30,23 @@ pub(super) fn classify_encoded_tool_intent(
         return FallbackDecision::PassThrough;
     };
 
+    // Literal/meta-output intent is a hard safety veto on every attempt,
+    // including after native recovery has already been tried.
     if explicit_literal_output_request(context.payload) {
+        return FallbackDecision::PassThrough;
+    }
+
+    // After one native-recovery attempt, hand the candidate to the existing
+    // strict parser. That parser retains compatibility with split/multi-marker
+    // provider output and still performs schema/tool availability validation.
+    if context.native_retry_attempted {
+        return FallbackDecision::ParseEncoded;
+    }
+
+    // The first-pass gate is intentionally stricter than the fallback parser:
+    // once visible output has started, do not reinterpret later prose as a
+    // side-effecting tool request.
+    if context.visible_text_emitted {
         return FallbackDecision::PassThrough;
     }
 
