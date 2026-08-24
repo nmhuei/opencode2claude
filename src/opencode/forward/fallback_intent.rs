@@ -121,11 +121,14 @@ pub(super) fn safe_tool_intent_preamble(prefix: &str) -> bool {
     ]
     .iter()
     .any(|cue| normalized.starts_with(cue));
+    let gerund_execution = ["using ", "invoking ", "calling ", "emitting "]
+        .iter()
+        .any(|cue| normalized.starts_with(cue));
     let execution_verb = [" use ", " invoke ", " emit ", " call ", " request "]
         .iter()
         .any(|cue| format!(" {normalized} ").contains(cue));
 
-    first_person_execution && execution_verb
+    (first_person_execution && execution_verb) || gerund_execution
 }
 
 fn is_complete_whole_output_candidate(candidate: &str) -> bool {

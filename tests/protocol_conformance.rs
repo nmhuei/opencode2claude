@@ -1600,6 +1600,42 @@ async fn streaming_prefixed_encoded_candidate_uses_lazy_fallback_without_leaking
 }
 
 #[tokio::test]
+async fn streaming_gerund_prefixed_encoded_candidate_uses_lazy_fallback() {
+    let marker = r#"[Requesting Read with arguments: {"file_path":"./compat_read.txt"}]"#;
+    let live_prefix = "Emitting the Read request in bridge compatibility marker syntax so the compat parser recovers it.";
+    let content = format!("{live_prefix}\n\n{marker}");
+    let encoded = vec![
+        format!(
+            "data: {}\n\n",
+            json!({"choices":[{"delta":{"content":content},"finish_reason":"stop"}]})
+        )
+        .into_bytes(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+    let (app, state) = harness(vec![Fixture::Sse(encoded)]).await;
+    let mut request = anthropic_request(true);
+    request["tools"] = json!([{
+        "name":"Read",
+        "description":"Read a file",
+        "input_schema":{
+            "type":"object",
+            "properties":{"file_path":{"type":"string"}},
+            "required":["file_path"]
+        }
+    }]);
+
+    let (status, body) = call(app, request).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(state.requests.lock().await.len(), 1, "{body}");
+    assert_eq!(body.matches("\"type\":\"tool_use\"").count(), 1, "{body}");
+    assert!(body.contains("toolu_compat_"), "{body}");
+    assert!(body.contains("\"name\":\"Read\""), "{body}");
+    assert!(!body.contains("Requesting Read"), "{body}");
+    assert!(!body.contains(live_prefix), "{body}");
+}
+
+#[tokio::test]
 async fn streaming_native_call_wins_over_duplicate_encoded_marker_same_response() {
     let marker =
         r#"[Requesting Tool execution: 'Bash' with arguments: {"command":"printf NATIVE_WINS"}]"#;
