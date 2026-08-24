@@ -3,6 +3,7 @@
 pub mod identity;
 pub mod maintenance;
 mod pool;
+pub mod reconcile;
 pub mod routing;
 pub mod subsystem;
 pub mod types;
