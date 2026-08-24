@@ -223,9 +223,7 @@ pub(super) fn shell_export_lines(config: &BridgeConfig) -> Vec<String> {
 }
 
 /// Render the proxy pool using a borderless table.
-pub(super) async fn print_proxy_table() -> Table {
-    let primary_ports = proxy_pool::get_primary_ports();
-    let ws_ports = proxy_pool::get_warm_standby_ports();
+pub(super) async fn print_proxy_table_for_ports(primary_ports: &[u16], ws_ports: &[u16]) -> Table {
     let all_ports: Vec<u16> = primary_ports
         .iter()
         .chain(ws_ports.iter())
@@ -274,6 +272,13 @@ pub(super) async fn print_proxy_table() -> Table {
     }
 
     table
+}
+
+pub(super) async fn print_proxy_table() -> Table {
+    let resolved = BridgeConfig::from_env_and_cli(crate::config::CliOverrides::default());
+    let primary_ports = proxy_pool::configured_primary_ports(&resolved);
+    let standby_ports = proxy_pool::configured_warm_standby_ports(&resolved);
+    print_proxy_table_for_ports(&primary_ports, &standby_ports).await
 }
 
 pub(super) async fn maybe_print_proxy_table(fmt: OutputFormat) {

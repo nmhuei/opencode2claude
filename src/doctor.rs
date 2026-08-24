@@ -276,7 +276,7 @@ async fn check_proxies(resolved: &config::BridgeConfig) -> CheckResult {
         };
     }
 
-    let primary_ports = proxy_pool::get_primary_ports();
+    let primary_ports = proxy_pool::configured_primary_ports(resolved);
     let containers = docker::list_containers(&primary_ports).await;
     let running = containers.iter().filter(|(_, _, r)| *r).count();
     let total = containers.len();

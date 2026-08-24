@@ -80,12 +80,6 @@ impl ProxyPool {
             .rate_limit_until
             .filter(|existing| *existing > requested_until)
             .unwrap_or(requested_until);
-        let recovery_already_running = node.recovery_cause == Some(RecoveryCause::RateLimit)
-            && node.health == HealthState::Recovering
-            && node.restart_attempts > 0;
-        node.health = HealthState::Degraded;
-        node.circuit = CircuitState::Open { until };
-        node.cooldown_until = Some(until);
         node.rate_limit_until = Some(until);
         if let Some(identity) = &node.exit_identity {
             node.quarantined_exit_ip = Some(identity.public_ip.clone());
@@ -93,28 +87,18 @@ impl ProxyPool {
         node.recovery_cause = Some(RecoveryCause::RateLimit);
         node.consecutive_successes = 0;
         node.consecutive_failures = 0;
-        let managed = node.lifecycle == LifecyclePolicy::Managed;
-        let rotation_queued =
-            managed && !recovery_already_running && !self.restart_queue.contains(&index);
-        if rotation_queued {
-            self.restart_queue.push(index);
-        }
-        if managed {
-            warn!(
-                node_id = %node.id,
-                cooldown_secs = duration.as_secs(),
-                quarantined_exit_ip = ?node.quarantined_exit_ip,
-                rotation_queued,
-                "egress circuit opened for rate limit; managed WARP recovery is active"
-            );
-        } else {
-            warn!(
-                node_id = %node.id,
-                cooldown_secs = duration.as_secs(),
-                quarantined_exit_ip = ?node.quarantined_exit_ip,
-                "protected standby was quarantined after rate limit; destructive rotation is forbidden"
-            );
-        }
+
+        // A provider rate limit is a quota/cooldown signal, not a transport
+        // failure. Rotating or restarting a managed proxy here would change the
+        // egress identity and could turn retry logic into quota evasion. Keep
+        // the same identity quarantined until the provider cooldown expires.
+        self.restart_queue.retain(|queued| *queued != index);
+        warn!(
+            node_id = %node.id,
+            cooldown_secs = duration.as_secs(),
+            quarantined_exit_ip = ?node.quarantined_exit_ip,
+            "provider rate-limit cooldown recorded without changing proxy transport health"
+        );
     }
 
     pub fn mark_rate_limited_adaptive(&mut self, index: usize, retry_count: u32) {
@@ -185,28 +169,23 @@ impl ProxyPool {
     pub fn recover_expired_cooldowns(&mut self) -> usize {
         let now = Instant::now();
         let mut transitioned = 0usize;
-        let mut deferred_rate_limit_retries = Vec::new();
 
-        for (index, node) in self.proxies.iter_mut().enumerate() {
+        for node in &mut self.proxies {
             if !matches!(node.circuit, CircuitState::Open { until } if now >= until) {
                 continue;
             }
 
             let rate_limit_active = node.rate_limit_until.is_some_and(|until| now < until);
-            if node.recovery_cause == Some(RecoveryCause::RateLimit)
-                && rate_limit_active
-                && node.lifecycle == LifecyclePolicy::Managed
-            {
+            if node.recovery_cause == Some(RecoveryCause::RateLimit) && rate_limit_active {
+                let until = node.rate_limit_until.expect("active rate-limit deadline");
                 node.restart_attempts = 0;
-                node.circuit = CircuitState::HalfOpen;
-                node.health = HealthState::Recovering;
-                node.cooldown_until = None;
+                node.circuit = CircuitState::Open { until };
+                node.health = HealthState::Degraded;
+                node.cooldown_until = Some(until);
                 node.consecutive_successes = 0;
-                deferred_rate_limit_retries.push(index);
-                transitioned += 1;
                 info!(
                     node_id = %node.id,
-                    "deferred WARP identity rotation was requeued"
+                    "provider rate-limit cooldown remains active; identity rotation is disabled"
                 );
                 continue;
             }
@@ -226,11 +205,6 @@ impl ProxyPool {
             info!(node_id = %node.id, "egress circuit transitioned to half-open");
         }
 
-        for index in deferred_rate_limit_retries {
-            if !self.restart_queue.contains(&index) {
-                self.restart_queue.push(index);
-            }
-        }
         transitioned
     }
 }
@@ -466,6 +440,15 @@ async fn restart_container(
         return;
     }
 
+    if recovery_cause == Some(RecoveryCause::RateLimit) {
+        warn!(
+            index,
+            port,
+            "discarding stale restart queue entry for provider rate limit; identity rotation is disabled"
+        );
+        return;
+    }
+
     metrics.record_proxy_restart_attempt();
 
     {
@@ -488,30 +471,22 @@ async fn restart_container(
         }
     };
 
-    let lifecycle_result = if recovery_cause == Some(RecoveryCause::RateLimit) {
-        info!(
-            index,
-            port, restart_attempt, "rotating managed WARP registration after rate limit"
-        );
-        runtime.rotate_managed(&spec).await
-    } else {
-        match runtime.restart_managed(&spec).await {
-            Ok(()) => Ok(()),
-            Err(restart_error) => {
-                warn!(
-                    %restart_error,
-                    %container_name,
-                    "managed WARP restart failed; attempting bounded recreate fallback"
-                );
-                runtime
-                    .recreate_managed(&spec)
-                    .await
-                    .map_err(|recreate_error| {
-                        DockerError::CommandFailed(format!(
-                            "restart failed: {restart_error}; recreate failed: {recreate_error}"
-                        ))
-                    })
-            }
+    let lifecycle_result = match runtime.restart_managed(&spec).await {
+        Ok(()) => Ok(()),
+        Err(restart_error) => {
+            warn!(
+                %restart_error,
+                %container_name,
+                "managed WARP restart failed; attempting bounded recreate fallback"
+            );
+            runtime
+                .recreate_managed(&spec)
+                .await
+                .map_err(|recreate_error| {
+                    DockerError::CommandFailed(format!(
+                        "restart failed: {restart_error}; recreate failed: {recreate_error}"
+                    ))
+                })
         }
     };
 
@@ -890,34 +865,32 @@ mod tests {
     }
 
     #[test]
-    fn exhausted_rate_limit_rotation_is_requeued_after_short_delay() {
+    fn active_rate_limit_cooldown_is_not_requeued_for_identity_rotation() {
         let mut pool = pool();
-        pool.set_max_restart_attempts(2);
         pool.proxies[0].exit_identity = Some(identity("1.1.1.1"));
         pool.mark_rate_limited(0, Duration::from_secs(3_600));
-        pool.drain_restart_queue();
-
-        assert!(apply_restart_failure(&mut pool, 0, 1));
-        pool.drain_restart_queue();
-        assert!(!apply_restart_failure(&mut pool, 0, 2));
-        assert_eq!(pool.proxies[0].restart_attempts, 2);
         assert!(pool.restart_queue.is_empty());
-        assert!(pool.recovery_in_progress());
-        assert!(pool.proxies[0].rate_limit_until.is_some());
+        let quota_until = pool.proxies[0].rate_limit_until.expect("quota deadline");
 
+        // Even if an older lifecycle path left a nearer circuit deadline, the
+        // rate-limit cooldown must be restored rather than converted into a
+        // restart/identity-rotation request.
         let expired = Instant::now() - Duration::from_secs(1);
         pool.proxies[0].circuit = CircuitState::Open { until: expired };
         pool.proxies[0].cooldown_until = Some(expired);
 
-        assert_eq!(pool.recover_expired_cooldowns(), 1);
-        assert_eq!(pool.restart_queue, vec![0]);
+        assert_eq!(pool.recover_expired_cooldowns(), 0);
+        assert!(pool.restart_queue.is_empty());
         assert_eq!(pool.proxies[0].restart_attempts, 0);
         assert_eq!(
             pool.proxies[0].recovery_cause,
             Some(RecoveryCause::RateLimit)
         );
-        assert!(pool.proxies[0].rate_limit_until.is_some());
-        assert_eq!(pool.proxies[0].circuit, CircuitState::HalfOpen);
+        assert_eq!(pool.proxies[0].rate_limit_until, Some(quota_until));
+        assert!(matches!(
+            pool.proxies[0].circuit,
+            CircuitState::Open { until } if until == quota_until
+        ));
     }
 
     #[test]

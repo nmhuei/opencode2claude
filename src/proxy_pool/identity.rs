@@ -430,12 +430,17 @@ impl ProxyPool {
     }
 
     pub fn egress_ready(&self, minimum_unique_exit_ips: usize, identity_ttl: Duration) -> bool {
+        let now = Instant::now();
         let routable = self.proxies.iter().any(|node| {
-            node.routing_enabled
+            let role_enabled = node.role != EgressRole::Primary || node.routing_enabled;
+            let identity_required =
+                self.require_verified_exit_ip || node.role == EgressRole::WarmStandby;
+            role_enabled
                 && node.health == HealthState::Healthy
                 && node.circuit == CircuitState::Closed
                 && node.duplicate_of.is_none()
-                && (!self.require_verified_exit_ip
+                && !node.provider_rate_limit_active(now)
+                && (!identity_required
                     || node
                         .exit_identity
                         .as_ref()

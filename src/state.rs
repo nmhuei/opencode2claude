@@ -136,67 +136,68 @@ impl AppState {
             all_urls.extend(urls.iter().cloned());
         }
 
-        let proxy_pool = if !all_urls.is_empty() {
-            let mut pool = ProxyPool::new_with_egress_policy(
-                &all_urls,
-                config.egress.active_proxy_count,
-                config.egress.require_verified_exit_ip,
-                config.egress.identity_ttl,
-            );
-            pool.set_max_restart_attempts(config.egress.max_restart_attempts);
-            // Spawn background tasks for pool management
-            if !pool.proxies.is_empty() {
-                let pool_arc = Arc::new(RwLock::new(pool));
-                let health_pool = pool_arc.clone();
-                let health_interval = config.egress.health_interval;
-                workers.spawn_critical("proxy-health", move |context| async move {
-                    health_monitor(health_pool, health_interval, context).await
-                });
-                info!("Proxy pool health monitor registered.");
+        let proxy_pool =
+            if config.egress.mode == crate::config::EgressMode::Proxy && !all_urls.is_empty() {
+                let mut pool = ProxyPool::new_with_egress_policy(
+                    &all_urls,
+                    config.egress.active_proxy_count,
+                    config.egress.require_verified_exit_ip,
+                    config.egress.identity_ttl,
+                );
+                pool.set_max_restart_attempts(config.egress.max_restart_attempts);
+                // Spawn background tasks for pool management
+                if !pool.proxies.is_empty() {
+                    let pool_arc = Arc::new(RwLock::new(pool));
+                    let health_pool = pool_arc.clone();
+                    let health_interval = config.egress.health_interval;
+                    workers.spawn_critical("proxy-health", move |context| async move {
+                        health_monitor(health_pool, health_interval, context).await
+                    });
+                    info!("Proxy pool health monitor registered.");
 
-                let restart_pool = pool_arc.clone();
-                let restart_runtime = container_runtime.clone();
-                let restart_image = config.runtime.warp_image.clone();
-                let restart_interval = config.egress.restart_interval;
-                let restart_identity_endpoints = config.egress.identity_endpoints.clone();
-                let restart_metrics = metrics.clone();
-                workers.spawn_critical("proxy-restart", move |context| async move {
-                    process_restart_queue(
-                        restart_pool,
-                        restart_runtime,
-                        restart_image,
-                        restart_identity_endpoints,
-                        restart_interval,
-                        restart_metrics,
-                        context,
-                    )
-                    .await
-                });
-                info!("Proxy pool restart queue processor registered.");
-
-                if !config.egress.identity_endpoints.is_empty() {
-                    let identity_pool = pool_arc.clone();
-                    let identity_endpoints = config.egress.identity_endpoints.clone();
-                    let identity_interval = config.egress.health_interval;
-                    workers.spawn_critical("proxy-identity", move |context| async move {
-                        identity_monitor(
-                            identity_pool,
-                            identity_endpoints,
-                            identity_interval,
+                    let restart_pool = pool_arc.clone();
+                    let restart_runtime = container_runtime.clone();
+                    let restart_image = config.runtime.warp_image.clone();
+                    let restart_interval = config.egress.restart_interval;
+                    let restart_identity_endpoints = config.egress.identity_endpoints.clone();
+                    let restart_metrics = metrics.clone();
+                    workers.spawn_critical("proxy-restart", move |context| async move {
+                        process_restart_queue(
+                            restart_pool,
+                            restart_runtime,
+                            restart_image,
+                            restart_identity_endpoints,
+                            restart_interval,
+                            restart_metrics,
                             context,
                         )
                         .await
                     });
-                    info!("Proxy pool exit-identity monitor registered.");
-                }
+                    info!("Proxy pool restart queue processor registered.");
 
-                pool_arc
+                    if !config.egress.identity_endpoints.is_empty() {
+                        let identity_pool = pool_arc.clone();
+                        let identity_endpoints = config.egress.identity_endpoints.clone();
+                        let identity_interval = config.egress.health_interval;
+                        workers.spawn_critical("proxy-identity", move |context| async move {
+                            identity_monitor(
+                                identity_pool,
+                                identity_endpoints,
+                                identity_interval,
+                                context,
+                            )
+                            .await
+                        });
+                        info!("Proxy pool exit-identity monitor registered.");
+                    }
+
+                    pool_arc
+                } else {
+                    Arc::new(RwLock::new(pool))
+                }
             } else {
-                Arc::new(RwLock::new(pool))
-            }
-        } else {
-            Arc::new(RwLock::new(ProxyPool::default()))
-        };
+                Arc::new(RwLock::new(ProxyPool::default()))
+            };
 
         // Broadcast channel for dashboard SSE (capacity 256)
         let (event_tx, _) = broadcast::channel(256);
@@ -247,6 +248,28 @@ mod tests {
         };
         let state = AppState::new(config);
         assert_eq!(state.config.bridge_port, 0);
+    }
+
+    #[tokio::test]
+    async fn direct_mode_does_not_register_proxy_pool_or_workers() {
+        let mut config = BridgeConfig::default();
+        config.egress.mode = crate::config::EgressMode::Direct;
+        config.primary_proxies = Some(vec!["socks5h://127.0.0.1:40001".to_string()]);
+        config.warm_standby_proxies = Some(vec!["socks5h://127.0.0.1:40004".to_string()]);
+
+        let state = AppState::new(config);
+        assert!(
+            state.proxy_pool.read().await.proxies.is_empty(),
+            "direct mode must not create a live proxy pool"
+        );
+        let snapshot = state.workers.snapshot();
+        assert!(
+            snapshot
+                .workers
+                .iter()
+                .all(|worker| !worker.name.starts_with("proxy-")),
+            "direct mode must not register proxy health/restart/identity workers"
+        );
     }
 
     #[tokio::test]

@@ -24,10 +24,62 @@ fn test_default_config() {
     assert!(config.model.is_none());
     assert!(!config.auth_enabled());
     assert_eq!(config.stream_buffer_size, DEFAULT_STREAM_BUFFER_SIZE);
+    assert_eq!(
+        config.primary_proxies.as_deref(),
+        Some(["socks5h://127.0.0.1:40001".to_string()].as_slice())
+    );
+    assert_eq!(
+        config.warm_standby_proxies.as_deref(),
+        Some(["socks5h://127.0.0.1:40004".to_string()].as_slice())
+    );
+    assert_eq!(config.egress.active_proxy_count, 1);
     assert!(
         matches!(config.shell_policy, ShellPolicy::Disabled),
         "default shell policy must be Disabled for security reasons"
     );
+}
+
+#[test]
+fn agent_team_defaults_have_high_capacity_without_global_concurrency_cap() {
+    let config = BridgeConfig::default();
+
+    assert_eq!(config.max_body_size, 64 * 1024 * 1024);
+    assert_eq!(config.stream_buffer_size, 64 * 1024);
+    assert_eq!(config.channel_capacity, 2048);
+    assert_eq!(config.max_search_loops, 20);
+    assert_eq!(config.retry.max_network_attempts, 8);
+    assert_eq!(config.retry.max_provider_attempts, 2);
+    assert_eq!(config.retry.base_backoff, std::time::Duration::from_secs(1));
+    assert_eq!(config.retry.max_backoff, std::time::Duration::from_secs(30));
+    assert_eq!(config.egress.max_restart_attempts, 6);
+    assert_eq!(
+        config.runtime.worker_shutdown_timeout,
+        std::time::Duration::from_secs(30)
+    );
+    assert_eq!(
+        config.runtime.server_shutdown_timeout,
+        std::time::Duration::from_secs(30)
+    );
+    assert!(config.observability.max_concurrent_requests.is_none());
+
+    assert_eq!(config.protocol.max_sse_line_bytes, 4 * 1024 * 1024);
+    assert_eq!(config.protocol.max_sync_response_bytes, 32 * 1024 * 1024);
+    assert_eq!(config.search.max_results, 20);
+    assert_eq!(config.search.max_snippet_chars, 2000);
+    assert_eq!(config.search.max_response_bytes, 8 * 1024 * 1024);
+    assert_eq!(
+        config.search.request_timeout,
+        std::time::Duration::from_secs(30)
+    );
+
+    assert_eq!(config.history.max_records, 1_000_000);
+    assert_eq!(config.history.max_database_bytes, 16 * 1024 * 1024 * 1024);
+    assert_eq!(config.history.max_request_bytes, 8 * 1024 * 1024);
+    assert_eq!(config.history.max_reasoning_bytes, 16 * 1024 * 1024);
+    assert_eq!(config.history.max_response_bytes, 16 * 1024 * 1024);
+    assert_eq!(config.history.max_tool_payload_bytes, 4 * 1024 * 1024);
+    assert_eq!(config.history.max_record_bytes, 48 * 1024 * 1024);
+    assert_eq!(config.history.queue_capacity, 8192);
 }
 
 #[test]

@@ -8,7 +8,6 @@ pub mod types;
 
 pub use identity::*;
 pub use maintenance::*;
-pub use routing::*;
 pub use types::*;
 
 #[cfg(test)]
