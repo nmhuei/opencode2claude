@@ -10,6 +10,8 @@ pub mod types;
 
 pub use identity::*;
 pub use maintenance::*;
+pub use reconcile::*;
+pub use subsystem::*;
 pub use types::*;
 
 #[cfg(test)]

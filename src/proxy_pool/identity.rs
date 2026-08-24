@@ -250,7 +250,7 @@ fn is_public_ipv6(ip: Ipv6Addr) -> bool {
 }
 
 impl ProxyPool {
-    fn apply_identity_results(
+    pub(crate) fn apply_identity_results(
         &mut self,
         results: Vec<(usize, String, Result<ExitIdentity, String>)>,
     ) {
