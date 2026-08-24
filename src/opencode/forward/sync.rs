@@ -4,12 +4,16 @@ use super::common::{
     extract_compat_tool_requests_detailed, inject_search_results, invalid_semantic_tool_argument,
     looks_like_unverified_tool_success, matching_tool_name, normalize_dsml_arguments,
     normalize_search_query, prepare_compat_tool_retry, prepare_final_search_synthesis,
-    read_bounded_body, resolve_search_query, search_results_with_instruction,
-    tool_call_fingerprint,
+    prepare_native_tool_retry, read_bounded_body, resolve_search_query,
+    search_results_with_instruction, tool_call_fingerprint,
 };
 use crate::error::BridgeError;
 use crate::handlers::MessagesRequest;
 use crate::history::HistoryCapture;
+use crate::opencode::forward::fallback_intent::{
+    classify_encoded_tool_intent, literal_meta_output_requested, FallbackDecision,
+    FallbackIntentContext,
+};
 use crate::opencode::mapper::{
     is_bridge_search_tool, is_compact_request, map_anthropic_to_openai_with_policy,
 };
@@ -24,6 +28,7 @@ use std::collections::{HashMap, HashSet};
 use tracing::{error, info, warn};
 
 const MAX_SYNC_COMPAT_TOOL_RETRIES: u32 = 2;
+const MAX_SYNC_ENCODED_NATIVE_RETRIES: u32 = 1;
 
 /// How a tool-call batch from one upstream turn must be handled.
 ///
@@ -100,6 +105,7 @@ pub async fn forward_to_llm_sync(
     let mut search_cache = HashMap::<String, String>::new();
     let mut synthesis_only = false;
     let mut compat_tool_retries = 0_u32;
+    let mut encoded_native_retries = 0_u32;
     loop {
         upstream_turns = upstream_turns.saturating_add(1);
         if upstream_turns > max_search_loops.saturating_add(3) {
@@ -221,6 +227,38 @@ pub async fn forward_to_llm_sync(
         // validation or execution when native calls are present in this response.
         let native_tool_calls = choice.message.tool_calls.as_deref().unwrap_or(&[]);
         let native_precedence = !native_tool_calls.is_empty();
+        let is_compact = is_compact_request(&payload);
+
+        let fallback_decision = if native_precedence || is_compact {
+            FallbackDecision::PassThrough
+        } else {
+            choice
+                .message
+                .reasoning_content
+                .as_deref()
+                .into_iter()
+                .chain(choice.message.content.as_deref())
+                .map(|text| {
+                    classify_encoded_tool_intent(
+                        text,
+                        FallbackIntentContext {
+                            payload: &payload,
+                            visible_text_emitted: false,
+                            native_tool_emitted: false,
+                            native_retry_attempted: encoded_native_retries > 0,
+                        },
+                    )
+                })
+                .fold(FallbackDecision::PassThrough, |current, next| {
+                    use FallbackDecision::*;
+                    match (current, next) {
+                        (Reject, _) | (_, Reject) => Reject,
+                        (RetryNative, _) | (_, RetryNative) => RetryNative,
+                        (ParseEncoded, _) | (_, ParseEncoded) => ParseEncoded,
+                        _ => PassThrough,
+                    }
+                })
+        };
 
         // Extract text-encoded tool calls from both reasoning and visible text.
         // Free models can place the intent in either channel, and sometimes echo
@@ -230,7 +268,6 @@ pub async fn forward_to_llm_sync(
         let mut cleaned_reasoning_content = choice.message.reasoning_content.clone();
         let mut cleaned_message_content = choice.message.content.clone();
         let mut parse_error = None;
-        let is_compact = is_compact_request(&payload);
 
         if !is_compact {
             if let Some(reasoning) = choice.message.reasoning_content.as_deref() {
@@ -271,6 +308,51 @@ pub async fn forward_to_llm_sync(
                 cleaned_message_content = None;
             }
             parse_error = None;
+        } else {
+            match fallback_decision {
+                FallbackDecision::RetryNative => {
+                    if encoded_native_retries < MAX_SYNC_ENCODED_NATIVE_RETRIES {
+                        encoded_native_retries = encoded_native_retries.saturating_add(1);
+                        capture.attempt_finished(
+                            Some(status.as_u16()),
+                            "retrying",
+                            Some("encoded_native_recovery"),
+                            Some("encoded_native_recovery"),
+                            Some(
+                                "encoded tool candidate will be retried using native tool protocol",
+                            ),
+                        );
+                        prepare_native_tool_retry(&mut payload);
+                        continue;
+                    }
+                    return Err(BridgeError::UpstreamError(
+                        "Encoded native recovery retry budget exhausted".to_string(),
+                    ));
+                }
+                FallbackDecision::Reject => {
+                    let terminal = "The upstream model emitted an encoded request for a tool that is not safely available in this request. No tool call was executed.";
+                    capture.append_response(terminal);
+                    capture.attempt_finished(
+                        Some(status.as_u16()),
+                        "failed",
+                        Some("encoded_fallback_rejected"),
+                        Some("encoded_fallback_rejected"),
+                        Some("encoded marker named an unavailable tool"),
+                    );
+                    capture.finish_success(200, Some("end_turn"), Some(&response_model));
+                    return Ok(search_terminal_response(&model, terminal));
+                }
+                FallbackDecision::PassThrough => {
+                    dsml_tool_calls.clear();
+                    compat_tool_calls.clear();
+                    if parse_error.is_none() || literal_meta_output_requested(&payload) {
+                        cleaned_reasoning_content = choice.message.reasoning_content.clone();
+                        cleaned_message_content = choice.message.content.clone();
+                        parse_error = None;
+                    }
+                }
+                FallbackDecision::ParseEncoded => {}
+            }
         }
 
         if let Some(error) = parse_error {

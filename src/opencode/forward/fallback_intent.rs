@@ -11,6 +11,7 @@ pub(super) enum FallbackDecision {
     Reject,
 }
 
+#[derive(Clone, Copy)]
 pub(super) struct FallbackIntentContext<'a> {
     pub(super) payload: &'a MessagesRequest,
     pub(super) visible_text_emitted: bool,
@@ -86,6 +87,20 @@ fn encoded_candidate_start(text: &str) -> Option<usize> {
 }
 
 fn is_complete_whole_output_candidate(candidate: &str) -> bool {
+    let mut candidate = candidate.trim();
+    loop {
+        let lower = candidate.to_ascii_lowercase();
+        let stripped = ["</think>", "</thinking>"].iter().find_map(|suffix| {
+            lower
+                .ends_with(suffix)
+                .then(|| candidate[..candidate.len() - suffix.len()].trim_end())
+        });
+        let Some(next) = stripped else {
+            break;
+        };
+        candidate = next;
+    }
+
     if candidate.starts_with('[') {
         return candidate.ends_with(']');
     }
@@ -128,6 +143,10 @@ fn contains_bounded_name(haystack: &str, needle: &str) -> bool {
 
 fn is_tool_name_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-')
+}
+
+pub(super) fn literal_meta_output_requested(payload: &MessagesRequest) -> bool {
+    explicit_literal_output_request(payload)
 }
 
 fn explicit_literal_output_request(payload: &MessagesRequest) -> bool {
