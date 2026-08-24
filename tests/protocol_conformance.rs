@@ -1303,6 +1303,55 @@ async fn streaming_generic_xml_agent_marker_is_fragment_safe_and_exact_once() {
 }
 
 #[tokio::test]
+async fn streaming_agent_compat_recovers_after_native_retry_fails() {
+    let marker = r#"[Requesting Agent with arguments: {"description":"Compat fanout","prompt":"Inspect parser recovery and return evidence.","subagent_type":"general-purpose"}]"#;
+    let response = || {
+        vec![
+            format!(
+                "data: {}\n\n",
+                json!({
+                    "choices":[{
+                        "delta":{"content":marker},
+                        "finish_reason":"stop"
+                    }]
+                })
+            )
+            .into_bytes(),
+            b"data: [DONE]\n\n".to_vec(),
+        ]
+    };
+    let (app, state) = harness(vec![Fixture::Sse(response()), Fixture::Sse(response())]).await;
+    let mut request = anthropic_request(true);
+    request["tools"] = json!([{
+        "name":"Agent",
+        "description":"Spawn an agent",
+        "input_schema":{
+            "type":"object",
+            "properties":{
+                "description":{"type":"string"},
+                "prompt":{"type":"string"},
+                "subagent_type":{"type":"string"}
+            },
+            "required":["description","prompt"]
+        }
+    }]);
+
+    let (status, body) = call(app, request).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(state.requests.lock().await.len(), 2);
+    assert_eq!(body.matches("\"type\":\"tool_use\"").count(), 1, "{body}");
+    assert_eq!(body.matches("\"name\":\"Agent\"").count(), 1, "{body}");
+    assert!(body.contains("Compat fanout"), "{body}");
+    assert!(
+        body.contains("Inspect parser recovery and return evidence."),
+        "{body}"
+    );
+    assert!(!body.contains("Requesting Agent"), "{body}");
+    assert!(body.contains("\"stop_reason\":\"tool_use\""), "{body}");
+}
+
+#[tokio::test]
 async fn streaming_encoded_candidate_retries_native_before_tool_use() {
     let encoded_marker = r#"[Requesting Tool execution: 'Bash' with arguments: {"command":"printf ENCODED_SHOULD_NOT_EXECUTE"}]"#;
     let first = vec![
