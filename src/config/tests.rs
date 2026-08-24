@@ -83,6 +83,82 @@ fn agent_team_defaults_have_high_capacity_without_global_concurrency_cap() {
 }
 
 #[test]
+fn hybrid_egress_mode_parses_without_changing_direct_or_proxy() {
+    assert_eq!(EgressMode::parse("hybrid"), Some(EgressMode::Hybrid));
+    assert_eq!(EgressMode::parse("direct"), Some(EgressMode::Direct));
+    assert_eq!(EgressMode::parse("proxy"), Some(EgressMode::Proxy));
+    assert_eq!(EgressMode::parse("warp"), Some(EgressMode::Proxy));
+}
+
+#[test]
+fn hybrid_timing_defaults_are_bounded() {
+    let config = BridgeConfig::default();
+    assert_eq!(
+        config.egress.bootstrap_timeout,
+        std::time::Duration::from_secs(30)
+    );
+    assert_eq!(
+        config.egress.verify_timeout,
+        std::time::Duration::from_secs(10)
+    );
+    assert_eq!(
+        config.egress.recovery_backoff_max,
+        std::time::Duration::from_secs(120)
+    );
+}
+
+#[test]
+fn hybrid_timing_env_overrides_defaults() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let names = [
+        "BRIDGE_PROXY_BOOTSTRAP_TIMEOUT_SECS",
+        "BRIDGE_PROXY_VERIFY_TIMEOUT_SECS",
+        "BRIDGE_PROXY_RECOVERY_BACKOFF_MAX_SECS",
+    ];
+    let previous = names.map(|name| env::var(name).ok());
+    env::set_var(names[0], "7");
+    env::set_var(names[1], "4");
+    env::set_var(names[2], "45");
+
+    let config = BridgeConfig::from_env_and_cli(CliOverrides::default());
+    assert_eq!(
+        config.egress.bootstrap_timeout,
+        std::time::Duration::from_secs(7)
+    );
+    assert_eq!(
+        config.egress.verify_timeout,
+        std::time::Duration::from_secs(4)
+    );
+    assert_eq!(
+        config.egress.recovery_backoff_max,
+        std::time::Duration::from_secs(45)
+    );
+
+    for (name, value) in names.into_iter().zip(previous) {
+        match value {
+            Some(value) => env::set_var(name, value),
+            None => env::remove_var(name),
+        }
+    }
+}
+
+#[test]
+fn strict_proxy_still_rejects_direct_fallback_flag() {
+    let mut config = BridgeConfig::default();
+    config.egress.mode = EgressMode::Proxy;
+    config.egress.allow_direct_fallback = true;
+    assert!(config.validate_security().is_err());
+}
+
+#[test]
+fn hybrid_does_not_require_legacy_allow_direct_fallback() {
+    let mut config = BridgeConfig::default();
+    config.egress.mode = EgressMode::Hybrid;
+    config.egress.allow_direct_fallback = false;
+    assert!(config.validate_security().is_ok());
+}
+
+#[test]
 fn test_toml_parsing() {
     let toml_str = r#"
             port = 5000

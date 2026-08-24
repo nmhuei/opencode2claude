@@ -370,6 +370,27 @@ pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
     resolved.egress.allow_direct_fallback = env_bool("BRIDGE_ALLOW_DIRECT_FALLBACK")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.allow_direct_fallback))
         .unwrap_or(false);
+    resolved.egress.bootstrap_timeout = Duration::from_secs(
+        env_parse("BRIDGE_PROXY_BOOTSTRAP_TIMEOUT_SECS")
+            .or_else(|| {
+                file.as_ref()
+                    .and_then(|cfg| cfg.proxy_bootstrap_timeout_secs)
+            })
+            .unwrap_or(30),
+    );
+    resolved.egress.verify_timeout = Duration::from_secs(
+        env_parse("BRIDGE_PROXY_VERIFY_TIMEOUT_SECS")
+            .or_else(|| file.as_ref().and_then(|cfg| cfg.proxy_verify_timeout_secs))
+            .unwrap_or(10),
+    );
+    resolved.egress.recovery_backoff_max = Duration::from_secs(
+        env_parse("BRIDGE_PROXY_RECOVERY_BACKOFF_MAX_SECS")
+            .or_else(|| {
+                file.as_ref()
+                    .and_then(|cfg| cfg.proxy_recovery_backoff_max_secs)
+            })
+            .unwrap_or(120),
+    );
 
     resolved.runtime.runtime_dir = env_string("RUNTIME_DIR")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.runtime_dir.clone()))

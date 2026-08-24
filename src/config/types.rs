@@ -97,6 +97,7 @@ impl fmt::Display for SecretString {
 pub enum EgressMode {
     Direct,
     Proxy,
+    Hybrid,
 }
 
 impl EgressMode {
@@ -104,6 +105,7 @@ impl EgressMode {
         match value.trim().to_ascii_lowercase().as_str() {
             "direct" => Some(Self::Direct),
             "proxy" | "warp" => Some(Self::Proxy),
+            "hybrid" => Some(Self::Hybrid),
             _ => None,
         }
     }
@@ -153,6 +155,9 @@ pub struct EgressConfig {
     pub restart_interval: Duration,
     pub max_restart_attempts: u32,
     pub allow_direct_fallback: bool,
+    pub bootstrap_timeout: Duration,
+    pub verify_timeout: Duration,
+    pub recovery_backoff_max: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -334,6 +339,9 @@ impl Default for BridgeConfig {
                 restart_interval: Duration::from_secs(2),
                 max_restart_attempts: 6,
                 allow_direct_fallback: false,
+                bootstrap_timeout: Duration::from_secs(30),
+                verify_timeout: Duration::from_secs(10),
+                recovery_backoff_max: Duration::from_secs(120),
             },
             runtime: RuntimeConfig {
                 runtime_dir: None,

@@ -68,7 +68,7 @@ pub async fn handle_readiness(State(state): State<AppState>) -> impl IntoRespons
     let workers_ready = state.workers.critical_ready(heartbeat_budget);
 
     let (egress_ready, verified_unique_exit_ips) = match state.config.egress.mode {
-        EgressMode::Direct => (true, 0),
+        EgressMode::Direct | EgressMode::Hybrid => (true, 0),
         EgressMode::Proxy => {
             let pool = state.proxy_pool.read().await;
             (
@@ -100,6 +100,7 @@ pub async fn handle_readiness(State(state): State<AppState>) -> impl IntoRespons
                 "mode": match state.config.egress.mode {
                     EgressMode::Direct => "direct",
                     EgressMode::Proxy => "proxy",
+                    EgressMode::Hybrid => "hybrid",
                 },
                 "verified_unique_exit_ips": verified_unique_exit_ips,
                 "minimum_unique_exit_ips": state.config.egress.minimum_unique_exit_ips,
