@@ -340,6 +340,9 @@ pub async fn forward_to_llm_sync(
             .chain(dsml_tool_calls.iter().filter_map(|call| {
                 let name = matching_tool_name(&call.name, &payload)?;
                 let arguments = normalize_dsml_arguments(&name, call.arguments.clone(), &payload);
+                if !arguments.is_object() {
+                    return Some(format!("{name}.<object>"));
+                }
                 invalid_semantic_tool_argument(&name, &arguments)
                     .map(|field| format!("{name}.{field}"))
             }))
@@ -351,6 +354,9 @@ pub async fn forward_to_llm_sync(
                         let arguments =
                             serde_json::from_str::<serde_json::Value>(raw_arguments).ok()?;
                         let arguments = normalize_dsml_arguments(&name, arguments, &payload);
+                        if !arguments.is_object() {
+                            return Some(format!("{name}.<object>"));
+                        }
                         invalid_semantic_tool_argument(&name, &arguments)
                             .map(|field| format!("{name}.{field}"))
                     }),

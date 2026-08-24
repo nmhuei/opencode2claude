@@ -24,11 +24,11 @@
     "expected_malformed": false
   },
   {
-    "name": "legitimate_array_input",
+    "name": "top_level_array_input_rejected",
     "input": "[Requesting BatchRead with arguments: [{\"path\":\"a\"},{\"path\":\"b\"}]]",
-    "expected_cleaned": "",
-    "expected_calls": [{"name":"BatchRead","arguments":[{"path":"a"},{"path":"b"}]}],
-    "expected_malformed": false
+    "expected_cleaned": "[Requesting BatchRead with arguments: [{\"path\":\"a\"},{\"path\":\"b\"}]]",
+    "expected_calls": [],
+    "expected_malformed": true
   },
   {
     "name": "fenced_example",

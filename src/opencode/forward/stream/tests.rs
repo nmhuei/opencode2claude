@@ -1254,6 +1254,49 @@ async fn bash_compat_marker_becomes_tool_use_without_leaking_marker() {
     assert!(!joined.contains("Requesting Tool execution"));
 }
 
+#[tokio::test]
+async fn compat_non_object_arguments_request_retry_without_tool_use() {
+    for raw in [r#""ls""#, "123", r#"["ls"]"#] {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+        let builder = SseEventBuilder::new("msg_object_invariant".to_string(), "model".to_string());
+        let mut tracker = SseBlockTracker::new();
+        let mut ctx = StreamContext::new(false);
+        ctx.message_started = true;
+        let payload = MessagesRequest {
+            tools: Some(vec![AnthropicTool {
+                name: "Bash".to_string(),
+                description: "run shell command".to_string(),
+                input_schema: serde_json::json!({
+                    "type":"object",
+                    "properties":{"command":{"type":"string"}},
+                    "required":["command"]
+                }),
+                ..Default::default()
+            }]),
+            ..empty_messages_request()
+        };
+        let marker = format!("[Requesting Tool execution: 'Bash' with arguments: {raw}]");
+        let line = format!(
+            "data: {}",
+            serde_json::json!({
+                "choices": [{"delta": {"content": marker}, "finish_reason": "stop"}]
+            })
+        );
+
+        process_openai_sse_line(&line, &mut ctx, &mut tracker, &tx, &builder, &payload).await;
+        ctx.flush_remaining(&mut tracker, &tx, &builder, &payload)
+            .await;
+
+        assert!(ctx.compat_retry_requested, "raw={raw}");
+        assert!(!ctx.has_emitted_tool_use, "raw={raw}");
+        let mut joined = String::new();
+        while let Ok(event) = rx.try_recv() {
+            joined.push_str(&format!("{event:?}\n"));
+        }
+        assert!(!joined.contains("tool_use"), "raw={raw}: {joined}");
+    }
+}
+
 #[test]
 fn extracts_multiple_compat_tool_markers_in_order() {
     let marker = "Requesting Tool execution";
@@ -2216,19 +2259,16 @@ async fn unavailable_native_tool_does_not_report_tool_use_stop_reason() {
 }
 
 #[test]
-fn legitimate_array_tool_input_remains_one_compat_call() {
+fn top_level_array_tool_input_is_rejected() {
     let marker = r#"[Requesting BatchRead with arguments: [{"path":"a"},{"path":"b"}]]"#;
-    let (cleaned, calls) = extract_compat_tool_requests(marker);
+    let extraction = extract_compat_tool_requests_detailed(marker);
 
-    assert_eq!(cleaned, "");
-    assert_eq!(
-        calls.len(),
-        1,
-        "array input must not be used as a batch sentinel"
+    assert_eq!(extraction.cleaned_text, marker);
+    assert!(extraction.calls.is_empty());
+    assert!(
+        extraction.malformed_intent,
+        "top-level array input must fail closed because tool_use.input must be an object"
     );
-    assert_eq!(calls[0].0, "BatchRead");
-    let parsed: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
-    assert_eq!(parsed, serde_json::json!([{"path":"a"},{"path":"b"}]));
 }
 
 #[test]

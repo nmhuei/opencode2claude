@@ -711,6 +711,13 @@ impl StreamContext {
                 return;
             };
             let arguments = normalize_dsml_arguments(&correct_name, call.arguments, payload);
+            if !arguments.is_object() {
+                warn!(tool = %correct_name, "Compatibility marker arguments were not a JSON object");
+                if !self.has_emitted_tool_use {
+                    self.compat_retry_requested = true;
+                }
+                return;
+            }
             if let Some(field) = invalid_semantic_tool_argument(&correct_name, &arguments) {
                 warn!(tool = %correct_name, field, "Compatibility marker used an empty or placeholder tool argument");
                 if !self.has_emitted_tool_use {

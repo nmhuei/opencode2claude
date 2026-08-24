@@ -1105,6 +1105,7 @@ fn parse_compat_tool_requests_impl(
         }
         if let Some(arguments) = normalize_compat_json_arguments(raw)
             .and_then(|normalized| serde_json::from_str::<serde_json::Value>(&normalized).ok())
+            .filter(serde_json::Value::is_object)
         {
             return Some(ParsedCompatMarker {
                 prefix,
@@ -1121,6 +1122,7 @@ fn parse_compat_tool_requests_impl(
         {
             if let Some(arguments) = normalize_compat_json_arguments(raw)
                 .and_then(|normalized| serde_json::from_str::<serde_json::Value>(&normalized).ok())
+                .filter(serde_json::Value::is_object)
             {
                 return Some(ParsedCompatMarker {
                     prefix,
@@ -1152,7 +1154,11 @@ fn parse_compat_argument_sequence(
             return None;
         }
         let normalized = normalize_compat_json_arguments(&text[cursor..arguments_end])?;
-        values.push(serde_json::from_str::<serde_json::Value>(&normalized).ok()?);
+        let arguments = serde_json::from_str::<serde_json::Value>(&normalized).ok()?;
+        if !arguments.is_object() {
+            return None;
+        }
+        values.push(arguments);
         cursor = skip_compat_whitespace(text, arguments_end);
 
         if text.get(cursor..).is_some_and(|rest| rest.starts_with(',')) {
@@ -1995,7 +2001,7 @@ mod compat_parser_invariant_tests {
                 "command": "printf 'a\\|b'",
                 "nested": {"x": [1, true, null]}
             }),
-            serde_json::json!([{"path": "a"}, {"path": "b"}]),
+            serde_json::json!({"items": [{"path": "a"}, {"path": "b"}]}),
             serde_json::json!({
                 "unicode": "Tiếng Việt 日本語 🦀",
                 "quote": "a \" b"
@@ -2014,6 +2020,23 @@ mod compat_parser_invariant_tests {
             assert_eq!(parsed.consumed, marker.len());
             assert!(marker.is_char_boundary(parsed.consumed));
         }
+    }
+
+    #[test]
+    fn compat_single_call_arguments_must_be_objects() {
+        for raw in [r#""ls""#, "123", r#"["ls"]"#] {
+            let marker = format!("[Requesting Tool execution: 'Bash' with arguments: {raw}]");
+            assert!(
+                parse_compat_tool_requests_with_consumed(&marker).is_none(),
+                "non-object compatibility arguments must be rejected: {raw}"
+            );
+        }
+
+        let marker = r#"[Requesting Tool execution: 'Bash' with arguments: {"command":"ls"}]"#;
+        let parsed = parse_compat_tool_requests_with_consumed(marker)
+            .expect("object compatibility arguments should remain supported");
+        assert_eq!(parsed.calls.len(), 1);
+        assert!(parsed.calls[0].arguments.is_object());
     }
 
     #[test]
