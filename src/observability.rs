@@ -42,6 +42,12 @@ pub struct MetricsSnapshot {
     pub retry_provider_server: u64,
     pub retry_malformed_response: u64,
     pub model_fallbacks: u64,
+    pub native_tool_calls: u64,
+    pub encoded_fallback_candidates: u64,
+    pub encoded_native_retries: u64,
+    pub encoded_fallback_tool_calls: u64,
+    pub encoded_fallback_rejections: u64,
+    pub literal_marker_suppressions: u64,
     pub proxy_restart_attempts: u64,
     pub proxy_restart_successes: u64,
     pub proxy_restart_failures: u64,
@@ -60,6 +66,16 @@ pub enum RetryMetricClass {
     ProviderClient,
     ProviderServer,
     MalformedResponse,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolProtocolMetricClass {
+    NativeToolCall,
+    EncodedCandidate,
+    EncodedNativeRetry,
+    EncodedFallbackToolCall,
+    EncodedFallbackRejection,
+    LiteralMarkerSuppression,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,6 +153,12 @@ pub struct Metrics {
     retry_provider_server: AtomicU64,
     retry_malformed_response: AtomicU64,
     model_fallbacks: AtomicU64,
+    native_tool_calls: AtomicU64,
+    encoded_fallback_candidates: AtomicU64,
+    encoded_native_retries: AtomicU64,
+    encoded_fallback_tool_calls: AtomicU64,
+    encoded_fallback_rejections: AtomicU64,
+    literal_marker_suppressions: AtomicU64,
     proxy_restart_attempts: AtomicU64,
     proxy_restart_successes: AtomicU64,
     proxy_restart_failures: AtomicU64,
@@ -172,6 +194,12 @@ impl Metrics {
             retry_provider_server: self.retry_provider_server.load(Ordering::Relaxed),
             retry_malformed_response: self.retry_malformed_response.load(Ordering::Relaxed),
             model_fallbacks: self.model_fallbacks.load(Ordering::Relaxed),
+            native_tool_calls: self.native_tool_calls.load(Ordering::Relaxed),
+            encoded_fallback_candidates: self.encoded_fallback_candidates.load(Ordering::Relaxed),
+            encoded_native_retries: self.encoded_native_retries.load(Ordering::Relaxed),
+            encoded_fallback_tool_calls: self.encoded_fallback_tool_calls.load(Ordering::Relaxed),
+            encoded_fallback_rejections: self.encoded_fallback_rejections.load(Ordering::Relaxed),
+            literal_marker_suppressions: self.literal_marker_suppressions.load(Ordering::Relaxed),
             proxy_restart_attempts: self.proxy_restart_attempts.load(Ordering::Relaxed),
             proxy_restart_successes: self.proxy_restart_successes.load(Ordering::Relaxed),
             proxy_restart_failures: self.proxy_restart_failures.load(Ordering::Relaxed),
@@ -209,6 +237,21 @@ impl Metrics {
 
     pub fn record_model_fallback(&self) {
         self.model_fallbacks.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_tool_protocol(&self, class: ToolProtocolMetricClass, count: u64) {
+        if count == 0 {
+            return;
+        }
+        let counter = match class {
+            ToolProtocolMetricClass::NativeToolCall => &self.native_tool_calls,
+            ToolProtocolMetricClass::EncodedCandidate => &self.encoded_fallback_candidates,
+            ToolProtocolMetricClass::EncodedNativeRetry => &self.encoded_native_retries,
+            ToolProtocolMetricClass::EncodedFallbackToolCall => &self.encoded_fallback_tool_calls,
+            ToolProtocolMetricClass::EncodedFallbackRejection => &self.encoded_fallback_rejections,
+            ToolProtocolMetricClass::LiteralMarkerSuppression => &self.literal_marker_suppressions,
+        };
+        counter.fetch_add(count, Ordering::Relaxed);
     }
 
     pub fn record_proxy_restart_attempt(&self) {
@@ -473,6 +516,12 @@ mod tests {
         }
         metrics.record_retry(RetryMetricClass::RateLimit);
         metrics.record_model_fallback();
+        metrics.record_tool_protocol(ToolProtocolMetricClass::NativeToolCall, 2);
+        metrics.record_tool_protocol(ToolProtocolMetricClass::EncodedCandidate, 3);
+        metrics.record_tool_protocol(ToolProtocolMetricClass::EncodedNativeRetry, 1);
+        metrics.record_tool_protocol(ToolProtocolMetricClass::EncodedFallbackToolCall, 1);
+        metrics.record_tool_protocol(ToolProtocolMetricClass::EncodedFallbackRejection, 1);
+        metrics.record_tool_protocol(ToolProtocolMetricClass::LiteralMarkerSuppression, 1);
         metrics.record_proxy_restart_attempt();
         metrics.record_proxy_restart_failure();
         metrics.record_search(SearchMetricProvider::Exa, SearchMetricOutcome::Success);
@@ -484,6 +533,12 @@ mod tests {
         assert_eq!(snapshot.active_streams, 0);
         assert_eq!(snapshot.retry_rate_limit, 1);
         assert_eq!(snapshot.model_fallbacks, 1);
+        assert_eq!(snapshot.native_tool_calls, 2);
+        assert_eq!(snapshot.encoded_fallback_candidates, 3);
+        assert_eq!(snapshot.encoded_native_retries, 1);
+        assert_eq!(snapshot.encoded_fallback_tool_calls, 1);
+        assert_eq!(snapshot.encoded_fallback_rejections, 1);
+        assert_eq!(snapshot.literal_marker_suppressions, 1);
         assert_eq!(snapshot.proxy_restart_attempts, 1);
         assert_eq!(snapshot.proxy_restart_failures, 1);
         assert_eq!(snapshot.search_exa.successes, 1);

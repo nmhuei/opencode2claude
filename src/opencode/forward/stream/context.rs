@@ -10,7 +10,8 @@ use crate::opencode::forward::common::{
     tool_call_fingerprint, CompatMarkdownState, CompatToolCall,
 };
 use crate::opencode::forward::fallback_intent::{
-    classify_encoded_tool_intent, FallbackDecision, FallbackIntentContext,
+    classify_encoded_tool_intent, literal_meta_output_requested, FallbackDecision,
+    FallbackIntentContext,
 };
 use crate::opencode::mapper::is_bridge_search_tool;
 use crate::opencode::sanitize::{parse_dsml_tool_calls_detailed, strip_system_tags_with_context};
@@ -323,6 +324,11 @@ pub(super) struct StreamContext {
     /// Whether a tool_use came from the native OpenAI tool_calls protocol.
     /// Encoded fallback tool_use blocks intentionally do not set this flag.
     has_emitted_native_tool_use: bool,
+    /// Per-attempt protocol counters surfaced to the outer executor for metrics
+    /// and history without retaining tool arguments.
+    pub(super) native_tool_calls_emitted: u32,
+    pub(super) encoded_tool_calls_emitted: u32,
+    pub(super) literal_marker_suppressed: bool,
     /// Semantic tool calls already emitted during this assistant turn. This
     /// prevents a marker echoed in both thinking and visible text, or repeated
     /// verbatim by the model, from executing twice.
@@ -394,6 +400,9 @@ impl StreamContext {
             error_terminated: false,
             has_emitted_tool_use: false,
             has_emitted_native_tool_use: false,
+            native_tool_calls_emitted: 0,
+            encoded_tool_calls_emitted: 0,
+            literal_marker_suppressed: false,
             emitted_tool_fingerprints: HashSet::new(),
             dsml_mode: false,
             dsml_stream_buffer: String::new(),
@@ -429,6 +438,9 @@ impl StreamContext {
         match decision {
             FallbackDecision::RetryNative => self.native_recovery_retry_requested = true,
             FallbackDecision::Reject => self.encoded_fallback_rejected = true,
+            FallbackDecision::PassThrough if literal_meta_output_requested(payload) => {
+                self.literal_marker_suppressed = true;
+            }
             FallbackDecision::PassThrough | FallbackDecision::ParseEncoded => {}
         }
         decision
@@ -778,6 +790,7 @@ impl StreamContext {
             );
             return;
         }
+        self.encoded_tool_calls_emitted = self.encoded_tool_calls_emitted.saturating_add(1);
         let arguments_json = serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".into());
 
         if is_bridge_search_tool(correct_name) {
@@ -1214,6 +1227,7 @@ impl StreamContext {
             self.native_recovery_retry_requested = false;
             self.encoded_fallback_rejected = false;
             self.has_emitted_native_tool_use = true;
+            self.native_tool_calls_emitted = self.native_tool_calls_emitted.saturating_add(1);
             self.emitted_tool_fingerprints
                 .insert(tool_call_fingerprint(name, arguments));
             self.intercepting_search = true;
@@ -1239,6 +1253,9 @@ impl StreamContext {
             self.native_recovery_retry_requested = false;
             self.encoded_fallback_rejected = false;
             self.has_emitted_native_tool_use = true;
+            self.native_tool_calls_emitted = self
+                .native_tool_calls_emitted
+                .saturating_add(resolved.len() as u32);
         }
 
         for (source_index, id, correct_name, arguments) in resolved {

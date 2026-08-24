@@ -7,6 +7,7 @@ use super::transport::{send_sse, DropCancel};
 use crate::error::BridgeError;
 use crate::handlers::MessagesRequest;
 use crate::history::HistoryCapture;
+use crate::observability::ToolProtocolMetricClass;
 use crate::opencode::forward::common::{
     estimate_input_tokens, estimate_string_tokens, inject_search_results, normalize_search_query,
     prepare_compat_tool_retry, prepare_final_search_synthesis, prepare_native_tool_retry,
@@ -462,12 +463,57 @@ pub async fn forward_to_llm_stream(
                 ctx.flush_remaining(&mut tracker, &tx, &builder, &current_payload)
                     .await;
 
+                if ctx.encoded_candidate_seen {
+                    state_clone.metrics.record_tool_protocol(
+                        ToolProtocolMetricClass::EncodedCandidate,
+                        1,
+                    );
+                    capture.tool_protocol("encoded_candidate", "encoded", 1, None);
+                }
+                if ctx.literal_marker_suppressed {
+                    state_clone.metrics.record_tool_protocol(
+                        ToolProtocolMetricClass::LiteralMarkerSuppression,
+                        1,
+                    );
+                    capture.tool_protocol(
+                        "literal_marker_suppressed",
+                        "encoded",
+                        1,
+                        Some("explicit literal/meta-output user intent"),
+                    );
+                }
+                if ctx.native_tool_calls_emitted > 0 {
+                    let count = u64::from(ctx.native_tool_calls_emitted);
+                    state_clone
+                        .metrics
+                        .record_tool_protocol(ToolProtocolMetricClass::NativeToolCall, count);
+                    capture.tool_protocol("tool_calls", "native", count, None);
+                }
+                if ctx.encoded_tool_calls_emitted > 0 {
+                    let count = u64::from(ctx.encoded_tool_calls_emitted);
+                    state_clone.metrics.record_tool_protocol(
+                        ToolProtocolMetricClass::EncodedFallbackToolCall,
+                        count,
+                    );
+                    capture.tool_protocol("tool_calls", "encoded_fallback", count, None);
+                }
+
                 if ctx.native_recovery_retry_requested {
                     if tracker.allocated_blocks() == attempt_start_allocated
                         && !ctx.has_emitted_tool_use
                         && encoded_native_retries < MAX_ENCODED_NATIVE_RETRIES
                     {
                         encoded_native_retries = encoded_native_retries.saturating_add(1);
+                        state_clone.metrics.record_tool_protocol(
+                            ToolProtocolMetricClass::EncodedNativeRetry,
+                            1,
+                        );
+                        capture.tool_protocol(
+                            "native_retry",
+                            "encoded_recovery",
+                            1,
+                            Some("retry encoded candidate through native protocol"),
+                        );
                         info!(
                             retry = encoded_native_retries,
                             max_retries = MAX_ENCODED_NATIVE_RETRIES,
@@ -514,6 +560,16 @@ pub async fn forward_to_llm_stream(
                 }
 
                 if ctx.encoded_fallback_rejected {
+                    state_clone.metrics.record_tool_protocol(
+                        ToolProtocolMetricClass::EncodedFallbackRejection,
+                        1,
+                    );
+                    capture.tool_protocol(
+                        "encoded_rejection",
+                        "encoded",
+                        1,
+                        Some("encoded marker named an unavailable tool"),
+                    );
                     let terminal = "The upstream model emitted an encoded request for a tool that is not safely available in this request. No tool call was executed.";
                     finalize_stream_with_text(
                         terminal,

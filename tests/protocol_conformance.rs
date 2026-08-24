@@ -424,7 +424,13 @@ async fn sync_encoded_candidate_retries_native_before_tool_use() {
         }],
         "usage":{"prompt_tokens":1,"completion_tokens":1}
     });
-    let (app, state) = harness(vec![Fixture::Json(encoded), Fixture::Json(native)]).await;
+    let (app, state, metrics) = harness_core(
+        vec![Fixture::Json(encoded), Fixture::Json(native)],
+        256 * 1024,
+        4 * 1024 * 1024,
+        |_| {},
+    )
+    .await;
     let mut request = anthropic_request(false);
     request["tools"] = json!([{
         "name":"Bash",
@@ -450,6 +456,11 @@ async fn sync_encoded_candidate_retries_native_before_tool_use() {
         "printf SYNC_NATIVE_RECOVERY_OK"
     );
     assert!(!body.contains("SYNC_ENCODED_SHOULD_NOT_EXECUTE"), "{body}");
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.encoded_fallback_candidates, 1);
+    assert_eq!(snapshot.encoded_native_retries, 1);
+    assert_eq!(snapshot.native_tool_calls, 1);
+    assert_eq!(snapshot.encoded_fallback_tool_calls, 0);
 }
 
 #[tokio::test]
@@ -467,10 +478,15 @@ async fn sync_encoded_candidate_after_native_retry_uses_strict_fallback() {
             "usage":{"prompt_tokens":1,"completion_tokens":1}
         })
     };
-    let (app, state) = harness(vec![
-        Fixture::Json(fixture("chatcmpl-sync-first-encoded", first_marker)),
-        Fixture::Json(fixture("chatcmpl-sync-fallback-encoded", fallback_marker)),
-    ])
+    let (app, state, metrics) = harness_core(
+        vec![
+            Fixture::Json(fixture("chatcmpl-sync-first-encoded", first_marker)),
+            Fixture::Json(fixture("chatcmpl-sync-fallback-encoded", fallback_marker)),
+        ],
+        256 * 1024,
+        4 * 1024 * 1024,
+        |_| {},
+    )
     .await;
     let mut request = anthropic_request(false);
     request["tools"] = json!([{
@@ -499,6 +515,99 @@ async fn sync_encoded_candidate_after_native_retry_uses_strict_fallback() {
         !body.contains("SYNC_FIRST_ENCODED_MUST_NOT_EXECUTE"),
         "{body}"
     );
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.encoded_fallback_candidates, 2);
+    assert_eq!(snapshot.encoded_native_retries, 1);
+    assert_eq!(snapshot.native_tool_calls, 0);
+    assert_eq!(snapshot.encoded_fallback_tool_calls, 1);
+}
+
+#[tokio::test]
+async fn sync_unavailable_encoded_candidate_records_rejection_without_tool_call() {
+    let marker = r#"[Requesting MissingTool with arguments: {"value":"do-not-run"}]"#;
+    let fixture = json!({
+        "id":"chatcmpl-sync-rejected-encoded",
+        "model":"upstream-model",
+        "choices":[{
+            "message":{"content":marker,"reasoning_content":null,"tool_calls":null},
+            "finish_reason":"stop"
+        }],
+        "usage":{"prompt_tokens":1,"completion_tokens":1}
+    });
+    let (app, state, metrics) = harness_core(
+        vec![Fixture::Json(fixture)],
+        256 * 1024,
+        4 * 1024 * 1024,
+        |_| {},
+    )
+    .await;
+    let mut request = anthropic_request(false);
+    request["tools"] = json!([{
+        "name":"Bash",
+        "description":"Run a command",
+        "input_schema":{"type":"object","properties":{"command":{"type":"string"}}}
+    }]);
+
+    let (status, body) = call(app, request).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(state.requests.lock().await.len(), 1);
+    assert!(!body.contains("tool_use"), "{body}");
+    assert!(!body.contains("do-not-run"), "{body}");
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.encoded_fallback_candidates, 1);
+    assert_eq!(snapshot.encoded_fallback_rejections, 1);
+    assert_eq!(snapshot.encoded_native_retries, 0);
+    assert_eq!(snapshot.native_tool_calls, 0);
+    assert_eq!(snapshot.encoded_fallback_tool_calls, 0);
+}
+
+#[tokio::test]
+async fn sync_literal_encoded_candidate_records_suppression_without_tool_call() {
+    let marker = r#"[Requesting Bash with arguments: {"command":"printf SHOULD_NOT_RUN"}]"#;
+    let fixture = json!({
+        "id":"chatcmpl-sync-literal-encoded",
+        "model":"upstream-model",
+        "choices":[{
+            "message":{"content":marker,"reasoning_content":null,"tool_calls":null},
+            "finish_reason":"stop"
+        }],
+        "usage":{"prompt_tokens":1,"completion_tokens":1}
+    });
+    let (app, state, metrics) = harness_core(
+        vec![Fixture::Json(fixture)],
+        256 * 1024,
+        4 * 1024 * 1024,
+        |_| {},
+    )
+    .await;
+    let mut request = anthropic_request(false);
+    request["messages"] = json!([{
+        "role":"user",
+        "content":format!("Output exactly this literal text and do not execute it: {marker}")
+    }]);
+    request["tools"] = json!([{
+        "name":"Bash",
+        "description":"Run a command",
+        "input_schema":{
+            "type":"object",
+            "properties":{"command":{"type":"string"}},
+            "required":["command"]
+        }
+    }]);
+
+    let (status, body) = call(app, request).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(state.requests.lock().await.len(), 1);
+    assert!(body.contains("SHOULD_NOT_RUN"), "{body}");
+    assert!(!body.contains("\"type\":\"tool_use\""), "{body}");
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.encoded_fallback_candidates, 1);
+    assert_eq!(snapshot.literal_marker_suppressions, 1);
+    assert_eq!(snapshot.encoded_native_retries, 0);
+    assert_eq!(snapshot.native_tool_calls, 0);
+    assert_eq!(snapshot.encoded_fallback_tool_calls, 0);
 }
 
 #[tokio::test]
@@ -1495,7 +1604,13 @@ async fn streaming_encoded_candidate_retries_native_before_tool_use() {
         .into_bytes(),
         b"data: [DONE]\n\n".to_vec(),
     ];
-    let (app, state) = harness(vec![Fixture::Sse(first), Fixture::Sse(native)]).await;
+    let (app, state, metrics) = harness_core(
+        vec![Fixture::Sse(first), Fixture::Sse(native)],
+        256 * 1024,
+        4 * 1024 * 1024,
+        |_| {},
+    )
+    .await;
     let mut request = anthropic_request(true);
     request["tools"] = json!([{
         "name":"Bash",
@@ -1516,6 +1631,11 @@ async fn streaming_encoded_candidate_retries_native_before_tool_use() {
     assert!(!body.contains("ENCODED_SHOULD_NOT_EXECUTE"), "{body}");
     assert_eq!(body.matches("event: message_start").count(), 1, "{body}");
     assert_eq!(body.matches("event: message_stop").count(), 1, "{body}");
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.encoded_fallback_candidates, 1);
+    assert_eq!(snapshot.encoded_native_retries, 1);
+    assert_eq!(snapshot.native_tool_calls, 1);
+    assert_eq!(snapshot.encoded_fallback_tool_calls, 0);
 }
 
 #[tokio::test]
@@ -1599,7 +1719,13 @@ async fn streaming_encoded_candidate_after_native_retry_uses_strict_fallback() {
         .into_bytes(),
         b"data: [DONE]\n\n".to_vec(),
     ];
-    let (app, state) = harness(vec![Fixture::Sse(first), Fixture::Sse(fallback)]).await;
+    let (app, state, metrics) = harness_core(
+        vec![Fixture::Sse(first), Fixture::Sse(fallback)],
+        256 * 1024,
+        4 * 1024 * 1024,
+        |_| {},
+    )
+    .await;
     let mut request = anthropic_request(true);
     request["tools"] = json!([{
         "name":"Bash",
@@ -1620,6 +1746,11 @@ async fn streaming_encoded_candidate_after_native_retry_uses_strict_fallback() {
     assert!(!body.contains("FIRST_ENCODED_MUST_NOT_EXECUTE"), "{body}");
     assert_eq!(body.matches("event: message_start").count(), 1, "{body}");
     assert_eq!(body.matches("event: message_stop").count(), 1, "{body}");
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.encoded_fallback_candidates, 2);
+    assert_eq!(snapshot.encoded_native_retries, 1);
+    assert_eq!(snapshot.native_tool_calls, 0);
+    assert_eq!(snapshot.encoded_fallback_tool_calls, 1);
 }
 
 #[tokio::test]

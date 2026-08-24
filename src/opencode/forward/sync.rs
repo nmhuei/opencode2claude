@@ -10,6 +10,7 @@ use super::common::{
 use crate::error::BridgeError;
 use crate::handlers::MessagesRequest;
 use crate::history::HistoryCapture;
+use crate::observability::ToolProtocolMetricClass;
 use crate::opencode::forward::fallback_intent::{
     classify_encoded_tool_intent, literal_meta_output_requested, FallbackDecision,
     FallbackIntentContext,
@@ -294,6 +295,29 @@ pub async fn forward_to_llm_sync(
             }
         }
 
+        let encoded_candidate_present =
+            !dsml_tool_calls.is_empty() || !compat_tool_calls.is_empty() || parse_error.is_some();
+        if encoded_candidate_present {
+            state
+                .metrics
+                .record_tool_protocol(ToolProtocolMetricClass::EncodedCandidate, 1);
+            capture.tool_protocol("encoded_candidate", "encoded", 1, None);
+        }
+        if encoded_candidate_present
+            && fallback_decision == FallbackDecision::PassThrough
+            && literal_meta_output_requested(&payload)
+        {
+            state
+                .metrics
+                .record_tool_protocol(ToolProtocolMetricClass::LiteralMarkerSuppression, 1);
+            capture.tool_protocol(
+                "literal_marker_suppressed",
+                "encoded",
+                1,
+                Some("explicit literal/meta-output user intent"),
+            );
+        }
+
         if native_precedence {
             // Native protocol wins the turn. Complete encoded markers have
             // already been removed from the cleaned text above; discard their
@@ -313,6 +337,15 @@ pub async fn forward_to_llm_sync(
                 FallbackDecision::RetryNative => {
                     if encoded_native_retries < MAX_SYNC_ENCODED_NATIVE_RETRIES {
                         encoded_native_retries = encoded_native_retries.saturating_add(1);
+                        state
+                            .metrics
+                            .record_tool_protocol(ToolProtocolMetricClass::EncodedNativeRetry, 1);
+                        capture.tool_protocol(
+                            "native_retry",
+                            "encoded_recovery",
+                            1,
+                            Some("retry encoded candidate through native protocol"),
+                        );
                         capture.attempt_finished(
                             Some(status.as_u16()),
                             "retrying",
@@ -330,6 +363,15 @@ pub async fn forward_to_llm_sync(
                     ));
                 }
                 FallbackDecision::Reject => {
+                    state
+                        .metrics
+                        .record_tool_protocol(ToolProtocolMetricClass::EncodedFallbackRejection, 1);
+                    capture.tool_protocol(
+                        "encoded_rejection",
+                        "encoded",
+                        1,
+                        Some("encoded marker named an unavailable tool"),
+                    );
                     let terminal = "The upstream model emitted an encoded request for a tool that is not safely available in this request. No tool call was executed.";
                     capture.append_response(terminal);
                     capture.attempt_finished(
@@ -691,6 +733,8 @@ pub async fn forward_to_llm_sync(
 
         // 3. Native Tool calls
         let mut has_tool_calls = false;
+        let mut native_emitted_count = 0_u64;
+        let mut encoded_emitted_count = 0_u64;
         let mut emitted_tool_fingerprints = HashSet::new();
         if let Some(tool_calls) = &choice.message.tool_calls {
             for tc in tool_calls {
@@ -711,6 +755,7 @@ pub async fn forward_to_llm_sync(
                     continue;
                 }
                 has_tool_calls = true;
+                native_emitted_count = native_emitted_count.saturating_add(1);
                 let input_json = serde_json::to_string(&input_val).unwrap_or_default();
                 capture.tool_call(&correct_name, Some(&input_json));
                 content_blocks.push(serde_json::json!({
@@ -739,6 +784,7 @@ pub async fn forward_to_llm_sync(
                 continue;
             }
             has_tool_calls = true;
+            encoded_emitted_count = encoded_emitted_count.saturating_add(1);
             let tool_id = format!(
                 "toolu_dsml_{}_{}",
                 std::time::SystemTime::now()
@@ -776,6 +822,7 @@ pub async fn forward_to_llm_sync(
                 continue;
             }
             has_tool_calls = true;
+            encoded_emitted_count = encoded_emitted_count.saturating_add(1);
             let tool_id = format!(
                 "toolu_compat_{}_{}",
                 std::time::SystemTime::now()
@@ -792,6 +839,26 @@ pub async fn forward_to_llm_sync(
                 "name": cased_name,
                 "input": input
             }));
+        }
+
+        if native_emitted_count > 0 {
+            state.metrics.record_tool_protocol(
+                ToolProtocolMetricClass::NativeToolCall,
+                native_emitted_count,
+            );
+            capture.tool_protocol("tool_calls", "native", native_emitted_count, None);
+        }
+        if encoded_emitted_count > 0 {
+            state.metrics.record_tool_protocol(
+                ToolProtocolMetricClass::EncodedFallbackToolCall,
+                encoded_emitted_count,
+            );
+            capture.tool_protocol(
+                "tool_calls",
+                "encoded_fallback",
+                encoded_emitted_count,
+                None,
+            );
         }
 
         // Ensure we always have at least one text or tool_use block in the content list
