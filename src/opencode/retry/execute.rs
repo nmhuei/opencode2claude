@@ -268,9 +268,7 @@ async fn execute_retryable_request<T: RetryableOpenAiRequest>(
                             }
                         }
                         let proxy_index = route.proxy_index;
-                        if proxy_index.is_some() {
-                            retained_rate_limit_route = Some(route);
-                        }
+                        retained_rate_limit_route = Some(route);
                         sleep_rate_limit_backoff(state, retry_count, proxy_index, retry_after)
                             .await;
                         continue;
@@ -332,9 +330,7 @@ async fn execute_retryable_request<T: RetryableOpenAiRequest>(
                             apply_rate_limit_penalty(state, &route, retry_count, None).await;
                             last_failed_proxy = None;
                             let proxy_index = route.proxy_index;
-                            if proxy_index.is_some() {
-                                retained_rate_limit_route = Some(route);
-                            }
+                            retained_rate_limit_route = Some(route);
                             sleep_rate_limit_backoff(state, retry_count, proxy_index, None).await;
                             continue;
                         }
@@ -429,7 +425,8 @@ async fn execute_retryable_request<T: RetryableOpenAiRequest>(
                             "network error through proxy"
                         );
                         state.proxy_pool.write().await.record_failure(index);
-                        last_failed_proxy = Some(index);
+                        last_failed_proxy =
+                            may_change_egress_after_failure(failure_class).then_some(index);
                     } else {
                         warn!(
                             %error,
@@ -700,6 +697,10 @@ async fn clear_rate_limit_penalty_after_success(state: &AppState, route: &Select
         proxy_index = index,
         "same-egress retry succeeded; cleared rate-limit quarantine without switching exits"
     );
+}
+
+fn may_change_egress_after_failure(class: FailureClass) -> bool {
+    matches!(class, FailureClass::Transport | FailureClass::Timeout)
 }
 
 fn retry_metric_class(class: FailureClass) -> RetryMetricClass {
@@ -1066,6 +1067,107 @@ mod tests {
             Some("opencode-warp-4")
         );
         assert_eq!(route.proxy_index, Some(1));
+    }
+
+    #[test]
+    fn hybrid_may_change_egress_only_after_transport_failures() {
+        assert!(may_change_egress_after_failure(FailureClass::Transport));
+        assert!(may_change_egress_after_failure(FailureClass::Timeout));
+        for class in [
+            FailureClass::RateLimit,
+            FailureClass::ProviderClient,
+            FailureClass::ProviderServer,
+            FailureClass::MalformedResponse,
+            FailureClass::Cancelled,
+        ] {
+            assert!(
+                !may_change_egress_after_failure(class),
+                "unexpected {class:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn hybrid_429_retained_proxy_route_never_switches_to_direct() {
+        let state = hybrid_test_state().await;
+        let retained = {
+            let mut pool = state.proxy_pool.write().await;
+            pool.proxies[0].health = HealthState::Healthy;
+            pool.proxies[0].circuit = CircuitState::Closed;
+            let client = pool.proxies[0].client.clone();
+            let proxy_url = pool.proxies[0].url.clone();
+            let lease = pool.begin_lease(0).expect("retry lease");
+            SelectedRoute {
+                client,
+                proxy_url: Some(proxy_url),
+                proxy_index: Some(0),
+                lease: Some(lease),
+                upstream_real_ip: None,
+                metadata: RouteMetadata {
+                    kind: RouteKind::Proxy,
+                    proxy_node: Some("opencode-warp-1".to_string()),
+                },
+            }
+        };
+        state
+            .proxy_subsystem
+            .write()
+            .await
+            .mark_degraded("proxy temporarily unavailable", None);
+
+        let route = select_route_for_attempt(&state, "same-429-request", None, Some(retained))
+            .await
+            .expect("429 retry retains route");
+        assert_eq!(route.metadata.kind, RouteKind::Proxy);
+        assert_eq!(route.proxy_index, Some(0));
+    }
+
+    #[tokio::test]
+    async fn hybrid_429_retained_direct_fallback_never_switches_to_newly_ready_proxy() {
+        let state = hybrid_test_state().await;
+        state
+            .proxy_subsystem
+            .write()
+            .await
+            .mark_degraded("startup", None);
+        let retained = select_route(&state, "initial-direct", None)
+            .await
+            .expect("initial direct fallback");
+        assert_eq!(retained.metadata.kind, RouteKind::DirectHybridFallback);
+
+        {
+            let mut pool = state.proxy_pool.write().await;
+            pool.proxies[0].health = HealthState::Healthy;
+            pool.proxies[0].circuit = CircuitState::Closed;
+        }
+        state.proxy_subsystem.write().await.mark_ready();
+
+        let route = select_route_for_attempt(&state, "same-429-request", None, Some(retained))
+            .await
+            .expect("429 retry retains direct fallback route");
+        assert_eq!(route.metadata.kind, RouteKind::DirectHybridFallback);
+        assert!(route.proxy_index.is_none());
+    }
+
+    #[tokio::test]
+    async fn hybrid_transport_failure_can_use_direct_when_no_proxy_remains() {
+        let state = hybrid_test_state().await;
+        {
+            let mut pool = state.proxy_pool.write().await;
+            pool.proxies[0].health = HealthState::Healthy;
+            pool.proxies[0].circuit = CircuitState::Closed;
+            pool.proxies[1].health = HealthState::Unhealthy;
+            pool.proxies[1].circuit = CircuitState::Open {
+                until: std::time::Instant::now() + Duration::from_secs(60),
+            };
+        }
+        state.proxy_subsystem.write().await.mark_ready();
+
+        let route = select_route(&state, "transport-retry", Some(0))
+            .await
+            .expect("transport recovery may use direct");
+        assert_eq!(route.metadata.kind, RouteKind::DirectHybridFallback);
+        assert!(route.proxy_index.is_none());
     }
 
     #[tokio::test]
