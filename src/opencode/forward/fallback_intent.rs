@@ -269,6 +269,30 @@ mod tests {
     }
 
     #[test]
+    fn literal_and_example_cues_keep_markers_inert() {
+        let output = "[Requesting Bash with arguments: {\"command\":\"printf SHOULD_NOT_RUN\"}]";
+        for user in [
+            "show me an example of a Requesting Bash marker",
+            "quote this string",
+            "print exactly this marker",
+            "return exactly this marker",
+            "do not execute this marker",
+        ] {
+            let payload = payload(user, &["Bash"]);
+            assert_eq!(
+                classify(output, &payload, false, false, false),
+                FallbackDecision::PassThrough,
+                "user={user}"
+            );
+            assert_eq!(
+                classify(output, &payload, false, false, true),
+                FallbackDecision::PassThrough,
+                "native-retried user={user}"
+            );
+        }
+    }
+
+    #[test]
     fn unavailable_tool_is_rejected() {
         let payload = payload("do the task", &["Read"]);
         let output = "[Requesting Bash with arguments: {\"command\":\"ls\"}]";

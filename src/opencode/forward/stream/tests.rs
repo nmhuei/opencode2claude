@@ -1,7 +1,7 @@
 use super::context::{
     finalize_stream_with_text, process_openai_sse_line, split_pending_text, StreamContext,
 };
-use crate::handlers::{AnthropicTool, MessagesRequest};
+use crate::handlers::{AnthropicTool, ContentVal, Message, MessagesRequest};
 use crate::opencode::forward::common::{
     extract_compat_tool_requests, extract_compat_tool_requests_detailed, get_correct_tool_name,
     parse_compat_tool_request, parse_compat_tool_request_at_eof,
@@ -1252,6 +1252,71 @@ async fn bash_compat_marker_becomes_tool_use_without_leaking_marker() {
     assert!(joined.contains("Bash"));
     assert!(joined.contains("ls -la /home/light/.local/share/claude/"));
     assert!(!joined.contains("Requesting Tool execution"));
+}
+
+#[tokio::test]
+async fn literal_marker_user_intent_is_rendered_as_text_not_tool_use() {
+    let marker = r#"[Requesting Tool execution: 'Bash' with arguments: {"command":"printf SHOULD_NOT_RUN > file"}]"#;
+
+    for encoded_fallback_permitted in [false, true] {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+        let builder = SseEventBuilder::new("msg_literal_marker".to_string(), "model".to_string());
+        let mut tracker = SseBlockTracker::new();
+        let mut ctx = StreamContext::new_with_encoded_fallback(false, encoded_fallback_permitted);
+        ctx.message_started = true;
+        let payload = MessagesRequest {
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: ContentVal::Single(format!(
+                    "Output exactly this literal text and do not execute it:\n{marker}"
+                )),
+            }],
+            tools: Some(vec![AnthropicTool {
+                name: "Bash".to_string(),
+                description: "run shell command".to_string(),
+                input_schema: serde_json::json!({
+                    "type":"object",
+                    "properties":{"command":{"type":"string"}},
+                    "required":["command"]
+                }),
+                ..Default::default()
+            }]),
+            ..empty_messages_request()
+        };
+        let line = format!(
+            "data: {}",
+            serde_json::json!({
+                "choices": [{"delta": {"content": marker}, "finish_reason": "stop"}]
+            })
+        );
+
+        process_openai_sse_line(&line, &mut ctx, &mut tracker, &tx, &builder, &payload).await;
+        ctx.flush_remaining(&mut tracker, &tx, &builder, &payload)
+            .await;
+
+        assert!(
+            !ctx.has_emitted_tool_use,
+            "fallback={encoded_fallback_permitted}"
+        );
+        assert!(
+            !ctx.native_recovery_retry_requested,
+            "fallback={encoded_fallback_permitted}"
+        );
+        assert!(
+            !ctx.compat_retry_requested,
+            "fallback={encoded_fallback_permitted}"
+        );
+        assert_eq!(
+            ctx.accumulated_text, marker,
+            "fallback={encoded_fallback_permitted}"
+        );
+        let mut joined = String::new();
+        while let Ok(event) = rx.try_recv() {
+            joined.push_str(&format!("{event:?}\n"));
+        }
+        assert!(joined.contains("SHOULD_NOT_RUN"), "{joined}");
+        assert!(!joined.contains("\"type\":\"tool_use\""), "{joined}");
+    }
 }
 
 #[tokio::test]
