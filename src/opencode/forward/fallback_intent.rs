@@ -54,7 +54,9 @@ pub(super) fn classify_encoded_tool_intent(
     let first_non_whitespace = text
         .char_indices()
         .find_map(|(idx, ch)| (!ch.is_whitespace()).then_some(idx));
-    if first_non_whitespace != Some(candidate_start) {
+    if first_non_whitespace != Some(candidate_start)
+        && !is_safe_tool_intent_preamble(&text[..candidate_start])
+    {
         return FallbackDecision::PassThrough;
     }
 
@@ -84,6 +86,49 @@ fn encoded_candidate_start(text: &str) -> Option<usize> {
     .into_iter()
     .flatten()
     .min()
+}
+
+fn is_safe_tool_intent_preamble(prefix: &str) -> bool {
+    let normalized = prefix
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_ascii_lowercase();
+    if normalized.is_empty() || normalized.len() > 320 {
+        return false;
+    }
+    if [
+        "show",
+        "example",
+        "quote",
+        "literal",
+        "demonstrat",
+        "do not execute",
+        "don't execute",
+        "dont execute",
+        "syntax only",
+    ]
+    .iter()
+    .any(|cue| normalized.contains(cue))
+    {
+        return false;
+    }
+
+    let first_person_execution = [
+        "i'll ",
+        "i will ",
+        "let me ",
+        "i’m going to ",
+        "i'm going to ",
+    ]
+    .iter()
+    .any(|cue| normalized.starts_with(cue));
+    let execution_verb = [" use ", " invoke ", " emit ", " call ", " request "]
+        .iter()
+        .any(|cue| format!(" {normalized} ").contains(cue));
+
+    first_person_execution && execution_verb
 }
 
 fn is_complete_whole_output_candidate(candidate: &str) -> bool {
@@ -337,6 +382,26 @@ mod tests {
         let output = "[Requesting Bash with arguments: {\"command\":\"ls\"}]";
         assert_eq!(
             classify(output, &payload, true, false, false),
+            FallbackDecision::PassThrough
+        );
+    }
+
+    #[test]
+    fn first_person_tool_intent_preamble_can_request_native_retry() {
+        let payload = payload("Read ./compat_read.txt and return its token.", &["Read"]);
+        let output = "I'll emit the Read request in bridge compatibility-marker syntax so the proxy recovers it as a tool call.\n\n[Requesting Read with arguments: {\"file_path\":\"./compat_read.txt\"}]";
+        assert_eq!(
+            classify(output, &payload, false, false, false),
+            FallbackDecision::RetryNative
+        );
+    }
+
+    #[test]
+    fn explanatory_marker_preamble_remains_inert() {
+        let payload = payload("Explain the compatibility protocol.", &["Read"]);
+        let output = "Here is an example marker for explanation: [Requesting Read with arguments: {\"file_path\":\"./compat_read.txt\"}]";
+        assert_eq!(
+            classify(output, &payload, false, false, false),
             FallbackDecision::PassThrough
         );
     }
