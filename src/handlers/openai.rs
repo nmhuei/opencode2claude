@@ -196,6 +196,7 @@ async fn handle_chat_completions_inner(
             return Err(error);
         }
     };
+    capture.attempt_route(upstream.route());
     let status =
         StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let max_capture_bytes = state.config.history.max_response_bytes;

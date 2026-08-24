@@ -1,6 +1,7 @@
 use super::redact::{as_content, capture_json, capture_text, preview};
 use super::types::*;
 use crate::config::{HistoryCaptureMode, HistoryConfig};
+use crate::proxy_pool::{RouteKind, RouteMetadata};
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 use serde_json::{json, Value};
 use std::fs;
@@ -356,7 +357,7 @@ impl HistoryStore {
             .collect::<Result<Vec<_>, _>>()?;
 
         let mut attempt_statement = connection.prepare(
-            "SELECT attempt_number, loop_number, attempt_kind, model, proxy_node, started_at_ms,
+            "SELECT attempt_number, loop_number, attempt_kind, model, proxy_node, route_kind, started_at_ms,
                     completed_at_ms, duration_ms, http_status, status, finish_reason, error_type,
                     error_message, payload_sha256, payload_changed
              FROM history_attempts WHERE request_id = ?1 ORDER BY attempt_number, id",
@@ -369,16 +370,20 @@ impl HistoryStore {
                     attempt_kind: row.get(2)?,
                     model: row.get(3)?,
                     proxy_node: row.get(4)?,
-                    started_at_ms: row.get::<_, i64>(5)?.max(0) as u64,
-                    completed_at_ms: optional_u64(row, 6)?,
-                    duration_ms: optional_u64(row, 7)?,
-                    http_status: row.get::<_, Option<i64>>(8)?.map(|value| value as u16),
-                    status: row.get(9)?,
-                    finish_reason: row.get(10)?,
-                    error_type: row.get(11)?,
-                    error_message: row.get(12)?,
-                    payload_sha256: row.get(13)?,
-                    payload_changed: row.get::<_, i64>(14)? != 0,
+                    route_kind: row
+                        .get::<_, Option<String>>(5)?
+                        .as_deref()
+                        .and_then(parse_route_kind),
+                    started_at_ms: row.get::<_, i64>(6)?.max(0) as u64,
+                    completed_at_ms: optional_u64(row, 7)?,
+                    duration_ms: optional_u64(row, 8)?,
+                    http_status: row.get::<_, Option<i64>>(9)?.map(|value| value as u16),
+                    status: row.get(10)?,
+                    finish_reason: row.get(11)?,
+                    error_type: row.get(12)?,
+                    error_message: row.get(13)?,
+                    payload_sha256: row.get(14)?,
+                    payload_changed: row.get::<_, i64>(15)? != 0,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -637,6 +642,7 @@ impl HistoryCapture {
                 attempt_kind: attempt_kind.to_string(),
                 model: model.map(ToOwned::to_owned),
                 proxy_node: None,
+                route_kind: None,
                 started_at_ms: now_ms(),
                 completed_at_ms: None,
                 duration_ms: None,
@@ -654,6 +660,26 @@ impl HistoryCapture {
             "upstream_attempt_started",
             "info",
             json!({"attempt_kind":attempt_kind,"loop_number":loop_number,"model":model}),
+        );
+    }
+
+    pub fn attempt_route(&self, route: &RouteMetadata) {
+        let Some(inner) = &self.inner else {
+            return;
+        };
+        let mut draft = lock_draft(inner);
+        if let Some(attempt) = draft.attempts.last_mut() {
+            attempt.proxy_node = route.proxy_node.clone();
+            attempt.route_kind = Some(route.kind);
+        }
+        add_event_locked(
+            &mut draft,
+            "upstream_route_selected",
+            "info",
+            json!({
+                "route_kind": route_kind_label(route.kind),
+                "proxy_node": route.proxy_node,
+            }),
         );
     }
 
@@ -1194,10 +1220,10 @@ fn complete_record(connection: &Connection, record: &CompletedRecord) -> Result<
     for attempt in &record.attempts {
         transaction.execute(
             "INSERT INTO history_attempts(
-                request_id, attempt_number, loop_number, attempt_kind, model, proxy_node,
+                request_id, attempt_number, loop_number, attempt_kind, model, proxy_node, route_kind,
                 started_at_ms, completed_at_ms, duration_ms, http_status, status, finish_reason,
                 error_type, error_message, payload_sha256, payload_changed
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
             params![
                 record.id,
                 i64::from(attempt.attempt_number),
@@ -1205,6 +1231,7 @@ fn complete_record(connection: &Connection, record: &CompletedRecord) -> Result<
                 attempt.attempt_kind,
                 attempt.model,
                 attempt.proxy_node,
+                attempt.route_kind.map(route_kind_label),
                 as_i64(attempt.started_at_ms),
                 attempt.completed_at_ms.map(as_i64),
                 attempt.duration_ms.map(as_i64),
@@ -1348,15 +1375,16 @@ fn merge_recovery_into_parent(
         )?;
         transaction.execute(
             "INSERT INTO history_attempts(
-                request_id, attempt_number, loop_number, attempt_kind, model, proxy_node,
+                request_id, attempt_number, loop_number, attempt_kind, model, proxy_node, route_kind,
                 started_at_ms, completed_at_ms, duration_ms, http_status, status, finish_reason,
                 error_type, error_message, payload_sha256, payload_changed
-             ) VALUES (?1,?2,0,'response_recovery',?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,1)",
+             ) VALUES (?1,?2,0,'response_recovery',?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,1)",
             params![
                 parent_id,
                 next_attempt_number,
                 attempt.model,
                 attempt.proxy_node,
+                attempt.route_kind.map(route_kind_label),
                 as_i64(attempt.started_at_ms),
                 attempt.completed_at_ms.map(as_i64),
                 attempt.duration_ms.map(as_i64),
@@ -1567,6 +1595,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), HistoryError> {
             attempt_kind TEXT NOT NULL,
             model TEXT,
             proxy_node TEXT,
+            route_kind TEXT,
             started_at_ms INTEGER NOT NULL,
             completed_at_ms INTEGER,
             duration_ms INTEGER,
@@ -1606,9 +1635,44 @@ fn initialize_schema(connection: &Connection) -> Result<(), HistoryError> {
          CREATE INDEX IF NOT EXISTS idx_history_content_request ON history_content(request_id, kind);
          CREATE INDEX IF NOT EXISTS idx_history_attempt_request ON history_attempts(request_id, attempt_number);
          CREATE INDEX IF NOT EXISTS idx_history_event_request ON history_events(request_id, sequence);
-         PRAGMA user_version=1;",
+         PRAGMA user_version=2;",
     )?;
+    ensure_history_attempt_route_kind_column(connection)?;
     Ok(())
+}
+
+fn ensure_history_attempt_route_kind_column(connection: &Connection) -> Result<(), HistoryError> {
+    let mut statement = connection.prepare("PRAGMA table_info(history_attempts)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if !columns.iter().any(|column| column == "route_kind") {
+        connection.execute(
+            "ALTER TABLE history_attempts ADD COLUMN route_kind TEXT",
+            [],
+        )?;
+    }
+    connection.pragma_update(None, "user_version", 2_i64)?;
+    Ok(())
+}
+
+fn route_kind_label(kind: RouteKind) -> &'static str {
+    match kind {
+        RouteKind::Direct => "direct",
+        RouteKind::Proxy => "proxy",
+        RouteKind::Standby => "standby",
+        RouteKind::DirectHybridFallback => "direct-hybrid-fallback",
+    }
+}
+
+fn parse_route_kind(value: &str) -> Option<RouteKind> {
+    match value {
+        "direct" => Some(RouteKind::Direct),
+        "proxy" => Some(RouteKind::Proxy),
+        "standby" => Some(RouteKind::Standby),
+        "direct-hybrid-fallback" => Some(RouteKind::DirectHybridFallback),
+        _ => None,
+    }
 }
 
 fn load_persisted_settings(
@@ -1742,6 +1806,7 @@ pub fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proxy_pool::{RouteKind, RouteMetadata};
     use std::time::Duration;
 
     fn test_config(path: PathBuf) -> HistoryConfig {
@@ -1750,6 +1815,116 @@ mod tests {
             path: Some(path),
             ..crate::config::BridgeConfig::default().history
         }
+    }
+
+    #[test]
+    fn attempt_route_round_trips_route_kind_and_proxy_node() {
+        let root = std::env::temp_dir().join(format!("oc2-history-route-{}", now_ms()));
+        let path = root.join("history.sqlite3");
+        let store = HistoryStore::open(test_config(path.clone()), root.join("fallback.sqlite3"));
+        let capture = store.begin(HistoryRequestStart {
+            id: "req-route".to_string(),
+            conversation_id: None,
+            parent_request_id: None,
+            protocol: "anthropic".to_string(),
+            endpoint: "/v1/messages".to_string(),
+            operation_kind: "messages".to_string(),
+            client_key_id: Some("client".to_string()),
+            client_name: Some("Client".to_string()),
+            client_environment: Some("test".to_string()),
+            requested_model: Some("test-model".to_string()),
+            effective_model: Some("test-model".to_string()),
+            stream: false,
+            thinking_requested: false,
+            reasoning_effort: None,
+            reasoning_budget_tokens: None,
+            inbound: Some(json!({"messages":[{"role":"user","content":"test"}]})),
+        });
+        capture.effective_json(
+            &json!({"model":"test-model","messages":[]}),
+            Some("test-model"),
+            "primary",
+            1,
+        );
+        capture.attempt_route(&RouteMetadata {
+            kind: RouteKind::Standby,
+            proxy_node: Some("opencode-warp-4".to_string()),
+        });
+        capture.attempt_finished(Some(200), "completed", Some("stop"), None, None);
+        capture.finish_success(200, Some("stop"), Some("test-model"));
+        std::thread::sleep(Duration::from_millis(120));
+        drop(store);
+
+        let reopened = HistoryStore::open(test_config(path), root.join("fallback-2.sqlite3"));
+        let detail = reopened.detail("req-route").unwrap().unwrap();
+        assert_eq!(detail.attempts.len(), 1);
+        assert_eq!(detail.attempts[0].route_kind, Some(RouteKind::Standby));
+        assert_eq!(
+            detail.attempts[0].proxy_node.as_deref(),
+            Some("opencode-warp-4")
+        );
+        drop(reopened);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn history_route_kind_migration_is_idempotent_for_existing_database() {
+        let root = std::env::temp_dir().join(format!("oc2-history-migrate-{}", now_ms()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("history.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE history_attempts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    request_id TEXT NOT NULL,
+                    attempt_number INTEGER NOT NULL,
+                    loop_number INTEGER NOT NULL DEFAULT 0,
+                    attempt_kind TEXT NOT NULL,
+                    model TEXT,
+                    proxy_node TEXT,
+                    started_at_ms INTEGER NOT NULL,
+                    completed_at_ms INTEGER,
+                    duration_ms INTEGER,
+                    http_status INTEGER,
+                    status TEXT NOT NULL,
+                    finish_reason TEXT,
+                    error_type TEXT,
+                    error_message TEXT,
+                    payload_sha256 TEXT,
+                    payload_changed INTEGER NOT NULL DEFAULT 0
+                );
+                PRAGMA user_version=1;",
+            )
+            .unwrap();
+
+        initialize_schema(&connection).unwrap();
+        initialize_schema(&connection).unwrap();
+
+        let mut statement = connection
+            .prepare("PRAGMA table_info(history_attempts)")
+            .unwrap();
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            columns
+                .iter()
+                .filter(|column| *column == "route_kind")
+                .count(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        drop(statement);
+        drop(connection);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
