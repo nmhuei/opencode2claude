@@ -246,7 +246,7 @@ pub async fn forward_to_llm_sync(
                             payload: &payload,
                             visible_text_emitted: false,
                             native_tool_emitted: false,
-                            native_retry_attempted: encoded_native_retries > 0,
+                            parser_activated: false,
                         },
                     )
                 })

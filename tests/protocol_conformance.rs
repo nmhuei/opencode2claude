@@ -394,10 +394,10 @@ async fn sync_native_call_ignores_unavailable_encoded_marker() {
 }
 
 #[tokio::test]
-async fn sync_encoded_candidate_retries_native_before_tool_use() {
-    let encoded_marker = r#"[Requesting Tool execution: 'Bash' with arguments: {"command":"printf SYNC_ENCODED_SHOULD_NOT_EXECUTE"}]"#;
+async fn sync_lazy_encoded_candidate_uses_fallback_without_native_retry() {
+    let encoded_marker = r#"[Requesting Tool execution: 'Bash' with arguments: {"command":"printf SYNC_LAZY_FALLBACK_OK"}]"#;
     let encoded = json!({
-        "id":"chatcmpl-sync-encoded-first",
+        "id":"chatcmpl-sync-lazy-encoded",
         "model":"upstream-model",
         "choices":[{
             "message":{"content":encoded_marker,"reasoning_content":null,"tool_calls":null},
@@ -405,27 +405,8 @@ async fn sync_encoded_candidate_retries_native_before_tool_use() {
         }],
         "usage":{"prompt_tokens":1,"completion_tokens":1}
     });
-    let native = json!({
-        "id":"chatcmpl-sync-native-recovery",
-        "model":"upstream-model",
-        "choices":[{
-            "message":{
-                "content":null,
-                "reasoning_content":null,
-                "tool_calls":[{
-                    "id":"call-sync-native-recovery",
-                    "function":{
-                        "name":"Bash",
-                        "arguments":"{\"command\":\"printf SYNC_NATIVE_RECOVERY_OK\"}"
-                    }
-                }]
-            },
-            "finish_reason":"tool_calls"
-        }],
-        "usage":{"prompt_tokens":1,"completion_tokens":1}
-    });
     let (app, state, metrics) = harness_core(
-        vec![Fixture::Json(encoded), Fixture::Json(native)],
+        vec![Fixture::Json(encoded)],
         256 * 1024,
         4 * 1024 * 1024,
         |_| {},
@@ -445,79 +426,24 @@ async fn sync_encoded_candidate_retries_native_before_tool_use() {
     let (status, body) = call(app, request).await;
 
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(state.requests.lock().await.len(), 2);
-    let response: Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(response["content"].as_array().unwrap().len(), 1, "{body}");
-    assert_eq!(response["content"][0]["type"], "tool_use");
-    assert_eq!(response["content"][0]["id"], "call-sync-native-recovery");
-    assert_eq!(response["content"][0]["name"], "Bash");
-    assert_eq!(
-        response["content"][0]["input"]["command"],
-        "printf SYNC_NATIVE_RECOVERY_OK"
-    );
-    assert!(!body.contains("SYNC_ENCODED_SHOULD_NOT_EXECUTE"), "{body}");
-    let snapshot = metrics.snapshot();
-    assert_eq!(snapshot.encoded_fallback_candidates, 1);
-    assert_eq!(snapshot.encoded_native_retries, 1);
-    assert_eq!(snapshot.native_tool_calls, 1);
-    assert_eq!(snapshot.encoded_fallback_tool_calls, 0);
-}
-
-#[tokio::test]
-async fn sync_encoded_candidate_after_native_retry_uses_strict_fallback() {
-    let first_marker = r#"[Requesting Tool execution: 'Bash' with arguments: {"command":"printf SYNC_FIRST_ENCODED_MUST_NOT_EXECUTE"}]"#;
-    let fallback_marker = r#"[Requesting Tool execution: 'Bash' with arguments: {"command":"printf SYNC_STRICT_FALLBACK_OK"}]"#;
-    let fixture = |id: &str, marker: &str| {
-        json!({
-            "id":id,
-            "model":"upstream-model",
-            "choices":[{
-                "message":{"content":marker,"reasoning_content":null,"tool_calls":null},
-                "finish_reason":"stop"
-            }],
-            "usage":{"prompt_tokens":1,"completion_tokens":1}
-        })
-    };
-    let (app, state, metrics) = harness_core(
-        vec![
-            Fixture::Json(fixture("chatcmpl-sync-first-encoded", first_marker)),
-            Fixture::Json(fixture("chatcmpl-sync-fallback-encoded", fallback_marker)),
-        ],
-        256 * 1024,
-        4 * 1024 * 1024,
-        |_| {},
-    )
-    .await;
-    let mut request = anthropic_request(false);
-    request["tools"] = json!([{
-        "name":"Bash",
-        "description":"Run a harmless command",
-        "input_schema":{
-            "type":"object",
-            "properties":{"command":{"type":"string"}},
-            "required":["command"]
-        }
-    }]);
-
-    let (status, body) = call(app, request).await;
-
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(state.requests.lock().await.len(), 2);
+    assert_eq!(state.requests.lock().await.len(), 1, "{body}");
     let response: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(response["content"].as_array().unwrap().len(), 1, "{body}");
     assert_eq!(response["content"][0]["type"], "tool_use");
     assert_eq!(response["content"][0]["name"], "Bash");
     assert_eq!(
         response["content"][0]["input"]["command"],
-        "printf SYNC_STRICT_FALLBACK_OK"
+        "printf SYNC_LAZY_FALLBACK_OK"
     );
     assert!(
-        !body.contains("SYNC_FIRST_ENCODED_MUST_NOT_EXECUTE"),
+        response["content"][0]["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("toolu_compat_")),
         "{body}"
     );
     let snapshot = metrics.snapshot();
-    assert_eq!(snapshot.encoded_fallback_candidates, 2);
-    assert_eq!(snapshot.encoded_native_retries, 1);
+    assert_eq!(snapshot.encoded_fallback_candidates, 1);
+    assert_eq!(snapshot.encoded_native_retries, 0);
     assert_eq!(snapshot.native_tool_calls, 0);
     assert_eq!(snapshot.encoded_fallback_tool_calls, 1);
 }
@@ -1332,7 +1258,7 @@ async fn streaming_direct_cron_marker_is_one_tool_block_without_leak() {
     assert_eq!(body.matches("toolu_compat_").count(), 1, "{body}");
     assert!(!body.contains("Requesting CronCreate"), "{body}");
     assert!(body.contains("CRON_PARSE_VERIFY_OK"), "{body}");
-    assert_eq!(state.requests.lock().await.len(), 2);
+    assert_eq!(state.requests.lock().await.len(), 1);
 }
 
 #[tokio::test]
@@ -1361,7 +1287,7 @@ async fn streaming_reasoning_and_text_duplicate_cron_executes_once() {
         1,
         "{body}"
     );
-    assert_eq!(state.requests.lock().await.len(), 2);
+    assert_eq!(state.requests.lock().await.len(), 1);
 }
 
 #[tokio::test]
@@ -1394,7 +1320,7 @@ async fn sync_reasoning_marker_and_false_success_text_emit_only_tool_use() {
     assert_eq!(response["stop_reason"], "tool_use");
     assert!(!body.contains("Requesting CronCreate"), "{body}");
     assert!(!body.contains("tạo thành công"), "{body}");
-    assert_eq!(state.requests.lock().await.len(), 2);
+    assert_eq!(state.requests.lock().await.len(), 1);
 }
 
 #[tokio::test]
@@ -1448,7 +1374,7 @@ async fn sync_generic_xml_bash_marker_maps_to_one_tool_use() {
     );
     assert!(!body.contains("tool_calls"), "{body}");
     assert!(!body.contains("<invoke"), "{body}");
-    assert_eq!(state.requests.lock().await.len(), 2);
+    assert_eq!(state.requests.lock().await.len(), 1);
 }
 
 #[tokio::test]
@@ -1516,11 +1442,11 @@ async fn streaming_generic_xml_agent_marker_is_fragment_safe_and_exact_once() {
     assert!(body.contains("\"stop_reason\":\"tool_use\""), "{body}");
     assert!(!body.contains("tool_calls"), "{body}");
     assert!(!body.contains("<invoke"), "{body}");
-    assert_eq!(state.requests.lock().await.len(), 2);
+    assert_eq!(state.requests.lock().await.len(), 1);
 }
 
 #[tokio::test]
-async fn streaming_agent_compat_recovers_after_native_retry_fails() {
+async fn streaming_agent_compat_uses_lazy_fallback_exact_once() {
     let marker = r#"[Requesting Agent with arguments: {"description":"Compat fanout","prompt":"Inspect parser recovery and return evidence.","subagent_type":"general-purpose"}]"#;
     let response = || {
         vec![
@@ -1556,7 +1482,7 @@ async fn streaming_agent_compat_recovers_after_native_retry_fails() {
     let (status, body) = call(app, request).await;
 
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(state.requests.lock().await.len(), 2);
+    assert_eq!(state.requests.lock().await.len(), 1);
     assert_eq!(body.matches("\"type\":\"tool_use\"").count(), 1, "{body}");
     assert_eq!(body.matches("\"name\":\"Agent\"").count(), 1, "{body}");
     assert!(body.contains("Compat fanout"), "{body}");
@@ -1569,9 +1495,9 @@ async fn streaming_agent_compat_recovers_after_native_retry_fails() {
 }
 
 #[tokio::test]
-async fn streaming_encoded_candidate_retries_native_before_tool_use() {
-    let encoded_marker = r#"[Requesting Tool execution: 'Bash' with arguments: {"command":"printf ENCODED_SHOULD_NOT_EXECUTE"}]"#;
-    let first = vec![
+async fn streaming_lazy_encoded_candidate_uses_fallback_without_native_retry() {
+    let encoded_marker = r#"[Requesting Tool execution: 'Bash' with arguments: {"command":"printf STREAM_LAZY_FALLBACK_OK"}]"#;
+    let encoded = vec![
         format!(
             "data: {}\n\n",
             json!({
@@ -1584,28 +1510,8 @@ async fn streaming_encoded_candidate_retries_native_before_tool_use() {
         .into_bytes(),
         b"data: [DONE]\n\n".to_vec(),
     ];
-    let native = vec![
-        format!(
-            "data: {}\n\n",
-            json!({
-                "choices":[{
-                    "delta":{"tool_calls":[{
-                        "index":0,
-                        "id":"call_native_recovery",
-                        "function":{
-                            "name":"Bash",
-                            "arguments":"{\"command\":\"printf NATIVE_RECOVERY_OK\"}"
-                        }
-                    }]},
-                    "finish_reason":"tool_calls"
-                }]
-            })
-        )
-        .into_bytes(),
-        b"data: [DONE]\n\n".to_vec(),
-    ];
     let (app, state, metrics) = harness_core(
-        vec![Fixture::Sse(first), Fixture::Sse(native)],
+        vec![Fixture::Sse(encoded)],
         256 * 1024,
         4 * 1024 * 1024,
         |_| {},
@@ -1614,7 +1520,7 @@ async fn streaming_encoded_candidate_retries_native_before_tool_use() {
     let mut request = anthropic_request(true);
     request["tools"] = json!([{
         "name":"Bash",
-        "description":"Run a command",
+        "description":"Run a harmless command",
         "input_schema":{
             "type":"object",
             "properties":{"command":{"type":"string"}},
@@ -1625,21 +1531,20 @@ async fn streaming_encoded_candidate_retries_native_before_tool_use() {
     let (status, body) = call(app, request).await;
 
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(state.requests.lock().await.len(), 2);
+    assert_eq!(state.requests.lock().await.len(), 1, "{body}");
     assert_eq!(body.matches("\"type\":\"tool_use\"").count(), 1, "{body}");
-    assert!(body.contains("NATIVE_RECOVERY_OK"), "{body}");
-    assert!(!body.contains("ENCODED_SHOULD_NOT_EXECUTE"), "{body}");
-    assert_eq!(body.matches("event: message_start").count(), 1, "{body}");
-    assert_eq!(body.matches("event: message_stop").count(), 1, "{body}");
+    assert!(body.contains("STREAM_LAZY_FALLBACK_OK"), "{body}");
+    assert!(body.contains("toolu_compat_"), "{body}");
+    assert!(!body.contains("Requesting Tool execution"), "{body}");
     let snapshot = metrics.snapshot();
     assert_eq!(snapshot.encoded_fallback_candidates, 1);
-    assert_eq!(snapshot.encoded_native_retries, 1);
-    assert_eq!(snapshot.native_tool_calls, 1);
-    assert_eq!(snapshot.encoded_fallback_tool_calls, 0);
+    assert_eq!(snapshot.encoded_native_retries, 0);
+    assert_eq!(snapshot.native_tool_calls, 0);
+    assert_eq!(snapshot.encoded_fallback_tool_calls, 1);
 }
 
 #[tokio::test]
-async fn streaming_prefixed_encoded_candidate_retries_without_leaking_marker_text() {
+async fn streaming_prefixed_encoded_candidate_uses_lazy_fallback_without_leaking_text() {
     let marker = r#"[Requesting Read with arguments: {"file_path":"./compat_read.txt"}]"#;
     let first_text = format!(
         "I'll emit the Read request in bridge compatibility-marker syntax so the proxy recovers it as a tool call.\n\n{marker}"
@@ -1687,32 +1592,24 @@ async fn streaming_prefixed_encoded_candidate_retries_without_leaking_marker_tex
     let (status, body) = call(app, request).await;
 
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(state.requests.lock().await.len(), 2, "{body}");
+    assert_eq!(state.requests.lock().await.len(), 1, "{body}");
     assert_eq!(body.matches("\"type\":\"tool_use\"").count(), 1, "{body}");
-    assert!(body.contains("call_native_read_recovery"), "{body}");
+    assert!(body.contains("toolu_compat_"), "{body}");
     assert!(!body.contains("Requesting Read"), "{body}");
     assert!(!body.contains("I'll emit the Read request"), "{body}");
 }
 
 #[tokio::test]
-async fn streaming_native_call_wins_over_duplicate_encoded_marker_after_recovery() {
-    let first_marker =
+async fn streaming_native_call_wins_over_duplicate_encoded_marker_same_response() {
+    let marker =
         r#"[Requesting Tool execution: 'Bash' with arguments: {"command":"printf NATIVE_WINS"}]"#;
-    let first = vec![
-        format!(
-            "data: {}\n\n",
-            json!({"choices":[{"delta":{"content":first_marker},"finish_reason":"stop"}]})
-        )
-        .into_bytes(),
-        b"data: [DONE]\n\n".to_vec(),
-    ];
     let duplicate_and_native = vec![
         format!(
             "data: {}\n\n",
             json!({
                 "choices":[{
                     "delta":{
-                        "content":first_marker,
+                        "content":marker,
                         "tool_calls":[{
                             "index":0,
                             "id":"call_native_wins",
@@ -1729,11 +1626,7 @@ async fn streaming_native_call_wins_over_duplicate_encoded_marker_after_recovery
         .into_bytes(),
         b"data: [DONE]\n\n".to_vec(),
     ];
-    let (app, state) = harness(vec![
-        Fixture::Sse(first),
-        Fixture::Sse(duplicate_and_native),
-    ])
-    .await;
+    let (app, state) = harness(vec![Fixture::Sse(duplicate_and_native)]).await;
     let mut request = anthropic_request(true);
     request["tools"] = json!([{
         "name":"Bash",
@@ -1748,65 +1641,12 @@ async fn streaming_native_call_wins_over_duplicate_encoded_marker_after_recovery
     let (status, body) = call(app, request).await;
 
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(state.requests.lock().await.len(), 2);
+    assert_eq!(state.requests.lock().await.len(), 1);
     assert_eq!(body.matches("\"type\":\"tool_use\"").count(), 1, "{body}");
     assert!(body.contains("\"id\":\"call_native_wins\""), "{body}");
     assert!(!body.contains("toolu_compat_"), "{body}");
+    assert!(!body.contains("Requesting Tool execution"), "{body}");
     assert_eq!(body.matches("NATIVE_WINS").count(), 1, "{body}");
-}
-
-#[tokio::test]
-async fn streaming_encoded_candidate_after_native_retry_uses_strict_fallback() {
-    let first_marker = r#"[Requesting Tool execution: 'Bash' with arguments: {"command":"printf FIRST_ENCODED_MUST_NOT_EXECUTE"}]"#;
-    let fallback_marker = r#"[Requesting Tool execution: 'Bash' with arguments: {"command":"printf STRICT_FALLBACK_OK"}]"#;
-    let first = vec![
-        format!(
-            "data: {}\n\n",
-            json!({"choices":[{"delta":{"content":first_marker},"finish_reason":"stop"}]})
-        )
-        .into_bytes(),
-        b"data: [DONE]\n\n".to_vec(),
-    ];
-    let fallback = vec![
-        format!(
-            "data: {}\n\n",
-            json!({"choices":[{"delta":{"content":fallback_marker},"finish_reason":"stop"}]})
-        )
-        .into_bytes(),
-        b"data: [DONE]\n\n".to_vec(),
-    ];
-    let (app, state, metrics) = harness_core(
-        vec![Fixture::Sse(first), Fixture::Sse(fallback)],
-        256 * 1024,
-        4 * 1024 * 1024,
-        |_| {},
-    )
-    .await;
-    let mut request = anthropic_request(true);
-    request["tools"] = json!([{
-        "name":"Bash",
-        "description":"Run a command",
-        "input_schema":{
-            "type":"object",
-            "properties":{"command":{"type":"string"}},
-            "required":["command"]
-        }
-    }]);
-
-    let (status, body) = call(app, request).await;
-
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(state.requests.lock().await.len(), 2);
-    assert_eq!(body.matches("\"type\":\"tool_use\"").count(), 1, "{body}");
-    assert!(body.contains("STRICT_FALLBACK_OK"), "{body}");
-    assert!(!body.contains("FIRST_ENCODED_MUST_NOT_EXECUTE"), "{body}");
-    assert_eq!(body.matches("event: message_start").count(), 1, "{body}");
-    assert_eq!(body.matches("event: message_stop").count(), 1, "{body}");
-    let snapshot = metrics.snapshot();
-    assert_eq!(snapshot.encoded_fallback_candidates, 2);
-    assert_eq!(snapshot.encoded_native_retries, 1);
-    assert_eq!(snapshot.native_tool_calls, 0);
-    assert_eq!(snapshot.encoded_fallback_tool_calls, 1);
 }
 
 #[tokio::test]
@@ -1849,13 +1689,7 @@ async fn streaming_malformed_generic_xml_retries_then_emits_one_tool_use() {
         .into_bytes(),
         b"data: [DONE]\n\n".to_vec(),
     ];
-    let strict_fallback = valid.clone();
-    let (app, state) = harness(vec![
-        Fixture::Sse(malformed),
-        Fixture::Sse(valid),
-        Fixture::Sse(strict_fallback),
-    ])
-    .await;
+    let (app, state) = harness(vec![Fixture::Sse(malformed), Fixture::Sse(valid)]).await;
     let mut request = anthropic_request(true);
     request["tools"] = json!([{
         "name":"Bash",
@@ -1879,7 +1713,7 @@ async fn streaming_malformed_generic_xml_retries_then_emits_one_tool_use() {
     assert!(!body.contains("BROKEN"), "{body}");
     assert!(!body.contains("tool_call"), "{body}");
     assert!(!body.contains("<invoke"), "{body}");
-    assert_eq!(state.requests.lock().await.len(), 3);
+    assert_eq!(state.requests.lock().await.len(), 2);
 }
 
 #[tokio::test]

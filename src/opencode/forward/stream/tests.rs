@@ -1078,7 +1078,7 @@ async fn split_websearch_marker_keeps_only_marker_prefix_buffered() {
 }
 
 #[tokio::test]
-async fn first_encoded_candidate_requests_native_recovery_without_tool_use() {
+async fn first_encoded_candidate_activates_lazy_fallback_after_native_finalization() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(32);
     let builder = SseEventBuilder::new("msg_native_recovery_gate".to_string(), "model".to_string());
     let mut tracker = SseBlockTracker::new();
@@ -1105,14 +1105,16 @@ async fn first_encoded_candidate_requests_native_recovery_without_tool_use() {
         .await;
 
     assert!(ctx.encoded_candidate_seen);
-    assert!(ctx.native_recovery_retry_requested);
-    assert!(!ctx.has_emitted_tool_use);
-    assert_eq!(tracker.allocated_blocks(), 0);
+    assert!(!ctx.native_recovery_retry_requested);
+    assert!(ctx.has_emitted_tool_use);
+    assert_eq!(tracker.allocated_blocks(), 1);
     let mut joined = String::new();
     while let Ok(event) = rx.try_recv() {
         joined.push_str(&format!("{event:?}\n"));
     }
-    assert!(!joined.contains("tool_use"), "{joined}");
+    assert!(joined.contains("tool_use"), "{joined}");
+    assert!(joined.contains("FIRST_GATE"), "{joined}");
+    assert!(!joined.contains("Requesting Tool execution"), "{joined}");
 }
 
 #[tokio::test]

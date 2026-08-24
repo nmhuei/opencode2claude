@@ -349,18 +349,19 @@ pub(super) struct StreamContext {
     pub(super) compat_retry_requested: bool,
     /// A complete encoded tool candidate was observed in text/reasoning.
     pub(super) encoded_candidate_seen: bool,
+    /// Whether the lightweight marker gate has activated the strict
+    /// compatibility parser for this response. Once activated, old parser
+    /// multi-marker/split semantics are preserved.
+    encoded_parser_activated: bool,
     /// The first encoded candidate requested one upstream retry that must use
     /// the native tool-calling protocol before encoded fallback is considered.
     pub(super) native_recovery_retry_requested: bool,
     /// A candidate was rejected by the lightweight gate (for example because
     /// it named a tool that Claude Code did not provide). Rejects fail closed.
     pub(super) encoded_fallback_rejected: bool,
-    /// Whether this upstream attempt is allowed to execute a strict encoded
-    /// fallback after a previous native-recovery retry failed.
-    encoded_fallback_permitted: bool,
-    /// Recovery attempts retain encoded candidates until native tool-call
-    /// fragments have had the full response to arrive. Native calls are
-    /// finalized first at EOF; only then may the encoded parser run.
+    /// Encoded candidates are retained until native tool-call fragments have
+    /// had the full response to arrive. Native calls are finalized first at
+    /// EOF; only then may the lazily activated compatibility parser run.
     defer_encoded_fallback_until_native_finalized: bool,
     /// Determined from `finish_reason` in the last stream chunk.
     pub(super) final_stop_reason: String,
@@ -370,8 +371,7 @@ impl StreamContext {
     #[cfg(test)]
     pub(super) fn new(is_compact: bool) -> Self {
         // Parser-focused unit tests use this constructor to exercise the strict
-        // encoded compatibility parser directly. Production streaming chooses
-        // permission explicitly via `new_with_encoded_fallback` and defers
+        // encoded compatibility parser directly. Production streaming defers
         // encoded execution until native fragments have had the full attempt.
         let mut context = Self::new_with_encoded_fallback(is_compact, true);
         context.defer_encoded_fallback_until_native_finalized = false;
@@ -380,7 +380,7 @@ impl StreamContext {
 
     pub(super) fn new_with_encoded_fallback(
         _is_compact: bool,
-        encoded_fallback_permitted: bool,
+        encoded_parser_activated: bool,
     ) -> Self {
         Self {
             message_started: false,
@@ -411,10 +411,14 @@ impl StreamContext {
             discarding_text_compat: false,
             compat_retry_requested: false,
             encoded_candidate_seen: false,
+            encoded_parser_activated,
             native_recovery_retry_requested: false,
             encoded_fallback_rejected: false,
-            encoded_fallback_permitted,
-            defer_encoded_fallback_until_native_finalized: encoded_fallback_permitted,
+            // Alternative B: activate the compatibility parser lazily, but
+            // always defer encoded execution until native tool fragments for
+            // this attempt have been finalized. This preserves native-first
+            // precedence without requiring a second upstream request.
+            defer_encoded_fallback_until_native_finalized: true,
             final_stop_reason: "end_turn".to_string(),
         }
     }
@@ -432,16 +436,17 @@ impl StreamContext {
                 visible_text_emitted: !self.accumulated_text.is_empty()
                     || !self.accumulated_thinking.is_empty(),
                 native_tool_emitted: self.has_emitted_native_tool_use,
-                native_retry_attempted: self.encoded_fallback_permitted,
+                parser_activated: self.encoded_parser_activated,
             },
         );
         match decision {
             FallbackDecision::RetryNative => self.native_recovery_retry_requested = true,
+            FallbackDecision::ParseEncoded => self.encoded_parser_activated = true,
             FallbackDecision::Reject => self.encoded_fallback_rejected = true,
             FallbackDecision::PassThrough if literal_meta_output_requested(payload) => {
                 self.literal_marker_suppressed = true;
             }
-            FallbackDecision::PassThrough | FallbackDecision::ParseEncoded => {}
+            FallbackDecision::PassThrough => {}
         }
         decision
     }

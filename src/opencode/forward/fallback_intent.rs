@@ -16,7 +16,7 @@ pub(super) struct FallbackIntentContext<'a> {
     pub(super) payload: &'a MessagesRequest,
     pub(super) visible_text_emitted: bool,
     pub(super) native_tool_emitted: bool,
-    pub(super) native_retry_attempted: bool,
+    pub(super) parser_activated: bool,
 }
 
 pub(super) fn classify_encoded_tool_intent(
@@ -37,10 +37,11 @@ pub(super) fn classify_encoded_tool_intent(
         return FallbackDecision::PassThrough;
     }
 
-    // After one native-recovery attempt, hand the candidate to the existing
-    // strict parser. That parser retains compatibility with split/multi-marker
-    // provider output and still performs schema/tool availability validation.
-    if context.native_retry_attempted {
+    // Once the lightweight gate has activated the compatibility parser for
+    // this response, preserve the old parser's multi-marker/split semantics.
+    // Literal/meta intent remains a hard veto above, and native calls remain
+    // authoritative because streaming defers encoded execution until EOF.
+    if context.parser_activated {
         return FallbackDecision::ParseEncoded;
     }
 
@@ -69,11 +70,7 @@ pub(super) fn classify_encoded_tool_intent(
         return FallbackDecision::Reject;
     }
 
-    if context.native_retry_attempted {
-        FallbackDecision::ParseEncoded
-    } else {
-        FallbackDecision::RetryNative
-    }
+    FallbackDecision::ParseEncoded
 }
 
 fn encoded_candidate_start(text: &str) -> Option<usize> {
@@ -277,7 +274,7 @@ mod tests {
         payload: &MessagesRequest,
         visible_text_emitted: bool,
         native_tool_emitted: bool,
-        native_retry_attempted: bool,
+        parser_activated: bool,
     ) -> FallbackDecision {
         classify_encoded_tool_intent(
             output,
@@ -285,7 +282,7 @@ mod tests {
                 payload,
                 visible_text_emitted,
                 native_tool_emitted,
-                native_retry_attempted,
+                parser_activated,
             },
         )
     }
@@ -387,12 +384,12 @@ mod tests {
     }
 
     #[test]
-    fn first_person_tool_intent_preamble_can_request_native_retry() {
+    fn first_person_tool_intent_preamble_activates_lazy_parser() {
         let payload = payload("Read ./compat_read.txt and return its token.", &["Read"]);
         let output = "I'll emit the Read request in bridge compatibility-marker syntax so the proxy recovers it as a tool call.\n\n[Requesting Read with arguments: {\"file_path\":\"./compat_read.txt\"}]";
         assert_eq!(
             classify(output, &payload, false, false, false),
-            FallbackDecision::RetryNative
+            FallbackDecision::ParseEncoded
         );
     }
 
@@ -407,17 +404,17 @@ mod tests {
     }
 
     #[test]
-    fn whole_output_candidate_requests_native_retry_first() {
+    fn whole_output_candidate_activates_lazy_parser() {
         let payload = payload("run ls", &["Bash"]);
         let output = "[Requesting Tool execution: 'Bash' with arguments: {\"command\":\"ls\"}]";
         assert_eq!(
             classify(output, &payload, false, false, false),
-            FallbackDecision::RetryNative
+            FallbackDecision::ParseEncoded
         );
     }
 
     #[test]
-    fn retried_candidate_may_advance_to_encoded_parser() {
+    fn lazy_candidate_decision_is_stable_across_legacy_retry_state() {
         let payload = payload("run ls", &["Bash"]);
         let output = "[Requesting Tool execution: 'Bash' with arguments: {\"command\":\"ls\"}]";
         assert_eq!(
