@@ -102,11 +102,11 @@ pub async fn run_cli() {
 
         // Default: the bridge lifecycle stays explicit. A bare invocation only
         // launches Claude Code after confirming the configured bridge is running.
-        None => launch_claude_code(),
+        None => launch_claude_code(cli.continue_session, cli.resume.as_deref()),
     }
 }
 
-fn launch_claude_code() {
+fn launch_claude_code(continue_session: bool, resume: Option<&str>) {
     let resolved = BridgeConfig::from_env_and_cli(CliOverrides::default());
     let supervisor = server::resolve_runtime(None, None);
 
@@ -125,7 +125,7 @@ fn launch_claude_code() {
     }
 
     let mut command = std::process::Command::new("claude");
-    command.args(["--permission-mode", "bypassPermissions"]);
+    command.args(claude_launch_args(continue_session, resume));
     for (key, value) in crate::application::integration::process_environment(&resolved) {
         match value {
             Some(value) => {
@@ -148,5 +148,55 @@ fn launch_claude_code() {
             eprintln!("opencode2api: failed to launch Claude Code: {error}");
             std::process::exit(1);
         }
+    }
+}
+
+fn claude_launch_args(continue_session: bool, resume: Option<&str>) -> Vec<String> {
+    let mut args = vec![
+        "--permission-mode".to_string(),
+        "bypassPermissions".to_string(),
+    ];
+    if continue_session {
+        args.push("--continue".to_string());
+    } else if let Some(session) = resume {
+        args.push("--resume".to_string());
+        if !session.is_empty() {
+            args.push(session.to_string());
+        }
+    }
+    args
+}
+
+#[cfg(test)]
+mod launcher_tests {
+    use super::claude_launch_args;
+
+    #[test]
+    fn bare_launcher_defaults_to_bypass_permissions() {
+        assert_eq!(
+            claude_launch_args(false, None),
+            ["--permission-mode", "bypassPermissions"]
+        );
+    }
+
+    #[test]
+    fn launcher_supports_continue_and_resume() {
+        assert_eq!(
+            claude_launch_args(true, None),
+            ["--permission-mode", "bypassPermissions", "--continue"]
+        );
+        assert_eq!(
+            claude_launch_args(false, Some("")),
+            ["--permission-mode", "bypassPermissions", "--resume"]
+        );
+        assert_eq!(
+            claude_launch_args(false, Some("session-123")),
+            [
+                "--permission-mode",
+                "bypassPermissions",
+                "--resume",
+                "session-123",
+            ]
+        );
     }
 }

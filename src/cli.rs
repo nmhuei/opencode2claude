@@ -19,12 +19,20 @@ use clap::{Args, Parser, Subcommand};
     version,
     about = "A local Anthropic and OpenAI-compatible model gateway",
     long_about = "OpenCode2API accepts Anthropic Messages and OpenAI Chat Completions requests, then routes them to the configured OpenCode-compatible model provider.",
-    after_help = "Quick start:\n  opencode2api                 # load env and open Claude Code (bridge must already be running)\n  opencode2api server status\n  opencode2api set env         # env only, no Claude launch\n  opencode2api doctor\n\nTip: bare `opencode2api` launches Claude Code natively when the bridge is already running. The bash/zsh hook is only needed for `opencode2api set env` to modify the current shell. Use --json for automation, --quiet for shell-friendly output, and --color never when piping logs.",
+    after_help = "Quick start:\n  opencode2api                 # open a new Claude Code conversation\n  opencode2api -c              # continue the latest conversation in this directory\n  opencode2api -r              # open Claude Code's resume picker\n  opencode2api -r <session-id> # resume a specific conversation\n  opencode2api server status\n  opencode2api set env         # env only, no Claude launch\n\nTip: the bridge must already be running. Bare `opencode2api` launches Claude Code natively with bypassPermissions. The bash/zsh hook is only needed for `opencode2api set env` to modify the current shell.",
     styles = clap_styles()
 )]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
+
+    /// Continue the most recent Claude Code conversation in the current directory
+    #[arg(short = 'c', long = "continue", conflicts_with = "resume")]
+    pub continue_session: bool,
+
+    /// Resume a Claude Code conversation by session ID, or open the resume picker when omitted
+    #[arg(short = 'r', long = "resume", num_args = 0..=1, default_missing_value = "", conflicts_with = "continue_session")]
+    pub resume: Option<String>,
 
     /// Output in JSON format (machine-readable)
     #[arg(long, global = true, conflicts_with = "quiet")]
