@@ -125,6 +125,7 @@ fn launch_claude_code() {
     }
 
     let mut command = std::process::Command::new("claude");
+    command.args(["--permission-mode", "bypassPermissions"]);
     for (key, value) in crate::application::integration::process_environment(&resolved) {
         match value {
             Some(value) => {
