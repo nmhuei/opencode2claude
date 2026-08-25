@@ -451,7 +451,7 @@ async fn test_proxy_pool_failover_integration() {
     let proxy2_connected = Arc::new(Mutex::new(false));
     let proxy2_connected_clone = proxy2_connected.clone();
 
-    // Spawn proxy 1 task (returns 429)
+    // Spawn proxy 1 task (drops connection to trigger transport failover)
     tokio::spawn(async move {
         while let Ok((mut socket, _)) = proxy1_listener.accept().await {
             let mut buf = [0; 1024];
@@ -460,13 +460,12 @@ async fn test_proxy_pool_failover_integration() {
             // Mark as connected
             *proxy1_connected_clone.lock().await = true;
 
-            // Respond with 429
-            let response = "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\n\r\n";
-            let _ = socket.write_all(response.as_bytes()).await;
+            // Drop socket to trigger transport error failover
+            let _ = socket.shutdown().await;
         }
     });
 
-    // Spawn proxy 2 task (also returns 429 to trigger failover regardless of which is tried first)
+    // Spawn proxy 2 task (also drops connection or marks connected)
     tokio::spawn(async move {
         while let Ok((mut socket, _)) = proxy2_listener.accept().await {
             let mut buf = [0; 1024];
@@ -475,9 +474,8 @@ async fn test_proxy_pool_failover_integration() {
             // Mark as connected
             *proxy2_connected_clone.lock().await = true;
 
-            // Respond with 429
-            let response = "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\n\r\n";
-            let _ = socket.write_all(response.as_bytes()).await;
+            // Drop socket
+            let _ = socket.shutdown().await;
         }
     });
 
@@ -490,6 +488,8 @@ async fn test_proxy_pool_failover_integration() {
     envs.insert("BRIDGE_PRIMARY_PROXIES", proxies_str.as_str());
     envs.insert("BRIDGE_WARM_STANDBY_PROXIES", "");
     envs.insert("BRIDGE_ACTIVE_PROXY_COUNT", "2");
+    envs.insert("BRIDGE_EGRESS_MODE", "proxy");
+    envs.insert("BRIDGE_REQUIRE_VERIFIED_EXIT_IP", "false");
     envs.insert("OPENCODE_MODEL", "opencode/deepseek-v4-flash-free");
 
     let bridge = TestBridge::start(envs).await;
