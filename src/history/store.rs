@@ -781,6 +781,29 @@ impl HistoryCapture {
         );
     }
 
+    /// Record protocol-path metadata without tool arguments or response payloads.
+    pub fn tool_protocol(&self, event: &str, origin: &str, count: u64, reason: Option<&str>) {
+        let Some(inner) = &self.inner else {
+            return;
+        };
+        let mut draft = lock_draft(inner);
+        add_event_locked(
+            &mut draft,
+            "tool_protocol",
+            if event.contains("reject") {
+                "warn"
+            } else {
+                "info"
+            },
+            json!({
+                "event": preview(event, 80),
+                "origin": preview(origin, 40),
+                "count": count,
+                "reason": reason.map(|value| preview(value, 160)),
+            }),
+        );
+    }
+
     pub fn retry(&self, class: &str, backoff_ms: Option<u64>) {
         let Some(inner) = &self.inner else {
             return;

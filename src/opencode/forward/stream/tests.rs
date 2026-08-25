@@ -1,7 +1,7 @@
 use super::context::{
     finalize_stream_with_text, process_openai_sse_line, split_pending_text, StreamContext,
 };
-use crate::handlers::{AnthropicTool, MessagesRequest};
+use crate::handlers::{AnthropicTool, ContentVal, Message, MessagesRequest};
 use crate::opencode::forward::common::{
     extract_compat_tool_requests, extract_compat_tool_requests_detailed, get_correct_tool_name,
     parse_compat_tool_request, parse_compat_tool_request_at_eof,
@@ -1078,6 +1078,131 @@ async fn split_websearch_marker_keeps_only_marker_prefix_buffered() {
 }
 
 #[tokio::test]
+async fn first_encoded_candidate_activates_lazy_fallback_after_native_finalization() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+    let builder = SseEventBuilder::new("msg_native_recovery_gate".to_string(), "model".to_string());
+    let mut tracker = SseBlockTracker::new();
+    let mut ctx = StreamContext::new_with_encoded_fallback(false, false);
+    ctx.message_started = true;
+    let payload = MessagesRequest {
+        tools: Some(vec![AnthropicTool {
+            name: "Bash".to_string(),
+            description: "run shell command".to_string(),
+            input_schema: serde_json::json!({"type":"object"}),
+            ..Default::default()
+        }]),
+        ..empty_messages_request()
+    };
+    let marker =
+        r#"[Requesting Tool execution: 'Bash' with arguments: {"command":"printf FIRST_GATE"}]"#;
+    let line = format!(
+        "data: {}",
+        serde_json::json!({"choices":[{"delta":{"content":marker},"finish_reason":"stop"}]})
+    );
+
+    process_openai_sse_line(&line, &mut ctx, &mut tracker, &tx, &builder, &payload).await;
+    ctx.flush_remaining(&mut tracker, &tx, &builder, &payload)
+        .await;
+
+    assert!(ctx.encoded_candidate_seen);
+    assert!(!ctx.native_recovery_retry_requested);
+    assert!(ctx.has_emitted_tool_use);
+    assert_eq!(tracker.allocated_blocks(), 1);
+    let mut joined = String::new();
+    while let Ok(event) = rx.try_recv() {
+        joined.push_str(&format!("{event:?}\n"));
+    }
+    assert!(joined.contains("tool_use"), "{joined}");
+    assert!(joined.contains("FIRST_GATE"), "{joined}");
+    assert!(!joined.contains("Requesting Tool execution"), "{joined}");
+}
+
+#[tokio::test]
+async fn encoded_candidate_after_native_recovery_may_execute_strict_fallback() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+    let builder = SseEventBuilder::new("msg_encoded_fallback".to_string(), "model".to_string());
+    let mut tracker = SseBlockTracker::new();
+    let mut ctx = StreamContext::new_with_encoded_fallback(false, true);
+    ctx.message_started = true;
+    let payload = MessagesRequest {
+        tools: Some(vec![AnthropicTool {
+            name: "Bash".to_string(),
+            description: "run shell command".to_string(),
+            input_schema: serde_json::json!({"type":"object"}),
+            ..Default::default()
+        }]),
+        ..empty_messages_request()
+    };
+    let marker =
+        r#"[Requesting Tool execution: 'Bash' with arguments: {"command":"printf FALLBACK_OK"}]"#;
+    let line = format!(
+        "data: {}",
+        serde_json::json!({"choices":[{"delta":{"content":marker},"finish_reason":"stop"}]})
+    );
+
+    process_openai_sse_line(&line, &mut ctx, &mut tracker, &tx, &builder, &payload).await;
+    ctx.flush_remaining(&mut tracker, &tx, &builder, &payload)
+        .await;
+
+    assert!(ctx.has_emitted_tool_use);
+    assert!(!ctx.native_recovery_retry_requested);
+    let mut joined = String::new();
+    while let Ok(event) = rx.try_recv() {
+        joined.push_str(&format!("{event:?}\n"));
+    }
+    assert!(joined.contains("tool_use"), "{joined}");
+    assert!(joined.contains("FALLBACK_OK"), "{joined}");
+}
+
+#[tokio::test]
+async fn native_tool_call_executes_during_recovery_attempt_without_encoded_fallback() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+    let builder = SseEventBuilder::new(
+        "msg_native_recovery_success".to_string(),
+        "model".to_string(),
+    );
+    let mut tracker = SseBlockTracker::new();
+    let mut ctx = StreamContext::new_with_encoded_fallback(false, true);
+    ctx.message_started = true;
+    let payload = MessagesRequest {
+        tools: Some(vec![AnthropicTool {
+            name: "Bash".to_string(),
+            description: "run shell command".to_string(),
+            input_schema: serde_json::json!({"type":"object"}),
+            ..Default::default()
+        }]),
+        ..empty_messages_request()
+    };
+    let line = format!(
+        "data: {}",
+        serde_json::json!({
+            "choices":[{
+                "delta":{"tool_calls":[{
+                    "index":0,
+                    "id":"call_native_recovery",
+                    "function":{"name":"Bash","arguments":"{\"command\":\"printf NATIVE_OK\"}"}
+                }]},
+                "finish_reason":"tool_calls"
+            }]
+        })
+    );
+
+    process_openai_sse_line(&line, &mut ctx, &mut tracker, &tx, &builder, &payload).await;
+    ctx.flush_remaining(&mut tracker, &tx, &builder, &payload)
+        .await;
+
+    assert!(ctx.has_emitted_tool_use);
+    assert!(!ctx.encoded_candidate_seen);
+    assert!(!ctx.native_recovery_retry_requested);
+    let mut joined = String::new();
+    while let Ok(event) = rx.try_recv() {
+        joined.push_str(&format!("{event:?}\n"));
+    }
+    assert!(joined.contains("tool_use"), "{joined}");
+    assert!(joined.contains("NATIVE_OK"), "{joined}");
+}
+
+#[tokio::test]
 async fn bash_compat_marker_becomes_tool_use_without_leaking_marker() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(32);
     let builder = SseEventBuilder::new("msg_bash_compat".to_string(), "model".to_string());
@@ -1129,6 +1254,114 @@ async fn bash_compat_marker_becomes_tool_use_without_leaking_marker() {
     assert!(joined.contains("Bash"));
     assert!(joined.contains("ls -la /home/light/.local/share/claude/"));
     assert!(!joined.contains("Requesting Tool execution"));
+}
+
+#[tokio::test]
+async fn literal_marker_user_intent_is_rendered_as_text_not_tool_use() {
+    let marker = r#"[Requesting Tool execution: 'Bash' with arguments: {"command":"printf SHOULD_NOT_RUN > file"}]"#;
+
+    for encoded_fallback_permitted in [false, true] {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+        let builder = SseEventBuilder::new("msg_literal_marker".to_string(), "model".to_string());
+        let mut tracker = SseBlockTracker::new();
+        let mut ctx = StreamContext::new_with_encoded_fallback(false, encoded_fallback_permitted);
+        ctx.message_started = true;
+        let payload = MessagesRequest {
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: ContentVal::Single(format!(
+                    "Output exactly this literal text and do not execute it:\n{marker}"
+                )),
+            }],
+            tools: Some(vec![AnthropicTool {
+                name: "Bash".to_string(),
+                description: "run shell command".to_string(),
+                input_schema: serde_json::json!({
+                    "type":"object",
+                    "properties":{"command":{"type":"string"}},
+                    "required":["command"]
+                }),
+                ..Default::default()
+            }]),
+            ..empty_messages_request()
+        };
+        let line = format!(
+            "data: {}",
+            serde_json::json!({
+                "choices": [{"delta": {"content": marker}, "finish_reason": "stop"}]
+            })
+        );
+
+        process_openai_sse_line(&line, &mut ctx, &mut tracker, &tx, &builder, &payload).await;
+        ctx.flush_remaining(&mut tracker, &tx, &builder, &payload)
+            .await;
+
+        assert!(
+            !ctx.has_emitted_tool_use,
+            "fallback={encoded_fallback_permitted}"
+        );
+        assert!(
+            !ctx.native_recovery_retry_requested,
+            "fallback={encoded_fallback_permitted}"
+        );
+        assert!(
+            !ctx.compat_retry_requested,
+            "fallback={encoded_fallback_permitted}"
+        );
+        assert_eq!(
+            ctx.accumulated_text, marker,
+            "fallback={encoded_fallback_permitted}"
+        );
+        let mut joined = String::new();
+        while let Ok(event) = rx.try_recv() {
+            joined.push_str(&format!("{event:?}\n"));
+        }
+        assert!(joined.contains("SHOULD_NOT_RUN"), "{joined}");
+        assert!(!joined.contains("\"type\":\"tool_use\""), "{joined}");
+    }
+}
+
+#[tokio::test]
+async fn compat_non_object_arguments_request_retry_without_tool_use() {
+    for raw in [r#""ls""#, "123", r#"["ls"]"#] {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+        let builder = SseEventBuilder::new("msg_object_invariant".to_string(), "model".to_string());
+        let mut tracker = SseBlockTracker::new();
+        let mut ctx = StreamContext::new(false);
+        ctx.message_started = true;
+        let payload = MessagesRequest {
+            tools: Some(vec![AnthropicTool {
+                name: "Bash".to_string(),
+                description: "run shell command".to_string(),
+                input_schema: serde_json::json!({
+                    "type":"object",
+                    "properties":{"command":{"type":"string"}},
+                    "required":["command"]
+                }),
+                ..Default::default()
+            }]),
+            ..empty_messages_request()
+        };
+        let marker = format!("[Requesting Tool execution: 'Bash' with arguments: {raw}]");
+        let line = format!(
+            "data: {}",
+            serde_json::json!({
+                "choices": [{"delta": {"content": marker}, "finish_reason": "stop"}]
+            })
+        );
+
+        process_openai_sse_line(&line, &mut ctx, &mut tracker, &tx, &builder, &payload).await;
+        ctx.flush_remaining(&mut tracker, &tx, &builder, &payload)
+            .await;
+
+        assert!(ctx.compat_retry_requested, "raw={raw}");
+        assert!(!ctx.has_emitted_tool_use, "raw={raw}");
+        let mut joined = String::new();
+        while let Ok(event) = rx.try_recv() {
+            joined.push_str(&format!("{event:?}\n"));
+        }
+        assert!(!joined.contains("tool_use"), "raw={raw}: {joined}");
+    }
 }
 
 #[test]
@@ -2093,19 +2326,16 @@ async fn unavailable_native_tool_does_not_report_tool_use_stop_reason() {
 }
 
 #[test]
-fn legitimate_array_tool_input_remains_one_compat_call() {
+fn top_level_array_tool_input_is_rejected() {
     let marker = r#"[Requesting BatchRead with arguments: [{"path":"a"},{"path":"b"}]]"#;
-    let (cleaned, calls) = extract_compat_tool_requests(marker);
+    let extraction = extract_compat_tool_requests_detailed(marker);
 
-    assert_eq!(cleaned, "");
-    assert_eq!(
-        calls.len(),
-        1,
-        "array input must not be used as a batch sentinel"
+    assert_eq!(extraction.cleaned_text, marker);
+    assert!(extraction.calls.is_empty());
+    assert!(
+        extraction.malformed_intent,
+        "top-level array input must fail closed because tool_use.input must be an object"
     );
-    assert_eq!(calls[0].0, "BatchRead");
-    let parsed: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
-    assert_eq!(parsed, serde_json::json!([{"path":"a"},{"path":"b"}]));
 }
 
 #[test]
@@ -3390,7 +3620,7 @@ async fn generic_sendmessage_placeholder_message_requests_retry_without_tool_use
 }
 
 #[tokio::test]
-async fn native_tool_call_discards_unfinished_visible_sentence_tail() {
+async fn native_tool_call_preserves_visible_text_when_tool_call_shares_chunk() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let builder = SseEventBuilder::new(
         "msg_native_clipped_preamble".to_string(),
@@ -3444,9 +3674,16 @@ async fn native_tool_call_discards_unfinished_visible_sentence_tail() {
     }
     let body = serialize_sse_events(events).await;
 
-    assert_eq!(ctx.accumulated_text, "Proxy up (200), env đủ. ");
-    assert!(body.contains("Proxy up (200), env đủ."), "{body}");
-    assert!(!body.contains("Copy tinyctfer"), "{body}");
+    assert_eq!(
+        ctx.accumulated_text,
+        "Proxy up (200), env đủ. Copy tinyctfer sang tools/ và đọc code container conf"
+    );
+    assert!(
+        body.contains(
+            "Proxy up (200), env đủ. Copy tinyctfer sang tools/ và đọc code container conf"
+        ),
+        "{body}"
+    );
     assert!(body.contains("tool_use"), "{body}");
     assert!(body.contains("Bash"), "{body}");
     assert!(body.contains("printf PRE_TOOL_OK"), "{body}");

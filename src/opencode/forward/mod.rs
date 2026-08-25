@@ -1,6 +1,7 @@
 //! Upstream forwarding split by execution mode.
 
 pub(crate) mod common;
+pub(super) mod fallback_intent;
 mod stream;
 mod sync;
 

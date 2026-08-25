@@ -286,16 +286,14 @@ async fn sync_native_and_dsml_tool_calls_map_to_tool_use() {
     let (status, body) = call(app, request).await;
     assert_eq!(status, StatusCode::OK);
     let response: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(response["content"].as_array().unwrap().len(), 1);
     assert_eq!(response["content"][0]["type"], "text");
-    assert_eq!(response["content"][0]["text"], "Before  After");
-    assert_eq!(response["content"][1]["type"], "tool_use");
-    assert_eq!(response["content"][1]["name"], "bash");
-    assert_eq!(response["content"][1]["input"]["command"], "git status");
-    assert_eq!(response["stop_reason"], "tool_use");
+    assert_eq!(response["content"][0]["text"], "Before git status After");
+    assert_eq!(response["stop_reason"], "end_turn");
 }
 
 #[tokio::test]
-async fn sync_native_tool_call_discards_unfinished_visible_sentence_tail() {
+async fn sync_native_tool_call_preserves_visible_text_with_tool_call() {
     let fixture = json!({
         "id":"chatcmpl-sync-clipped-preamble",
         "model":"upstream-model",
@@ -331,7 +329,10 @@ async fn sync_native_tool_call_discards_unfinished_visible_sentence_tail() {
     assert_eq!(status, StatusCode::OK);
     let response: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(response["content"][0]["type"], "text");
-    assert_eq!(response["content"][0]["text"], "Proxy up (200), env đủ. ");
+    assert_eq!(
+        response["content"][0]["text"],
+        "Proxy up (200), env đủ. Copy tinyctfer sang tools/ và đọc code container conf"
+    );
     assert_eq!(response["content"][1]["type"], "tool_use");
     assert_eq!(response["content"][1]["name"], "Bash");
     assert_eq!(
@@ -339,7 +340,200 @@ async fn sync_native_tool_call_discards_unfinished_visible_sentence_tail() {
         "printf PRE_TOOL_SYNC_OK"
     );
     assert_eq!(response["stop_reason"], "tool_use");
-    assert!(!body.contains("Copy tinyctfer"), "{body}");
+    assert!(body.contains("Copy tinyctfer"), "{body}");
+}
+
+#[tokio::test]
+async fn sync_native_call_ignores_unavailable_encoded_marker() {
+    let fixture = json!({
+        "id":"chatcmpl-sync-native-wins",
+        "model":"upstream-model",
+        "choices":[{
+            "message":{
+                "content":"[Requesting MissingTool with arguments: {\"value\":\"must-not-run\"}]",
+                "reasoning_content":null,
+                "tool_calls":[{
+                    "id":"call-sync-native-wins",
+                    "function":{
+                        "name":"Bash",
+                        "arguments":"{\"command\":\"printf SYNC_NATIVE_WINS\"}"
+                    }
+                }]
+            },
+            "finish_reason":"tool_calls"
+        }],
+        "usage":{"prompt_tokens":1,"completion_tokens":1}
+    });
+    let (app, state) = harness(vec![Fixture::Json(fixture)]).await;
+    let mut request = anthropic_request(false);
+    request["tools"] = json!([{
+        "name":"Bash",
+        "description":"Run a harmless command",
+        "input_schema":{
+            "type":"object",
+            "properties":{"command":{"type":"string"}},
+            "required":["command"]
+        }
+    }]);
+
+    let (status, body) = call(app, request).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(state.requests.lock().await.len(), 1);
+    let response: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(response["content"].as_array().unwrap().len(), 1, "{body}");
+    assert_eq!(response["content"][0]["type"], "tool_use");
+    assert_eq!(response["content"][0]["id"], "call-sync-native-wins");
+    assert_eq!(response["content"][0]["name"], "Bash");
+    assert_eq!(
+        response["content"][0]["input"]["command"],
+        "printf SYNC_NATIVE_WINS"
+    );
+    assert!(!body.contains("MissingTool"), "{body}");
+    assert!(!body.contains("must-not-run"), "{body}");
+}
+
+#[tokio::test]
+async fn sync_lazy_encoded_candidate_uses_fallback_without_native_retry() {
+    let encoded_marker = r#"[Requesting Tool execution: 'Bash' with arguments: {"command":"printf SYNC_LAZY_FALLBACK_OK"}]"#;
+    let encoded = json!({
+        "id":"chatcmpl-sync-lazy-encoded",
+        "model":"upstream-model",
+        "choices":[{
+            "message":{"content":encoded_marker,"reasoning_content":null,"tool_calls":null},
+            "finish_reason":"stop"
+        }],
+        "usage":{"prompt_tokens":1,"completion_tokens":1}
+    });
+    let (app, state, metrics) = harness_core(
+        vec![Fixture::Json(encoded)],
+        256 * 1024,
+        4 * 1024 * 1024,
+        |_| {},
+    )
+    .await;
+    let mut request = anthropic_request(false);
+    request["tools"] = json!([{
+        "name":"Bash",
+        "description":"Run a harmless command",
+        "input_schema":{
+            "type":"object",
+            "properties":{"command":{"type":"string"}},
+            "required":["command"]
+        }
+    }]);
+
+    let (status, body) = call(app, request).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(state.requests.lock().await.len(), 1, "{body}");
+    let response: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(response["content"].as_array().unwrap().len(), 1, "{body}");
+    assert_eq!(response["content"][0]["type"], "tool_use");
+    assert_eq!(response["content"][0]["name"], "Bash");
+    assert_eq!(
+        response["content"][0]["input"]["command"],
+        "printf SYNC_LAZY_FALLBACK_OK"
+    );
+    assert!(
+        response["content"][0]["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("toolu_compat_")),
+        "{body}"
+    );
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.encoded_fallback_candidates, 1);
+    assert_eq!(snapshot.encoded_native_retries, 0);
+    assert_eq!(snapshot.native_tool_calls, 0);
+    assert_eq!(snapshot.encoded_fallback_tool_calls, 1);
+}
+
+#[tokio::test]
+async fn sync_unavailable_encoded_candidate_records_rejection_without_tool_call() {
+    let marker = r#"[Requesting MissingTool with arguments: {"value":"do-not-run"}]"#;
+    let fixture = json!({
+        "id":"chatcmpl-sync-rejected-encoded",
+        "model":"upstream-model",
+        "choices":[{
+            "message":{"content":marker,"reasoning_content":null,"tool_calls":null},
+            "finish_reason":"stop"
+        }],
+        "usage":{"prompt_tokens":1,"completion_tokens":1}
+    });
+    let (app, state, metrics) = harness_core(
+        vec![Fixture::Json(fixture)],
+        256 * 1024,
+        4 * 1024 * 1024,
+        |_| {},
+    )
+    .await;
+    let mut request = anthropic_request(false);
+    request["tools"] = json!([{
+        "name":"Bash",
+        "description":"Run a command",
+        "input_schema":{"type":"object","properties":{"command":{"type":"string"}}}
+    }]);
+
+    let (status, body) = call(app, request).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(state.requests.lock().await.len(), 1);
+    assert!(!body.contains("tool_use"), "{body}");
+    assert!(!body.contains("do-not-run"), "{body}");
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.encoded_fallback_candidates, 1);
+    assert_eq!(snapshot.encoded_fallback_rejections, 1);
+    assert_eq!(snapshot.encoded_native_retries, 0);
+    assert_eq!(snapshot.native_tool_calls, 0);
+    assert_eq!(snapshot.encoded_fallback_tool_calls, 0);
+}
+
+#[tokio::test]
+async fn sync_literal_encoded_candidate_records_suppression_without_tool_call() {
+    let marker = r#"[Requesting Bash with arguments: {"command":"printf SHOULD_NOT_RUN"}]"#;
+    let fixture = json!({
+        "id":"chatcmpl-sync-literal-encoded",
+        "model":"upstream-model",
+        "choices":[{
+            "message":{"content":marker,"reasoning_content":null,"tool_calls":null},
+            "finish_reason":"stop"
+        }],
+        "usage":{"prompt_tokens":1,"completion_tokens":1}
+    });
+    let (app, state, metrics) = harness_core(
+        vec![Fixture::Json(fixture)],
+        256 * 1024,
+        4 * 1024 * 1024,
+        |_| {},
+    )
+    .await;
+    let mut request = anthropic_request(false);
+    request["messages"] = json!([{
+        "role":"user",
+        "content":format!("Output exactly this literal text and do not execute it: {marker}")
+    }]);
+    request["tools"] = json!([{
+        "name":"Bash",
+        "description":"Run a command",
+        "input_schema":{
+            "type":"object",
+            "properties":{"command":{"type":"string"}},
+            "required":["command"]
+        }
+    }]);
+
+    let (status, body) = call(app, request).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(state.requests.lock().await.len(), 1);
+    assert!(body.contains("SHOULD_NOT_RUN"), "{body}");
+    assert!(!body.contains("\"type\":\"tool_use\""), "{body}");
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.encoded_fallback_candidates, 1);
+    assert_eq!(snapshot.literal_marker_suppressions, 1);
+    assert_eq!(snapshot.encoded_native_retries, 0);
+    assert_eq!(snapshot.native_tool_calls, 0);
+    assert_eq!(snapshot.encoded_fallback_tool_calls, 0);
 }
 
 #[tokio::test]
@@ -1044,7 +1238,8 @@ async fn streaming_direct_cron_marker_is_one_tool_block_without_leak() {
     )
     .into_bytes();
     let chunks = wire.chunks(3).map(<[u8]>::to_vec).collect::<Vec<_>>();
-    let (app, state) = harness(vec![Fixture::Sse(chunks)]).await;
+    let retry_chunks = chunks.clone();
+    let (app, state) = harness(vec![Fixture::Sse(chunks), Fixture::Sse(retry_chunks)]).await;
 
     let (status, body) = call(app, cron_tool_request(true)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -1079,7 +1274,8 @@ async fn streaming_reasoning_and_text_duplicate_cron_executes_once() {
     )
     .into_bytes();
     let chunks = wire.chunks(7).map(<[u8]>::to_vec).collect::<Vec<_>>();
-    let (app, _state) = harness(vec![Fixture::Sse(chunks)]).await;
+    let retry_chunks = chunks.clone();
+    let (app, state) = harness(vec![Fixture::Sse(chunks), Fixture::Sse(retry_chunks)]).await;
 
     let (status, body) = call(app, cron_tool_request(true)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -1091,6 +1287,7 @@ async fn streaming_reasoning_and_text_duplicate_cron_executes_once() {
         1,
         "{body}"
     );
+    assert_eq!(state.requests.lock().await.len(), 1);
 }
 
 #[tokio::test]
@@ -1109,7 +1306,8 @@ async fn sync_reasoning_marker_and_false_success_text_emit_only_tool_use() {
         }],
         "usage":{"prompt_tokens":1,"completion_tokens":1}
     });
-    let (app, state) = harness(vec![Fixture::Json(fixture)]).await;
+    let retry_fixture = fixture.clone();
+    let (app, state) = harness(vec![Fixture::Json(fixture), Fixture::Json(retry_fixture)]).await;
 
     let (status, body) = call(app, cron_tool_request(false)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -1142,7 +1340,8 @@ async fn sync_generic_xml_bash_marker_maps_to_one_tool_use() {
         }],
         "usage":{"prompt_tokens":1,"completion_tokens":1}
     });
-    let (app, state) = harness(vec![Fixture::Json(fixture)]).await;
+    let retry_fixture = fixture.clone();
+    let (app, state) = harness(vec![Fixture::Json(fixture), Fixture::Json(retry_fixture)]).await;
     let mut request = anthropic_request(false);
     request["tools"] = json!([{
         "name":"Bash",
@@ -1211,7 +1410,8 @@ async fn streaming_generic_xml_agent_marker_is_fragment_safe_and_exact_once() {
         .into_bytes(),
     );
     chunks.push(b"data: [DONE]\n\n".to_vec());
-    let (app, state) = harness(vec![Fixture::Sse(chunks)]).await;
+    let retry_chunks = chunks.clone();
+    let (app, state) = harness(vec![Fixture::Sse(chunks), Fixture::Sse(retry_chunks)]).await;
     let mut request = anthropic_request(true);
     request["tools"] = json!([{
         "name":"Agent",
@@ -1243,6 +1443,246 @@ async fn streaming_generic_xml_agent_marker_is_fragment_safe_and_exact_once() {
     assert!(!body.contains("tool_calls"), "{body}");
     assert!(!body.contains("<invoke"), "{body}");
     assert_eq!(state.requests.lock().await.len(), 1);
+}
+
+#[tokio::test]
+async fn streaming_agent_compat_uses_lazy_fallback_exact_once() {
+    let marker = r#"[Requesting Agent with arguments: {"description":"Compat fanout","prompt":"Inspect parser recovery and return evidence.","subagent_type":"general-purpose"}]"#;
+    let response = || {
+        vec![
+            format!(
+                "data: {}\n\n",
+                json!({
+                    "choices":[{
+                        "delta":{"content":marker},
+                        "finish_reason":"stop"
+                    }]
+                })
+            )
+            .into_bytes(),
+            b"data: [DONE]\n\n".to_vec(),
+        ]
+    };
+    let (app, state) = harness(vec![Fixture::Sse(response()), Fixture::Sse(response())]).await;
+    let mut request = anthropic_request(true);
+    request["tools"] = json!([{
+        "name":"Agent",
+        "description":"Spawn an agent",
+        "input_schema":{
+            "type":"object",
+            "properties":{
+                "description":{"type":"string"},
+                "prompt":{"type":"string"},
+                "subagent_type":{"type":"string"}
+            },
+            "required":["description","prompt"]
+        }
+    }]);
+
+    let (status, body) = call(app, request).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(state.requests.lock().await.len(), 1);
+    assert_eq!(body.matches("\"type\":\"tool_use\"").count(), 1, "{body}");
+    assert_eq!(body.matches("\"name\":\"Agent\"").count(), 1, "{body}");
+    assert!(body.contains("Compat fanout"), "{body}");
+    assert!(
+        body.contains("Inspect parser recovery and return evidence."),
+        "{body}"
+    );
+    assert!(!body.contains("Requesting Agent"), "{body}");
+    assert!(body.contains("\"stop_reason\":\"tool_use\""), "{body}");
+}
+
+#[tokio::test]
+async fn streaming_lazy_encoded_candidate_uses_fallback_without_native_retry() {
+    let encoded_marker = r#"[Requesting Tool execution: 'Bash' with arguments: {"command":"printf STREAM_LAZY_FALLBACK_OK"}]"#;
+    let encoded = vec![
+        format!(
+            "data: {}\n\n",
+            json!({
+                "choices":[{
+                    "delta":{"content":encoded_marker},
+                    "finish_reason":"stop"
+                }]
+            })
+        )
+        .into_bytes(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+    let (app, state, metrics) = harness_core(
+        vec![Fixture::Sse(encoded)],
+        256 * 1024,
+        4 * 1024 * 1024,
+        |_| {},
+    )
+    .await;
+    let mut request = anthropic_request(true);
+    request["tools"] = json!([{
+        "name":"Bash",
+        "description":"Run a harmless command",
+        "input_schema":{
+            "type":"object",
+            "properties":{"command":{"type":"string"}},
+            "required":["command"]
+        }
+    }]);
+
+    let (status, body) = call(app, request).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(state.requests.lock().await.len(), 1, "{body}");
+    assert_eq!(body.matches("\"type\":\"tool_use\"").count(), 1, "{body}");
+    assert!(body.contains("STREAM_LAZY_FALLBACK_OK"), "{body}");
+    assert!(body.contains("toolu_compat_"), "{body}");
+    assert!(!body.contains("Requesting Tool execution"), "{body}");
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.encoded_fallback_candidates, 1);
+    assert_eq!(snapshot.encoded_native_retries, 0);
+    assert_eq!(snapshot.native_tool_calls, 0);
+    assert_eq!(snapshot.encoded_fallback_tool_calls, 1);
+}
+
+#[tokio::test]
+async fn streaming_prefixed_encoded_candidate_uses_lazy_fallback_without_leaking_text() {
+    let marker = r#"[Requesting Read with arguments: {"file_path":"./compat_read.txt"}]"#;
+    let first_text = format!(
+        "I'll emit the Read request in bridge compatibility-marker syntax so the proxy recovers it as a tool call.\n\n{marker}"
+    );
+    let first = vec![
+        format!(
+            "data: {}\n\n",
+            json!({"choices":[{"delta":{"content":first_text},"finish_reason":"stop"}]})
+        )
+        .into_bytes(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+    let native = vec![
+        format!(
+            "data: {}\n\n",
+            json!({
+                "choices":[{
+                    "delta":{"tool_calls":[{
+                        "index":0,
+                        "id":"call_native_read_recovery",
+                        "function":{
+                            "name":"Read",
+                            "arguments":"{\"file_path\":\"./compat_read.txt\"}"
+                        }
+                    }]},
+                    "finish_reason":"tool_calls"
+                }]
+            })
+        )
+        .into_bytes(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+    let (app, state) = harness(vec![Fixture::Sse(first), Fixture::Sse(native)]).await;
+    let mut request = anthropic_request(true);
+    request["tools"] = json!([{
+        "name":"Read",
+        "description":"Read a file",
+        "input_schema":{
+            "type":"object",
+            "properties":{"file_path":{"type":"string"}},
+            "required":["file_path"]
+        }
+    }]);
+
+    let (status, body) = call(app, request).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(state.requests.lock().await.len(), 1, "{body}");
+    assert_eq!(body.matches("\"type\":\"tool_use\"").count(), 1, "{body}");
+    assert!(body.contains("toolu_compat_"), "{body}");
+    assert!(!body.contains("Requesting Read"), "{body}");
+    assert!(!body.contains("I'll emit the Read request"), "{body}");
+}
+
+#[tokio::test]
+async fn streaming_gerund_prefixed_encoded_candidate_uses_lazy_fallback() {
+    let marker = r#"[Requesting Read with arguments: {"file_path":"./compat_read.txt"}]"#;
+    let live_prefix = "Emitting the Read request in bridge compatibility marker syntax so the compat parser recovers it.";
+    let content = format!("{live_prefix}\n\n{marker}");
+    let encoded = vec![
+        format!(
+            "data: {}\n\n",
+            json!({"choices":[{"delta":{"content":content},"finish_reason":"stop"}]})
+        )
+        .into_bytes(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+    let (app, state) = harness(vec![Fixture::Sse(encoded)]).await;
+    let mut request = anthropic_request(true);
+    request["tools"] = json!([{
+        "name":"Read",
+        "description":"Read a file",
+        "input_schema":{
+            "type":"object",
+            "properties":{"file_path":{"type":"string"}},
+            "required":["file_path"]
+        }
+    }]);
+
+    let (status, body) = call(app, request).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(state.requests.lock().await.len(), 1, "{body}");
+    assert_eq!(body.matches("\"type\":\"tool_use\"").count(), 1, "{body}");
+    assert!(body.contains("toolu_compat_"), "{body}");
+    assert!(body.contains("\"name\":\"Read\""), "{body}");
+    assert!(!body.contains("Requesting Read"), "{body}");
+    assert!(!body.contains(live_prefix), "{body}");
+}
+
+#[tokio::test]
+async fn streaming_native_call_wins_over_duplicate_encoded_marker_same_response() {
+    let marker =
+        r#"[Requesting Tool execution: 'Bash' with arguments: {"command":"printf NATIVE_WINS"}]"#;
+    let duplicate_and_native = vec![
+        format!(
+            "data: {}\n\n",
+            json!({
+                "choices":[{
+                    "delta":{
+                        "content":marker,
+                        "tool_calls":[{
+                            "index":0,
+                            "id":"call_native_wins",
+                            "function":{
+                                "name":"Bash",
+                                "arguments":"{\"command\":\"printf NATIVE_WINS\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason":"tool_calls"
+                }]
+            })
+        )
+        .into_bytes(),
+        b"data: [DONE]\n\n".to_vec(),
+    ];
+    let (app, state) = harness(vec![Fixture::Sse(duplicate_and_native)]).await;
+    let mut request = anthropic_request(true);
+    request["tools"] = json!([{
+        "name":"Bash",
+        "description":"Run a command",
+        "input_schema":{
+            "type":"object",
+            "properties":{"command":{"type":"string"}},
+            "required":["command"]
+        }
+    }]);
+
+    let (status, body) = call(app, request).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(state.requests.lock().await.len(), 1);
+    assert_eq!(body.matches("\"type\":\"tool_use\"").count(), 1, "{body}");
+    assert!(body.contains("\"id\":\"call_native_wins\""), "{body}");
+    assert!(!body.contains("toolu_compat_"), "{body}");
+    assert!(!body.contains("Requesting Tool execution"), "{body}");
+    assert_eq!(body.matches("NATIVE_WINS").count(), 1, "{body}");
 }
 
 #[tokio::test]

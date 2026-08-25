@@ -1105,6 +1105,7 @@ fn parse_compat_tool_requests_impl(
         }
         if let Some(arguments) = normalize_compat_json_arguments(raw)
             .and_then(|normalized| serde_json::from_str::<serde_json::Value>(&normalized).ok())
+            .filter(serde_json::Value::is_object)
         {
             return Some(ParsedCompatMarker {
                 prefix,
@@ -1121,6 +1122,7 @@ fn parse_compat_tool_requests_impl(
         {
             if let Some(arguments) = normalize_compat_json_arguments(raw)
                 .and_then(|normalized| serde_json::from_str::<serde_json::Value>(&normalized).ok())
+                .filter(serde_json::Value::is_object)
             {
                 return Some(ParsedCompatMarker {
                     prefix,
@@ -1152,7 +1154,11 @@ fn parse_compat_argument_sequence(
             return None;
         }
         let normalized = normalize_compat_json_arguments(&text[cursor..arguments_end])?;
-        values.push(serde_json::from_str::<serde_json::Value>(&normalized).ok()?);
+        let arguments = serde_json::from_str::<serde_json::Value>(&normalized).ok()?;
+        if !arguments.is_object() {
+            return None;
+        }
+        values.push(arguments);
         cursor = skip_compat_whitespace(text, arguments_end);
 
         if text.get(cursor..).is_some_and(|rest| rest.starts_with(',')) {
@@ -1523,6 +1529,27 @@ pub(super) fn normalize_search_query(query: &str) -> String {
         .to_lowercase()
 }
 
+pub(super) fn prepare_native_tool_retry(payload: &mut MessagesRequest) {
+    let available_tools = payload
+        .tools
+        .as_ref()
+        .map(|tools| {
+            tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .filter(|names| !names.is_empty())
+        .unwrap_or_else(|| "none".to_string());
+    append_system_instruction(
+        payload,
+        &format!(
+            "Your previous response expressed an intended tool call as encoded text instead of using the API's native tool-calling protocol. Re-evaluate the current task and reissue every intended tool invocation using native function/tool calls only. Use only tools available in this request: {available_tools}. Every tool argument payload must be one complete JSON object matching the supplied tool schema. Do not print `[Requesting ...]` markers, DSML, `<tool_calls>`, `<tvToolcalls>`, XML tool markup, or prose that merely describes a tool call. Invoke the native tool now if a tool is still required; otherwise answer normally."
+        ),
+    );
+}
+
 pub(super) fn prepare_compat_tool_retry(payload: &mut MessagesRequest) {
     let available_tools = payload
         .tools
@@ -1639,72 +1666,6 @@ pub(super) fn matching_tool_name(name: &str, payload: &MessagesRequest) -> Optio
 pub(super) fn tool_call_fingerprint(name: &str, arguments: &serde_json::Value) -> String {
     let serialized = serde_json::to_string(arguments).unwrap_or_else(|_| "null".to_string());
     format!("{}\u{0}{serialized}", name.to_ascii_lowercase())
-}
-
-/// Split visible narration that arrived in the same upstream response as a
-/// tool call. Some free providers stop the content field in the middle of a
-/// word or sentence when switching to `tool_calls`. Anthropic responses are
-/// append-only, so emit only through the last trustworthy sentence boundary
-/// and omit the unfinished tail rather than exposing corrupted narration.
-pub(super) fn split_completed_pre_tool_text(text: &str) -> (&str, &str) {
-    fn is_closing_punctuation(ch: char) -> bool {
-        matches!(ch, '"' | '\'' | ')' | ']' | '}' | '»' | '”' | '’')
-    }
-
-    let mut completed = 0usize;
-    let mut cursor = 0usize;
-    while cursor < text.len() {
-        let ch = text[cursor..]
-            .chars()
-            .next()
-            .expect("cursor remains on a UTF-8 boundary");
-        let next = cursor + ch.len_utf8();
-
-        if ch == '\n' {
-            completed = next;
-            cursor = next;
-            continue;
-        }
-
-        if matches!(ch, '.' | '!' | '?' | '。' | '！' | '？') {
-            let mut boundary = next;
-            while boundary < text.len() {
-                let trailing = text[boundary..]
-                    .chars()
-                    .next()
-                    .expect("boundary remains on a UTF-8 boundary");
-                if is_closing_punctuation(trailing) {
-                    boundary += trailing.len_utf8();
-                } else {
-                    break;
-                }
-            }
-
-            if boundary == text.len()
-                || text[boundary..]
-                    .chars()
-                    .next()
-                    .is_some_and(char::is_whitespace)
-            {
-                while boundary < text.len() {
-                    let trailing = text[boundary..]
-                        .chars()
-                        .next()
-                        .expect("boundary remains on a UTF-8 boundary");
-                    if trailing.is_whitespace() {
-                        boundary += trailing.len_utf8();
-                    } else {
-                        break;
-                    }
-                }
-                completed = boundary;
-            }
-        }
-
-        cursor = next;
-    }
-
-    text.split_at(completed)
 }
 
 /// Detect short claims that assert a side effect already succeeded before the
@@ -2040,7 +2001,7 @@ mod compat_parser_invariant_tests {
                 "command": "printf 'a\\|b'",
                 "nested": {"x": [1, true, null]}
             }),
-            serde_json::json!([{"path": "a"}, {"path": "b"}]),
+            serde_json::json!({"items": [{"path": "a"}, {"path": "b"}]}),
             serde_json::json!({
                 "unicode": "Tiếng Việt 日本語 🦀",
                 "quote": "a \" b"
@@ -2059,6 +2020,23 @@ mod compat_parser_invariant_tests {
             assert_eq!(parsed.consumed, marker.len());
             assert!(marker.is_char_boundary(parsed.consumed));
         }
+    }
+
+    #[test]
+    fn compat_single_call_arguments_must_be_objects() {
+        for raw in [r#""ls""#, "123", r#"["ls"]"#] {
+            let marker = format!("[Requesting Tool execution: 'Bash' with arguments: {raw}]");
+            assert!(
+                parse_compat_tool_requests_with_consumed(&marker).is_none(),
+                "non-object compatibility arguments must be rejected: {raw}"
+            );
+        }
+
+        let marker = r#"[Requesting Tool execution: 'Bash' with arguments: {"command":"ls"}]"#;
+        let parsed = parse_compat_tool_requests_with_consumed(marker)
+            .expect("object compatibility arguments should remain supported");
+        assert_eq!(parsed.calls.len(), 1);
+        assert!(parsed.calls[0].arguments.is_object());
     }
 
     #[test]

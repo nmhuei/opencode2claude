@@ -203,9 +203,17 @@ async fn compat_retry_fires_after_search_round() {
     // emits only a truncated compat marker must still retry — the round
     // itself emitted nothing, so replay is safe and must not be blocked by
     // the turn-global sticky block tracker.
-    let text_prefix = sse_delta(json!({"content": "Researching: "}));
-    let search_marker = sse_delta(json!({
-        "content": "[Requesting Tool execution: 'web_search' with arguments:{\"query\":\"rust async\"}]"
+    let search_chunk = sse_delta(json!({
+        "content": "Researching: ",
+        "tool_calls": [{
+            "index": 0,
+            "id": "tc_search_1",
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "arguments": "{\"query\":\"rust async\"}"
+            }
+        }]
     }));
     let truncated_marker = sse_delta(
         json!({"content": "[Requesting Tool execution: 'Bash' with arguments:{\"command\":\"echo unfinished\""}),
@@ -215,11 +223,7 @@ async fn compat_retry_fires_after_search_round() {
     }));
     let (app, state) = harness(
         vec![
-            Fixture::Sse(vec![
-                text_prefix.into_bytes(),
-                search_marker.into_bytes(),
-                sse_done().into_bytes(),
-            ]),
+            Fixture::Sse(vec![search_chunk.into_bytes(), sse_done().into_bytes()]),
             Fixture::Sse(vec![truncated_marker.into_bytes(), sse_done().into_bytes()]),
             Fixture::Sse(vec![bash_marker.into_bytes(), sse_done().into_bytes()]),
         ],
