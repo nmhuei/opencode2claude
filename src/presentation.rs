@@ -132,14 +132,14 @@ pub fn facts(rows: &[(&str, String)]) -> String {
             .iter()
             .map(|(label, value)| {
                 let label = truncate(label, available);
-                let value = truncate(&crate::tui::strip_ansi(value), available);
-                format!(
-                    "{}{}\n{}{}",
-                    " ".repeat(INDENT),
-                    label,
-                    " ".repeat(INDENT * 2),
-                    value
-                )
+                let clean = crate::tui::strip_ansi(value);
+                let value_lines = wrap(&clean, available);
+                let rendered_value = value_lines
+                    .iter()
+                    .map(|line| format!("{}{}", " ".repeat(INDENT * 2), line))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!("{}{}\n{}", " ".repeat(INDENT), label, rendered_value)
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -160,18 +160,26 @@ pub fn facts(rows: &[(&str, String)]) -> String {
         .map(|(label, value)| {
             let label = truncate(label, label_width);
             let label = crate::tui::pad_to_width(&label, label_width);
-            let value = if crate::tui::visible_width(value) > value_width {
-                truncate(&crate::tui::strip_ansi(value), value_width)
+            let clean = crate::tui::strip_ansi(value);
+            let value_lines = if crate::tui::visible_width(value) > value_width {
+                wrap(&clean, value_width)
             } else {
-                value.clone()
+                vec![value.clone()]
             };
-            format!(
+            let continuation_prefix = " ".repeat(INDENT + label_width + LABEL_GAP);
+            let mut rendered = format!(
                 "{}{}{}{}",
                 " ".repeat(INDENT),
                 label,
                 " ".repeat(LABEL_GAP),
-                value
-            )
+                value_lines.first().cloned().unwrap_or_default()
+            );
+            for line in value_lines.iter().skip(1) {
+                rendered.push('\n');
+                rendered.push_str(&continuation_prefix);
+                rendered.push_str(line);
+            }
+            rendered
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -199,6 +207,20 @@ mod tests {
         let value = truncate("hello世界", 7);
         assert!(UnicodeWidthStr::width(value.as_str()) <= 7);
         assert!(value.ends_with('…'));
+    }
+
+    #[test]
+    fn facts_wrap_long_values_without_losing_content() {
+        std::env::set_var("COLUMNS", "58");
+        let value =
+            "/home/light/Downloads/bqa/opencode2claude-branch-audit/runtime/opencode2api.log";
+        let output = facts(&[("Log", value.to_string())]);
+        assert!(!output.contains('…'));
+        assert_eq!(
+            output.split_whitespace().collect::<String>(),
+            format!("Log{value}")
+        );
+        std::env::remove_var("COLUMNS");
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 use super::view::{
     cmd_print_config, cmd_print_status, maybe_print_proxy_table, print_brand_header, print_error,
-    print_success, print_tip, show_logs, ServerStatusInfo,
+    print_start_summary, print_success, print_tip, show_logs, ServerStatusInfo,
 };
 use crate::cli::{self, ServerCommand};
 use crate::config::{self, BridgeConfig};
@@ -106,7 +106,7 @@ pub(super) async fn cmd_server(cmd: ServerCommand, fmt: OutputFormat) {
         ServerCommand::Status(args) => {
             let sup = resolve_runtime(args.port, args.host);
             if fmt == OutputFormat::Json {
-                let status_info = status_info(sup.status().map_err(|e| e.to_string()));
+                let status_info = status_info(sup.status().map_err(|e| e.to_string())).await;
                 if let Ok(s) = serde_json::to_string_pretty(&status_info) {
                     println!("{s}");
                 }
@@ -135,7 +135,7 @@ pub(super) async fn cmd_server(cmd: ServerCommand, fmt: OutputFormat) {
                     let status = sup.status().unwrap_or(SupervisorStatus::Stopped);
                     match fmt {
                         OutputFormat::Json => {
-                            let info = status_info(Ok(status));
+                            let info = status_info(Ok(status)).await;
                             match serde_json::to_string_pretty(&info) {
                                 Ok(json) => println!("{json}"),
                                 Err(error) => eprintln!("{error}"),
@@ -184,18 +184,44 @@ pub(super) async fn cmd_server(cmd: ServerCommand, fmt: OutputFormat) {
                     bridge_port: u16,
                     bridge_host: String,
                     auth_enabled: bool,
+                    dashboard_auth_configured: bool,
                     shell_policy: String,
                     model: String,
+                    egress_mode: String,
+                    upstream_base_url: String,
                     max_body_size: usize,
+                    stream_buffer_size: usize,
+                    channel_capacity: usize,
+                    max_search_loops: u32,
+                    metrics_enabled: bool,
+                    history_enabled: bool,
+                    config_path: String,
+                    runtime_dir: String,
                 }
                 let cfg = BridgeConfig::from_env_and_cli(config::CliOverrides::default());
+                let paths = RuntimePaths::from_config(&cfg);
+                let egress_mode = match cfg.egress.mode {
+                    config::EgressMode::Direct => "direct",
+                    config::EgressMode::Proxy => "proxy",
+                    config::EgressMode::Hybrid => "hybrid",
+                };
                 let info = ConfigInfo {
                     bridge_port: cfg.bridge_port,
                     bridge_host: cfg.host.to_string(),
                     auth_enabled: cfg.auth_enabled(),
+                    dashboard_auth_configured: cfg.management.dashboard_token().is_some(),
                     shell_policy: cfg.shell_policy.description().to_string(),
-                    model: cfg.model.unwrap_or_else(|| "auto".to_string()),
+                    model: cfg.model.clone().unwrap_or_else(|| "auto".to_string()),
+                    egress_mode: egress_mode.to_string(),
+                    upstream_base_url: cfg.retry.upstream_base_url.clone(),
                     max_body_size: cfg.max_body_size,
+                    stream_buffer_size: cfg.stream_buffer_size,
+                    channel_capacity: cfg.channel_capacity,
+                    max_search_loops: cfg.max_search_loops,
+                    metrics_enabled: cfg.observability.metrics_enabled,
+                    history_enabled: cfg.history.enabled,
+                    config_path: cfg.management.config_path.display().to_string(),
+                    runtime_dir: paths.runtime_dir().display().to_string(),
                 };
                 if let Ok(s) = serde_json::to_string_pretty(&info) {
                     println!("{s}");
@@ -228,7 +254,7 @@ pub(super) async fn start_daemon(args: cli::ServerStartArgs, fmt: OutputFormat) 
                 SupervisorError::AlreadyRunning(_) | SupervisorError::AlreadyRunningUnmanaged(_),
             ) => {
                 let status = sup.status().unwrap_or(SupervisorStatus::Stopped);
-                let info = status_info(Ok(status));
+                let info = status_info(Ok(status)).await;
                 match serde_json::to_string_pretty(&info) {
                     Ok(json) => println!("{json}"),
                     Err(error) => println!(
@@ -280,8 +306,9 @@ pub(super) async fn start_daemon(args: cli::ServerStartArgs, fmt: OutputFormat) 
                 println!("running");
             } else {
                 print_success("Gateway started");
-                print_tip(&status.to_string());
-                maybe_print_proxy_table(fmt).await;
+                println!();
+                let resolved = resolve_config_for_start(&args);
+                print_start_summary(&status, &resolved).await;
                 println!();
             }
         }
@@ -294,8 +321,9 @@ pub(super) async fn start_daemon(args: cli::ServerStartArgs, fmt: OutputFormat) 
                 println!("running");
             } else {
                 print_success("Gateway is already running");
-                print_tip(&status.to_string());
-                maybe_print_proxy_table(fmt).await;
+                println!();
+                let resolved = BridgeConfig::from_env_and_cli(config::CliOverrides::default());
+                print_start_summary(&status, &resolved).await;
                 println!();
             }
         }
@@ -351,7 +379,7 @@ pub(super) async fn cmd_start_legacy(args: cli::StartArgs, fmt: OutputFormat) {
 pub(super) async fn cmd_status_legacy(args: cli::StatusArgs, fmt: OutputFormat) {
     let sup = resolve_runtime(args.port, args.host);
     if fmt == OutputFormat::Json {
-        let status_info = status_info(sup.status().map_err(|e| e.to_string()));
+        let status_info = status_info(sup.status().map_err(|e| e.to_string())).await;
         if let Ok(s) = serde_json::to_string_pretty(&status_info) {
             println!("{s}");
         }
@@ -385,7 +413,7 @@ pub(super) async fn cmd_restart_legacy(fmt: OutputFormat) {
         Ok(()) => {
             let status = sup.status().unwrap_or(SupervisorStatus::Stopped);
             if fmt == OutputFormat::Json {
-                let info = status_info(Ok(status));
+                let info = status_info(Ok(status)).await;
                 if let Ok(s) = serde_json::to_string_pretty(&info) {
                     println!("{s}");
                 }
@@ -425,9 +453,17 @@ pub(super) async fn cmd_run_server(args: ServeArgsBridge) {
 
 // ── Runtime helpers ──
 
-fn status_info(result: Result<SupervisorStatus, String>) -> ServerStatusInfo {
+async fn status_info(result: Result<SupervisorStatus, String>) -> ServerStatusInfo {
+    let port = match &result {
+        Ok(SupervisorStatus::Running { port, .. }) => Some(*port),
+        _ => None,
+    };
     let config = BridgeConfig::from_env_and_cli(config::CliOverrides::default());
-    ServerStatusInfo::from_status(result, &config)
+    let mut info = ServerStatusInfo::from_status(result, &config);
+    if let Some(port) = port {
+        info.enrich_runtime(port).await;
+    }
+    info
 }
 
 pub(super) fn resolve_runtime(port: Option<u16>, host: Option<String>) -> Supervisor {

@@ -50,7 +50,10 @@ pub fn environment(config: &BridgeConfig) -> IntegrationEnvironment {
         .filter(|value| !value.trim().is_empty())
         .unwrap_or(OX_ALPHA_MODEL);
 
-    exports.push(format!("export OPENCODE_MODEL={}", shell_quote(effective_model)));
+    exports.push(format!(
+        "export OPENCODE_MODEL={}",
+        shell_quote(effective_model)
+    ));
     if effective_model == OX_ALPHA_MODEL {
         exports.extend(ox_alpha_claude_code_exports());
     }
