@@ -94,10 +94,7 @@ fn remove_managed_block_text(input: &str) -> (String, bool) {
     let mut text = input.to_string();
     let mut changed = false;
 
-    loop {
-        let Some(start) = text.find(HOOK_BEGIN) else {
-            break;
-        };
+    while let Some(start) = text.find(HOOK_BEGIN) {
         let Some(end_rel) = text[start..].find(HOOK_END) else {
             break;
         };

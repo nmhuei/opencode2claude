@@ -97,9 +97,47 @@ if command -v opencode2api >/dev/null 2>&1; then
     fi
 fi
 
-# Check PID files
+# Only terminate processes whose actual executable is one of our bridge
+# binaries. Never match arbitrary command lines: build tools, editors, or
+# shells may legitimately contain the repository name in their arguments.
+is_bridge_process() {
+    candidate_pid="$1"
+    [ -n "$candidate_pid" ] || return 1
+    case "$candidate_pid" in *[!0-9]*) return 1 ;; esac
+
+    process_name=""
+    if [ -e "/proc/${candidate_pid}/exe" ]; then
+        process_exe="$(readlink "/proc/${candidate_pid}/exe" 2>/dev/null || true)"
+        process_name="${process_exe##*/}"
+        process_name="${process_name% (deleted)}"
+    elif command -v ps >/dev/null 2>&1; then
+        process_name="$(ps -p "$candidate_pid" -o comm= 2>/dev/null | awk '{$1=$1; print}' || true)"
+    fi
+
+    case "$process_name" in
+        opencode2api|opencode2api-serve|opencode2claude) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+pid_from_file() {
+    pidfile="$1"
+    case "$pidfile" in
+        *.json)
+            sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$pidfile" 2>/dev/null | head -1
+            ;;
+        *)
+            sed -n '1{s/^[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$/\1/p;q;}' "$pidfile" 2>/dev/null
+            ;;
+    esac
+}
+
+# Current and legacy default PID locations. A stale PID file is never enough
+# to justify a signal: the executable identity must also match.
 PID_FILES=(
+    "${HOME}/.opencode2api/opencode2api.pid.json"
     "${HOME}/.opencode2api/opencode2api.pid"
+    "${HOME}/.opencode2claude/opencode2claude.pid.json"
     "${HOME}/.opencode2claude/opencode2claude.pid"
     "/tmp/opencode2api.pid"
     "/tmp/opencode2claude.pid"
@@ -107,28 +145,57 @@ PID_FILES=(
 
 for pidfile in "${PID_FILES[@]}"; do
     if [ -f "$pidfile" ]; then
-        pid="$(cat "$pidfile" 2>/dev/null || true)"
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        pid="$(pid_from_file "$pidfile")"
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && is_bridge_process "$pid"; then
             if [ "$DRY_RUN" = true ]; then
-                info "  [dry-run] would kill daemon PID $pid from $pidfile"
+                info "  [dry-run] would stop verified daemon PID $pid from $pidfile"
             else
                 kill "$pid" 2>/dev/null || true
                 sleep 0.5
-                kill -9 "$pid" 2>/dev/null || true
-                ok "Stopped daemon process (PID: $pid)"
+                if kill -0 "$pid" 2>/dev/null && is_bridge_process "$pid"; then
+                    kill -9 "$pid" 2>/dev/null || true
+                fi
+                ok "Stopped verified daemon process (PID: $pid)"
             fi
+        elif [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            warn "Ignoring stale/untrusted PID $pid from $pidfile (executable does not match)."
         fi
         [ "$DRY_RUN" = false ] && rm -f "$pidfile" 2>/dev/null || true
     fi
 done
 
-# Kill any leftover matching binaries
-LEFT_PIDS="$(pgrep -f '(opencode2api|opencode2claude)' 2>/dev/null || true)"
+# Find leftover bridge executables by process identity rather than pgrep -f.
+# The old command-line substring match could terminate cargo/rustc/editor
+# processes merely because their paths contained 'opencode2api'.
+LEFT_PIDS=""
+if [ -d /proc ]; then
+    for proc_exe in /proc/[0-9]*/exe; do
+        [ -e "$proc_exe" ] || continue
+        p="${proc_exe#/proc/}"
+        p="${p%/exe}"
+        [ "$p" = "$$" ] && continue
+        if is_bridge_process "$p"; then
+            LEFT_PIDS="${LEFT_PIDS}${LEFT_PIDS:+ }${p}"
+        fi
+    done
+elif command -v ps >/dev/null 2>&1; then
+    while read -r p process_name; do
+        [ -n "$p" ] || continue
+        [ "$p" = "$$" ] && continue
+        case "$process_name" in
+            opencode2api|opencode2api-serve|opencode2claude)
+                LEFT_PIDS="${LEFT_PIDS}${LEFT_PIDS:+ }${p}"
+                ;;
+        esac
+    done <<EOF
+$(ps -eo pid=,comm= 2>/dev/null || true)
+EOF
+fi
+
 if [ -n "$LEFT_PIDS" ]; then
     for p in $LEFT_PIDS; do
-        [ "$p" = "$$" ] && continue
         if [ "$DRY_RUN" = true ]; then
-            info "  [dry-run] would terminate process PID $p"
+            info "  [dry-run] would terminate verified bridge executable PID $p"
         else
             kill "$p" 2>/dev/null || true
         fi
@@ -265,12 +332,23 @@ else
     done
 fi
 
-# Clean temp debug / log files
-if [ "$DRY_RUN" = true ]; then
-    info "  [dry-run] would clean temporary /tmp/opencode2* files"
-else
-    rm -rf /tmp/opencode2api* /tmp/opencode2claude* /tmp/.opencode2api* /tmp/.opencode2claude* 2>/dev/null || true
-    ok "Cleaned temporary files in /tmp."
+# Clean only known legacy runtime files. Do not wildcard-delete /tmp paths:
+# developers may have unrelated worktrees/build targets whose names contain
+# opencode2api/opencode2claude.
+LEGACY_RUNTIME_FILES=(
+    "/tmp/opencode2api.pid"
+    "/tmp/opencode2claude.pid"
+)
+for legacy_path in "${LEGACY_RUNTIME_FILES[@]}"; do
+    [ -e "$legacy_path" ] || continue
+    if [ "$DRY_RUN" = true ]; then
+        info "  [dry-run] would remove legacy runtime file: $legacy_path"
+    else
+        rm -f "$legacy_path" 2>/dev/null || true
+    fi
+done
+if [ "$DRY_RUN" = false ]; then
+    ok "Cleaned known legacy runtime files."
 fi
 
 printf '%s\n' ""

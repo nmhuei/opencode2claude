@@ -347,6 +347,8 @@ mod tests {
         .unwrap();
         assert_eq!(claude.client.key_id, "system_claude_code");
         for requested_model in [
+            "claude-3-5-sonnet",
+            "claude-3-7-sonnet",
             "claude-sonnet-4-6",
             "claude-sonnet-5",
             "claude-fable-5",

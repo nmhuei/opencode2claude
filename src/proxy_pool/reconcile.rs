@@ -266,8 +266,23 @@ async fn reconcile_once(
         return Err("hybrid proxy pool has no configured candidates".to_string());
     }
 
+    let mut bootstrapped = Vec::new();
+    let mut bootstrap_error = None;
     for candidate in &candidates {
-        ensure_candidate(runtime, candidate, config).await?;
+        match ensure_candidate(runtime, candidate, config).await {
+            Ok(()) => bootstrapped.push(candidate.clone()),
+            Err(error) => {
+                if bootstrap_error.is_none() {
+                    bootstrap_error = Some(error);
+                }
+                pool.write().await.record_failure(candidate.index);
+            }
+        }
+    }
+    if bootstrapped.is_empty() {
+        return Err(
+            bootstrap_error.unwrap_or_else(|| "no proxy candidate could be started".to_string())
+        );
     }
 
     subsystem
@@ -276,7 +291,7 @@ async fn reconcile_once(
         .transition(ProxySubsystemPhase::TransportVerifying, None);
     let mut transport_ready = Vec::new();
     let mut first_error = None;
-    for candidate in &candidates {
+    for candidate in &bootstrapped {
         match verify_transport_stage(verifier, &candidate.client, config.egress.verify_timeout)
             .await
         {

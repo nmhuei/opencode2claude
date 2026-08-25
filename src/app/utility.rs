@@ -336,7 +336,7 @@ pub(super) fn cmd_shell(command: ShellCommand, fmt: OutputFormat) {
                 );
                 std::process::exit(1);
             }
-            print!("{}\n", shell_integration::render_hook());
+            println!("{}", shell_integration::render_hook());
         }
         ShellCommand::Install(args) => {
             let rc = args.rc.as_deref().map(Path::new);

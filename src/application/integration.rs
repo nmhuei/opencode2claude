@@ -44,21 +44,22 @@ pub fn environment(config: &BridgeConfig) -> IntegrationEnvironment {
         ),
         "unset ANTHROPIC_AUTH_TOKEN".to_string(),
     ];
-    if let Some(model) = config
+    let effective_model = config
         .model
         .as_deref()
         .filter(|value| !value.trim().is_empty())
-    {
-        exports.push(format!("export OPENCODE_MODEL={}", shell_quote(model)));
-        if model == OX_ALPHA_MODEL {
-            exports.extend(ox_alpha_claude_code_exports());
-        }
+        .unwrap_or(OX_ALPHA_MODEL);
+
+    exports.push(format!("export OPENCODE_MODEL={}", shell_quote(effective_model)));
+    if effective_model == OX_ALPHA_MODEL {
+        exports.extend(ox_alpha_claude_code_exports());
     }
+
     IntegrationEnvironment {
         anthropic_base_url: base.clone(),
         openai_base_url: format!("{base}/v1"),
         api_key: key,
-        model: config.model.clone(),
+        model: Some(effective_model.to_string()),
         shell_exports: exports,
     }
 }
