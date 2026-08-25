@@ -326,7 +326,7 @@ impl Default for BridgeConfig {
                 max_backoff: Duration::from_secs(30),
             },
             egress: EgressConfig {
-                mode: EgressMode::Direct,
+                mode: EgressMode::Hybrid,
                 active_proxy_count: 1,
                 require_verified_exit_ip: true,
                 minimum_unique_exit_ips: 1,

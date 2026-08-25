@@ -332,7 +332,7 @@ pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
         .or_else(|| file.as_ref().and_then(|cfg| cfg.egress_mode.clone()))
         .as_deref()
         .and_then(EgressMode::parse)
-        .unwrap_or(EgressMode::Proxy);
+        .unwrap_or(EgressMode::Hybrid);
     resolved.egress.active_proxy_count = env_parse("BRIDGE_ACTIVE_PROXY_COUNT")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.active_proxy_count))
         .unwrap_or(1);
