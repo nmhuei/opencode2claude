@@ -369,7 +369,7 @@ pub(super) fn cmd_shell(command: ShellCommand, fmt: OutputFormat) {
                         );
                         println!();
                         print_tip(&format!(
-                            "Open a new terminal or run `source {}` once; then `opencode2api set env` updates that terminal session.",
+                            "Open a new terminal or run `source {}` once; then just run `opencode2api` to start the bridge, load the environment, and open Claude Code. `opencode2api set env` remains available for env-only use.",
                             result.path.display()
                         ));
                         println!();

@@ -1,8 +1,10 @@
 //! Persistent shell integration for commands that must mutate the parent shell.
 //!
 //! A child process cannot modify its parent's environment. The installed shell
-//! hook therefore intercepts `opencode2api set env` and evaluates the canonical
-//! `opencode2api --quiet env` output inside the current interactive shell.
+//! hook therefore turns bare `opencode2api` into a one-command Claude Code launcher:
+//! it ensures the bridge is running, evaluates the canonical bridge environment in
+//! the current interactive shell, and launches `claude`. `opencode2api set env`
+//! remains available for users who only want to update the parent-shell environment.
 
 use anyhow::{anyhow, Context, Result};
 use std::path::{Path, PathBuf};
@@ -77,6 +79,20 @@ pub fn render_hook() -> String {
     format!(
         r#"{HOOK_BEGIN}
 opencode2api() {{
+    if [ "$#" -eq 0 ]; then
+        local _opencode2api_env _opencode2api_status
+        if ! command -v claude >/dev/null 2>&1; then
+            printf '%s\n' 'opencode2api: Claude Code is not installed or not available in PATH.' >&2
+            return 127
+        fi
+        command opencode2api --quiet server start >/dev/null || return $?
+        _opencode2api_env="$(command opencode2api --quiet env)" || return $?
+        eval "$_opencode2api_env"
+        _opencode2api_status=$?
+        [ "$_opencode2api_status" -eq 0 ] || return "$_opencode2api_status"
+        command claude
+        return $?
+    fi
     if [ "$#" -eq 2 ] && [ "$1" = "set" ] && [ "$2" = "env" ]; then
         local _opencode2api_env _opencode2api_status
         _opencode2api_env="$(command opencode2api --quiet env)" || return $?
@@ -188,11 +204,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hook_intercepts_only_set_env_and_delegates_everything_else() {
+    fn hook_launches_claude_for_bare_command_and_preserves_manual_env_mode() {
         let hook = render_hook();
+        assert!(hook.contains("[ \"$#\" -eq 0 ]"));
+        assert!(hook.contains("command -v claude"));
+        assert!(hook.contains("command opencode2api --quiet server start"));
+        assert!(hook.contains("command opencode2api --quiet env"));
+        assert!(hook.contains("command claude"));
         assert!(hook.contains("[ \"$1\" = \"set\" ]"));
         assert!(hook.contains("[ \"$2\" = \"env\" ]"));
-        assert!(hook.contains("command opencode2api --quiet env"));
         assert!(hook.contains("command opencode2api \"$@\""));
         assert!(!hook.contains("OPENCODE_MODEL="));
         assert!(!hook.contains("CLAUDE_CODE_EFFORT_LEVEL="));
