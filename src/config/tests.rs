@@ -24,10 +24,138 @@ fn test_default_config() {
     assert!(config.model.is_none());
     assert!(!config.auth_enabled());
     assert_eq!(config.stream_buffer_size, DEFAULT_STREAM_BUFFER_SIZE);
+    assert_eq!(
+        config.primary_proxies.as_deref(),
+        Some(["socks5h://127.0.0.1:40001".to_string()].as_slice())
+    );
+    assert_eq!(
+        config.warm_standby_proxies.as_deref(),
+        Some(["socks5h://127.0.0.1:40004".to_string()].as_slice())
+    );
+    assert_eq!(config.egress.active_proxy_count, 1);
     assert!(
         matches!(config.shell_policy, ShellPolicy::Disabled),
         "default shell policy must be Disabled for security reasons"
     );
+}
+
+#[test]
+fn agent_team_defaults_have_high_capacity_without_global_concurrency_cap() {
+    let config = BridgeConfig::default();
+
+    assert_eq!(config.max_body_size, 64 * 1024 * 1024);
+    assert_eq!(config.stream_buffer_size, 64 * 1024);
+    assert_eq!(config.channel_capacity, 2048);
+    assert_eq!(config.max_search_loops, 20);
+    assert_eq!(config.retry.max_network_attempts, 8);
+    assert_eq!(config.retry.max_provider_attempts, 2);
+    assert_eq!(config.retry.base_backoff, std::time::Duration::from_secs(1));
+    assert_eq!(config.retry.max_backoff, std::time::Duration::from_secs(30));
+    assert_eq!(config.egress.max_restart_attempts, 6);
+    assert_eq!(
+        config.runtime.worker_shutdown_timeout,
+        std::time::Duration::from_secs(30)
+    );
+    assert_eq!(
+        config.runtime.server_shutdown_timeout,
+        std::time::Duration::from_secs(30)
+    );
+    assert!(config.observability.max_concurrent_requests.is_none());
+
+    assert_eq!(config.protocol.max_sse_line_bytes, 4 * 1024 * 1024);
+    assert_eq!(config.protocol.max_sync_response_bytes, 32 * 1024 * 1024);
+    assert_eq!(config.search.max_results, 20);
+    assert_eq!(config.search.max_snippet_chars, 2000);
+    assert_eq!(config.search.max_response_bytes, 8 * 1024 * 1024);
+    assert_eq!(
+        config.search.request_timeout,
+        std::time::Duration::from_secs(30)
+    );
+
+    assert_eq!(config.history.max_records, 1_000_000);
+    assert_eq!(config.history.max_database_bytes, 16 * 1024 * 1024 * 1024);
+    assert_eq!(config.history.max_request_bytes, 8 * 1024 * 1024);
+    assert_eq!(config.history.max_reasoning_bytes, 16 * 1024 * 1024);
+    assert_eq!(config.history.max_response_bytes, 16 * 1024 * 1024);
+    assert_eq!(config.history.max_tool_payload_bytes, 4 * 1024 * 1024);
+    assert_eq!(config.history.max_record_bytes, 48 * 1024 * 1024);
+    assert_eq!(config.history.queue_capacity, 8192);
+}
+
+#[test]
+fn hybrid_egress_mode_parses_without_changing_direct_or_proxy() {
+    assert_eq!(EgressMode::parse("hybrid"), Some(EgressMode::Hybrid));
+    assert_eq!(EgressMode::parse("direct"), Some(EgressMode::Direct));
+    assert_eq!(EgressMode::parse("proxy"), Some(EgressMode::Proxy));
+    assert_eq!(EgressMode::parse("warp"), Some(EgressMode::Proxy));
+}
+
+#[test]
+fn hybrid_timing_defaults_are_bounded() {
+    let config = BridgeConfig::default();
+    assert_eq!(
+        config.egress.bootstrap_timeout,
+        std::time::Duration::from_secs(30)
+    );
+    assert_eq!(
+        config.egress.verify_timeout,
+        std::time::Duration::from_secs(10)
+    );
+    assert_eq!(
+        config.egress.recovery_backoff_max,
+        std::time::Duration::from_secs(120)
+    );
+}
+
+#[test]
+fn hybrid_timing_env_overrides_defaults() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let names = [
+        "BRIDGE_PROXY_BOOTSTRAP_TIMEOUT_SECS",
+        "BRIDGE_PROXY_VERIFY_TIMEOUT_SECS",
+        "BRIDGE_PROXY_RECOVERY_BACKOFF_MAX_SECS",
+    ];
+    let previous = names.map(|name| env::var(name).ok());
+    env::set_var(names[0], "7");
+    env::set_var(names[1], "4");
+    env::set_var(names[2], "45");
+
+    let config = BridgeConfig::from_env_and_cli(CliOverrides::default());
+    assert_eq!(
+        config.egress.bootstrap_timeout,
+        std::time::Duration::from_secs(7)
+    );
+    assert_eq!(
+        config.egress.verify_timeout,
+        std::time::Duration::from_secs(4)
+    );
+    assert_eq!(
+        config.egress.recovery_backoff_max,
+        std::time::Duration::from_secs(45)
+    );
+
+    for (name, value) in names.into_iter().zip(previous) {
+        match value {
+            Some(value) => env::set_var(name, value),
+            None => env::remove_var(name),
+        }
+    }
+}
+
+#[test]
+fn strict_proxy_still_rejects_direct_fallback_flag() {
+    let mut config = BridgeConfig::default();
+    config.egress.mode = EgressMode::Proxy;
+    config.egress.allow_direct_fallback = true;
+    assert!(config.validate_security().is_err());
+}
+
+#[test]
+fn hybrid_does_not_require_legacy_allow_direct_fallback() {
+    let mut config = BridgeConfig::default();
+    config.egress.mode = EgressMode::Hybrid;
+    config.egress.allow_direct_fallback = false;
+    assert!(config.validate_security().is_ok());
 }
 
 #[test]

@@ -6,7 +6,7 @@
 //! one enum with unrelated dimensions.
 
 use reqwest::Client;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -23,6 +23,21 @@ pub enum EgressRole {
 }
 
 pub type ProxyRole = EgressRole;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RouteKind {
+    Direct,
+    Proxy,
+    Standby,
+    DirectHybridFallback,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteMetadata {
+    pub kind: RouteKind,
+    pub proxy_node: Option<String>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -139,6 +154,10 @@ impl ProxyEntry {
             && !self.is_duplicate()
     }
 
+    pub fn provider_rate_limit_active(&self, now: Instant) -> bool {
+        self.rate_limit_until.is_some_and(|until| now < until)
+    }
+
     pub fn may_receive_probe_traffic(&self) -> bool {
         self.circuit == CircuitState::HalfOpen && !self.is_duplicate()
     }
@@ -186,6 +205,8 @@ pub struct ProxyPool {
     pub require_verified_exit_ip: bool,
     pub identity_ttl: std::time::Duration,
     pub max_restart_attempts: u32,
+    /// Round-robin counter for per-request IP load balancing.
+    pub round_robin_counter: usize,
 }
 
 impl Default for ProxyPool {
@@ -197,6 +218,7 @@ impl Default for ProxyPool {
             require_verified_exit_ip: false,
             identity_ttl: std::time::Duration::from_secs(300),
             max_restart_attempts: 3,
+            round_robin_counter: 0,
         }
     }
 }
@@ -280,10 +302,54 @@ pub fn ensure_not_protected(port: u16) -> Result<(), String> {
     }
 }
 
-pub fn get_primary_ports() -> [u16; 3] {
-    [40001, 40002, 40003]
+#[cfg(test)]
+mod configured_topology_tests {
+    use super::{configured_primary_ports, configured_warm_standby_ports};
+    use crate::config::BridgeConfig;
+
+    #[test]
+    fn configured_ports_follow_resolved_one_plus_one_topology() {
+        let mut config = BridgeConfig::default();
+        config.primary_proxies = Some(vec!["socks5h://127.0.0.1:40001".to_string()]);
+        config.warm_standby_proxies = Some(vec!["socks5h://127.0.0.1:40004".to_string()]);
+
+        assert_eq!(configured_primary_ports(&config), vec![40001]);
+        assert_eq!(configured_warm_standby_ports(&config), vec![40004]);
+    }
+
+    #[test]
+    fn configured_ports_ignore_invalid_zero_ports_and_deduplicate() {
+        let mut config = BridgeConfig::default();
+        config.primary_proxies = Some(vec![
+            "socks5h://127.0.0.1:40001".to_string(),
+            "socks5h://127.0.0.1:40001".to_string(),
+            "not-a-proxy".to_string(),
+        ]);
+        config.warm_standby_proxies = Some(vec![
+            "socks5h://127.0.0.1:40004".to_string(),
+            "invalid".to_string(),
+        ]);
+
+        assert_eq!(configured_primary_ports(&config), vec![40001]);
+        assert_eq!(configured_warm_standby_ports(&config), vec![40004]);
+    }
 }
 
-pub fn get_warm_standby_ports() -> [u16; 2] {
-    [40004, 40005]
+fn configured_ports(urls: Option<&Vec<String>>) -> Vec<u16> {
+    let mut ports = Vec::new();
+    for url in urls.into_iter().flatten() {
+        let port = extract_port(url);
+        if port != 0 && !ports.contains(&port) {
+            ports.push(port);
+        }
+    }
+    ports
+}
+
+pub fn configured_primary_ports(config: &crate::config::BridgeConfig) -> Vec<u16> {
+    configured_ports(config.primary_proxies.as_ref())
+}
+
+pub fn configured_warm_standby_ports(config: &crate::config::BridgeConfig) -> Vec<u16> {
+    configured_ports(config.warm_standby_proxies.as_ref())
 }

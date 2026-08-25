@@ -10,7 +10,10 @@ use crate::infrastructure::file_store::{AtomicFileStore, FileStore};
 use crate::infrastructure::warp::{DisabledWarpController, WarpController};
 use crate::observability::Metrics;
 use crate::opencode::search::SearchClient;
-use crate::proxy_pool::{health_monitor, identity_monitor, process_restart_queue, ProxyPool};
+use crate::proxy_pool::{
+    health_monitor, hybrid_proxy_reconciler, identity_monitor, process_restart_queue,
+    LiveProxyVerifier, ProxyPool, ProxySubsystemStatus,
+};
 use crate::workers::WorkerRegistry;
 use reqwest::Client;
 use std::sync::atomic::AtomicU64;
@@ -36,6 +39,8 @@ pub struct AppState {
     pub api_keys: Arc<RwLock<ApiKeyRegistry>>,
     /// Thread-safe SOCKS5/HTTP proxy pool for multi-agent support.
     pub proxy_pool: Arc<RwLock<ProxyPool>>,
+    /// Coarse proxy subsystem readiness used by hybrid route selection.
+    pub proxy_subsystem: Arc<RwLock<ProxySubsystemStatus>>,
     /// Replaceable container runtime used by management and egress workers.
     pub container_runtime: Arc<dyn ContainerRuntime>,
     /// Optional host-level WARP controller used only by explicit direct mode.
@@ -102,6 +107,7 @@ impl AppState {
         warp_controller: Arc<dyn WarpController>,
         file_store: Arc<dyn FileStore>,
     ) -> Self {
+        let config = Arc::new(config);
         let http_client = Client::builder()
             .timeout(Duration::from_secs(600))
             .pool_max_idle_per_host(10)
@@ -136,7 +142,18 @@ impl AppState {
             all_urls.extend(urls.iter().cloned());
         }
 
-        let proxy_pool = if !all_urls.is_empty() {
+        let proxy_subsystem = Arc::new(RwLock::new(match config.egress.mode {
+            crate::config::EgressMode::Direct => ProxySubsystemStatus::disabled(),
+            crate::config::EgressMode::Proxy | crate::config::EgressMode::Hybrid => {
+                ProxySubsystemStatus::starting()
+            }
+        }));
+
+        let proxy_pool = if matches!(
+            config.egress.mode,
+            crate::config::EgressMode::Proxy | crate::config::EgressMode::Hybrid
+        ) && !all_urls.is_empty()
+        {
             let mut pool = ProxyPool::new_with_egress_policy(
                 &all_urls,
                 config.egress.active_proxy_count,
@@ -190,6 +207,28 @@ impl AppState {
                     info!("Proxy pool exit-identity monitor registered.");
                 }
 
+                if config.egress.mode == crate::config::EgressMode::Hybrid {
+                    let reconcile_pool = pool_arc.clone();
+                    let reconcile_subsystem = proxy_subsystem.clone();
+                    let reconcile_runtime = container_runtime.clone();
+                    let reconcile_config = config.clone();
+                    let reconcile_metrics = metrics.clone();
+                    let verifier = Arc::new(LiveProxyVerifier);
+                    workers.spawn_critical("proxy-reconcile", move |context| async move {
+                        hybrid_proxy_reconciler(
+                            reconcile_pool,
+                            reconcile_subsystem,
+                            reconcile_runtime,
+                            verifier,
+                            reconcile_config,
+                            reconcile_metrics,
+                            context,
+                        )
+                        .await
+                    });
+                    info!("Hybrid proxy reconciler registered.");
+                }
+
                 pool_arc
             } else {
                 Arc::new(RwLock::new(pool))
@@ -210,12 +249,13 @@ impl AppState {
         ));
 
         Self {
-            config: Arc::new(config),
+            config,
             search_client,
             http_client,
             rate_limiter,
             api_keys,
             proxy_pool,
+            proxy_subsystem,
             container_runtime,
             warp_controller,
             file_store,
@@ -247,6 +287,124 @@ mod tests {
         };
         let state = AppState::new(config);
         assert_eq!(state.config.bridge_port, 0);
+    }
+
+    #[derive(Debug, Default)]
+    struct FailingRuntime;
+
+    #[async_trait::async_trait]
+    impl crate::docker::ContainerRuntime for FailingRuntime {
+        async fn daemon_version(&self) -> crate::docker::DockerResult<String> {
+            Ok("test".to_string())
+        }
+        async fn inspect(
+            &self,
+            _spec: &crate::docker::ProxySpec,
+        ) -> crate::docker::DockerResult<crate::docker::ContainerState> {
+            Err(crate::docker::DockerError::CommandFailed(
+                "test runtime unavailable".to_string(),
+            ))
+        }
+        async fn create_missing(
+            &self,
+            _spec: &crate::docker::ProxySpec,
+        ) -> crate::docker::DockerResult<()> {
+            Ok(())
+        }
+        async fn recreate_managed(
+            &self,
+            _spec: &crate::docker::ProxySpec,
+        ) -> crate::docker::DockerResult<()> {
+            Ok(())
+        }
+        async fn remove_managed(
+            &self,
+            _spec: &crate::docker::ProxySpec,
+        ) -> crate::docker::DockerResult<()> {
+            Ok(())
+        }
+        async fn restart_managed(
+            &self,
+            _spec: &crate::docker::ProxySpec,
+        ) -> crate::docker::DockerResult<()> {
+            Ok(())
+        }
+        async fn stop_managed(
+            &self,
+            _spec: &crate::docker::ProxySpec,
+        ) -> crate::docker::DockerResult<()> {
+            Ok(())
+        }
+        async fn start_managed(
+            &self,
+            _spec: &crate::docker::ProxySpec,
+        ) -> crate::docker::DockerResult<()> {
+            Ok(())
+        }
+        async fn logs(
+            &self,
+            _spec: &crate::docker::ProxySpec,
+            _tail: usize,
+        ) -> crate::docker::DockerResult<String> {
+            Ok(String::new())
+        }
+        async fn list(
+            &self,
+            _specs: &[crate::docker::ProxySpec],
+        ) -> crate::docker::DockerResult<Vec<crate::docker::ContainerSummary>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn hybrid_constructs_pool_and_registers_reconcile_worker_but_starts_not_ready() {
+        let mut config = BridgeConfig::default();
+        config.egress.mode = crate::config::EgressMode::Hybrid;
+        config.primary_proxies = Some(vec!["socks5h://127.0.0.1:40001".to_string()]);
+        config.warm_standby_proxies = Some(vec!["socks5h://127.0.0.1:40004".to_string()]);
+        config.egress.active_proxy_count = 1;
+
+        let state = AppState::new_with_container_runtime(config, Arc::new(FailingRuntime));
+        assert_eq!(state.proxy_pool.read().await.proxies.len(), 2);
+        assert!(!state.proxy_subsystem.read().await.is_ready());
+
+        let names = state
+            .workers
+            .snapshot()
+            .workers
+            .into_iter()
+            .map(|worker| worker.name)
+            .collect::<std::collections::HashSet<_>>();
+        for expected in [
+            "proxy-health",
+            "proxy-identity",
+            "proxy-restart",
+            "proxy-reconcile",
+        ] {
+            assert!(names.contains(expected), "missing worker {expected}");
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_mode_does_not_register_proxy_pool_or_workers() {
+        let mut config = BridgeConfig::default();
+        config.egress.mode = crate::config::EgressMode::Direct;
+        config.primary_proxies = Some(vec!["socks5h://127.0.0.1:40001".to_string()]);
+        config.warm_standby_proxies = Some(vec!["socks5h://127.0.0.1:40004".to_string()]);
+
+        let state = AppState::new(config);
+        assert!(
+            state.proxy_pool.read().await.proxies.is_empty(),
+            "direct mode must not create a live proxy pool"
+        );
+        let snapshot = state.workers.snapshot();
+        assert!(
+            snapshot
+                .workers
+                .iter()
+                .all(|worker| !worker.name.starts_with("proxy-")),
+            "direct mode must not register proxy health/restart/identity workers"
+        );
     }
 
     #[tokio::test]

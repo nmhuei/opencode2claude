@@ -91,6 +91,9 @@ pub struct TomlConfig {
     pub proxy_restart_interval_secs: Option<u64>,
     pub max_proxy_restart_attempts: Option<u32>,
     pub allow_direct_fallback: Option<bool>,
+    pub proxy_bootstrap_timeout_secs: Option<u64>,
+    pub proxy_verify_timeout_secs: Option<u64>,
+    pub proxy_recovery_backoff_max_secs: Option<u64>,
 
     // Infrastructure and lifecycle.
     pub runtime_dir: Option<String>,

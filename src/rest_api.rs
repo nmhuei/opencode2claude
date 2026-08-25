@@ -98,6 +98,7 @@ async fn status(
         let pool = state.proxy_pool.read().await;
         match state.config.egress.mode {
             crate::config::EgressMode::Direct => ("direct".to_string(), true, 0),
+            crate::config::EgressMode::Hybrid => ("hybrid".to_string(), true, 0),
             crate::config::EgressMode::Proxy => (
                 "proxy".to_string(),
                 pool.egress_ready(

@@ -24,6 +24,14 @@ pub(super) fn validate(config: &BridgeConfig) -> Result<(), String> {
     if config.retry.max_network_attempts == 0 {
         return Err("CONFIGURATION ERROR: max network attempts must be greater than zero".into());
     }
+    if config.egress.bootstrap_timeout.is_zero()
+        || config.egress.verify_timeout.is_zero()
+        || config.egress.recovery_backoff_max.is_zero()
+    {
+        return Err(
+            "CONFIGURATION ERROR: hybrid proxy timing values must be greater than zero".into(),
+        );
+    }
     if config.retry.base_backoff > config.retry.max_backoff {
         return Err(
             "CONFIGURATION ERROR: retry base backoff cannot exceed retry max backoff".into(),

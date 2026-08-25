@@ -115,7 +115,7 @@ pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
     );
     resolved.max_search_loops = env_parse("BRIDGE_MAX_SEARCH_LOOPS")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.max_search_loops))
-        .unwrap_or(5);
+        .unwrap_or(20);
 
     let legacy_proxy_value = env_string("BRIDGE_PROXIES").or_else(|| {
         file.as_ref()
@@ -215,20 +215,20 @@ pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
         .unwrap_or(30);
     resolved.history.max_records = env_parse("BRIDGE_HISTORY_MAX_RECORDS")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.history_max_records))
-        .unwrap_or(10_000)
+        .unwrap_or(1_000_000)
         .max(1);
     resolved.history.max_database_bytes = env_parse("BRIDGE_HISTORY_MAX_DATABASE_BYTES")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.history_max_database_bytes))
-        .unwrap_or(1024 * 1024 * 1024);
+        .unwrap_or(16 * 1024 * 1024 * 1024);
     resolved.history.max_request_bytes = env_parse("BRIDGE_HISTORY_MAX_REQUEST_BYTES")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.history_max_request_bytes))
-        .unwrap_or(1024 * 1024);
+        .unwrap_or(8 * 1024 * 1024);
     resolved.history.max_reasoning_bytes = env_parse("BRIDGE_HISTORY_MAX_REASONING_BYTES")
         .or_else(|| {
             file.as_ref()
                 .and_then(|cfg| cfg.history_max_reasoning_bytes)
         })
-        .unwrap_or(2 * 1024 * 1024);
+        .unwrap_or(16 * 1024 * 1024);
     resolved.history.max_response_bytes = env_parse("BRIDGE_HISTORY_MAX_RESPONSE_BYTES")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.history_max_response_bytes))
         .unwrap_or(2 * 1024 * 1024);
@@ -237,13 +237,13 @@ pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
             file.as_ref()
                 .and_then(|cfg| cfg.history_max_tool_payload_bytes)
         })
-        .unwrap_or(256 * 1024);
+        .unwrap_or(4 * 1024 * 1024);
     resolved.history.max_record_bytes = env_parse("BRIDGE_HISTORY_MAX_RECORD_BYTES")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.history_max_record_bytes))
-        .unwrap_or(6 * 1024 * 1024);
+        .unwrap_or(48 * 1024 * 1024);
     resolved.history.queue_capacity = env_parse("BRIDGE_HISTORY_QUEUE_CAPACITY")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.history_queue_capacity))
-        .unwrap_or(512)
+        .unwrap_or(8192)
         .max(1);
     resolved.history.path = env_string("BRIDGE_HISTORY_PATH")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.history_path.clone()))
@@ -259,24 +259,24 @@ pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
             .unwrap_or(1024);
     resolved.protocol.max_sse_line_bytes = env_parse("BRIDGE_MAX_SSE_LINE_BYTES")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.max_sse_line_bytes))
-        .unwrap_or(256 * 1024);
+        .unwrap_or(4 * 1024 * 1024);
     resolved.protocol.max_sync_response_bytes = env_parse("BRIDGE_MAX_SYNC_RESPONSE_BYTES")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.max_sync_response_bytes))
-        .unwrap_or(4 * 1024 * 1024);
+        .unwrap_or(32 * 1024 * 1024);
 
     resolved.search.max_results = env_parse("BRIDGE_SEARCH_MAX_RESULTS")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.search_max_results))
-        .unwrap_or(5);
+        .unwrap_or(20);
     resolved.search.max_snippet_chars = env_parse("BRIDGE_SEARCH_MAX_SNIPPET_CHARS")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.search_max_snippet_chars))
-        .unwrap_or(500);
+        .unwrap_or(2000);
     resolved.search.max_response_bytes = env_parse("BRIDGE_SEARCH_MAX_RESPONSE_BYTES")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.search_max_response_bytes))
-        .unwrap_or(1024 * 1024);
+        .unwrap_or(8 * 1024 * 1024);
     resolved.search.request_timeout = Duration::from_secs(
         env_parse("BRIDGE_SEARCH_TIMEOUT_SECS")
             .or_else(|| file.as_ref().and_then(|cfg| cfg.search_timeout_secs))
-            .unwrap_or(15),
+            .unwrap_or(30),
     );
     resolved.search.allow_private_searxng = env_bool("BRIDGE_ALLOW_PRIVATE_SEARXNG")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.allow_private_searxng))
@@ -311,19 +311,19 @@ pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
         .unwrap_or(false);
     resolved.retry.max_network_attempts = env_parse("BRIDGE_MAX_NETWORK_ATTEMPTS")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.max_network_attempts))
-        .unwrap_or(5);
+        .unwrap_or(8);
     resolved.retry.max_provider_attempts = env_parse("BRIDGE_MAX_PROVIDER_ATTEMPTS")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.max_provider_attempts))
-        .unwrap_or(1);
+        .unwrap_or(2);
     resolved.retry.base_backoff = Duration::from_millis(
         env_parse("BRIDGE_RETRY_BASE_BACKOFF_MS")
             .or_else(|| file.as_ref().and_then(|cfg| cfg.retry_base_backoff_ms))
-            .unwrap_or(2_000),
+            .unwrap_or(1_000),
     );
     resolved.retry.max_backoff = Duration::from_millis(
         env_parse("BRIDGE_RETRY_MAX_BACKOFF_MS")
             .or_else(|| file.as_ref().and_then(|cfg| cfg.retry_max_backoff_ms))
-            .unwrap_or(16_000),
+            .unwrap_or(30_000),
     );
 
     resolved.egress.mode = overrides
@@ -335,7 +335,7 @@ pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
         .unwrap_or(EgressMode::Proxy);
     resolved.egress.active_proxy_count = env_parse("BRIDGE_ACTIVE_PROXY_COUNT")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.active_proxy_count))
-        .unwrap_or(3);
+        .unwrap_or(1);
     resolved.egress.require_verified_exit_ip = env_bool("BRIDGE_REQUIRE_VERIFIED_EXIT_IP")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.require_verified_exit_ip))
         .unwrap_or(true);
@@ -366,10 +366,31 @@ pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
     );
     resolved.egress.max_restart_attempts = env_parse("BRIDGE_MAX_PROXY_RESTART_ATTEMPTS")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.max_proxy_restart_attempts))
-        .unwrap_or(3);
+        .unwrap_or(6);
     resolved.egress.allow_direct_fallback = env_bool("BRIDGE_ALLOW_DIRECT_FALLBACK")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.allow_direct_fallback))
         .unwrap_or(false);
+    resolved.egress.bootstrap_timeout = Duration::from_secs(
+        env_parse("BRIDGE_PROXY_BOOTSTRAP_TIMEOUT_SECS")
+            .or_else(|| {
+                file.as_ref()
+                    .and_then(|cfg| cfg.proxy_bootstrap_timeout_secs)
+            })
+            .unwrap_or(30),
+    );
+    resolved.egress.verify_timeout = Duration::from_secs(
+        env_parse("BRIDGE_PROXY_VERIFY_TIMEOUT_SECS")
+            .or_else(|| file.as_ref().and_then(|cfg| cfg.proxy_verify_timeout_secs))
+            .unwrap_or(10),
+    );
+    resolved.egress.recovery_backoff_max = Duration::from_secs(
+        env_parse("BRIDGE_PROXY_RECOVERY_BACKOFF_MAX_SECS")
+            .or_else(|| {
+                file.as_ref()
+                    .and_then(|cfg| cfg.proxy_recovery_backoff_max_secs)
+            })
+            .unwrap_or(120),
+    );
 
     resolved.runtime.runtime_dir = env_string("RUNTIME_DIR")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.runtime_dir.clone()))
@@ -389,7 +410,7 @@ pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
                 file.as_ref()
                     .and_then(|cfg| cfg.worker_shutdown_timeout_secs)
             })
-            .unwrap_or(10),
+            .unwrap_or(30),
     );
     resolved.runtime.server_shutdown_timeout = Duration::from_secs(
         env_parse("BRIDGE_SERVER_SHUTDOWN_TIMEOUT_SECS")
@@ -397,7 +418,7 @@ pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
                 file.as_ref()
                     .and_then(|cfg| cfg.server_shutdown_timeout_secs)
             })
-            .unwrap_or(15),
+            .unwrap_or(30),
     );
 
     resolved

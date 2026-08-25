@@ -150,6 +150,7 @@ pub async fn forward_to_llm_sync(
                 return Err(error);
             }
         };
+        capture.attempt_route(res.route());
         let status = res.status();
         let body = match read_bounded_body(res, state.config.protocol.max_sync_response_bytes).await
         {

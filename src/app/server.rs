@@ -19,7 +19,12 @@ pub(super) async fn cmd_server(cmd: ServerCommand, fmt: OutputFormat) {
         ServerCommand::Start(args) => {
             if args.foreground {
                 let quiet = fmt == OutputFormat::Quiet || fmt == OutputFormat::Json;
-                maybe_bootstrap_proxies(args.no_proxy, quiet).await;
+                let resolved = resolve_config_for_start(&args);
+                if startup_proxy_policy(&resolved, args.no_proxy)
+                    == StartupProxyPolicy::BlockingBootstrap
+                {
+                    maybe_bootstrap_proxies(false, quiet).await;
+                }
                 // Run in foreground using bridge args
                 let bridge_args = ServeArgsBridge {
                     port: args.port,
@@ -207,10 +212,13 @@ pub(super) async fn cmd_server(cmd: ServerCommand, fmt: OutputFormat) {
 
 pub(super) async fn start_daemon(args: cli::ServerStartArgs, fmt: OutputFormat) {
     let quiet = fmt != OutputFormat::Human;
-    if !args.no_proxy {
+    let initial = resolve_config_for_start(&args);
+    if startup_proxy_policy(&initial, args.no_proxy) == StartupProxyPolicy::BlockingBootstrap {
         maybe_bootstrap_proxies(false, quiet).await;
     }
 
+    // Re-resolve after strict proxy bootstrap because bootstrap may publish the
+    // discovered proxy URLs into the environment for the child process.
     let sup = resolve_runtime_for_start(&args);
 
     if fmt == OutputFormat::Json {
@@ -440,6 +448,24 @@ fn supervisor_from_config(resolved: &BridgeConfig) -> Supervisor {
     Supervisor::new(paths, resolved.bridge_port, resolved.host.to_string())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupProxyPolicy {
+    Skip,
+    BlockingBootstrap,
+    BackgroundReconcile,
+}
+
+fn startup_proxy_policy(config: &BridgeConfig, no_proxy: bool) -> StartupProxyPolicy {
+    if no_proxy {
+        return StartupProxyPolicy::Skip;
+    }
+    match config.egress.mode {
+        config::EgressMode::Direct => StartupProxyPolicy::Skip,
+        config::EgressMode::Proxy => StartupProxyPolicy::BlockingBootstrap,
+        config::EgressMode::Hybrid => StartupProxyPolicy::BackgroundReconcile,
+    }
+}
+
 fn should_manage_proxy_containers(resolved: &BridgeConfig) -> bool {
     resolved.egress.mode == config::EgressMode::Proxy
         && resolved
@@ -448,8 +474,8 @@ fn should_manage_proxy_containers(resolved: &BridgeConfig) -> bool {
             .is_some_and(|nodes| !nodes.is_empty())
 }
 
-pub(super) fn resolve_runtime_for_start(args: &cli::ServerStartArgs) -> Supervisor {
-    let resolved = BridgeConfig::from_env_and_cli(config::CliOverrides {
+fn resolve_config_for_start(args: &cli::ServerStartArgs) -> BridgeConfig {
+    BridgeConfig::from_env_and_cli(config::CliOverrides {
         bridge_port: args.port,
         host: args.host.clone(),
         config_path: args.config.clone(),
@@ -462,7 +488,11 @@ pub(super) fn resolve_runtime_for_start(args: &cli::ServerStartArgs) -> Supervis
         searxng_url: args.searxng_url.clone(),
         searxng_api_key: args.searxng_api_key.clone(),
         egress_mode: args.no_proxy.then(|| "direct".to_string()),
-    });
+    })
+}
+
+pub(super) fn resolve_runtime_for_start(args: &cli::ServerStartArgs) -> Supervisor {
+    let resolved = resolve_config_for_start(args);
     let p = resolved.bridge_port;
     let h = resolved.host.to_string();
 
@@ -553,6 +583,36 @@ pub(super) async fn maybe_bootstrap_proxies(no_proxy: bool, quiet: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hybrid_startup_never_blocks_on_bootstrap() {
+        let mut config = BridgeConfig::default();
+        config.egress.mode = config::EgressMode::Hybrid;
+        assert_eq!(
+            startup_proxy_policy(&config, false),
+            StartupProxyPolicy::BackgroundReconcile
+        );
+    }
+
+    #[test]
+    fn startup_proxy_policy_preserves_direct_proxy_and_no_proxy_semantics() {
+        let mut config = BridgeConfig::default();
+        config.egress.mode = config::EgressMode::Direct;
+        assert_eq!(
+            startup_proxy_policy(&config, false),
+            StartupProxyPolicy::Skip
+        );
+
+        config.egress.mode = config::EgressMode::Proxy;
+        assert_eq!(
+            startup_proxy_policy(&config, false),
+            StartupProxyPolicy::BlockingBootstrap
+        );
+        assert_eq!(
+            startup_proxy_policy(&config, true),
+            StartupProxyPolicy::Skip
+        );
+    }
 
     #[test]
     fn direct_mode_never_manages_proxy_containers() {

@@ -206,6 +206,7 @@ pub async fn forward_to_llm_stream(
                         break;
                     }
                 };
+                capture.attempt_route(res.route());
 
                 if !res.status().is_success() {
                     let status = res.status();

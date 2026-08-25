@@ -1,4 +1,5 @@
 use crate::config::{HistoryCaptureMode, HistoryConfig};
+use crate::proxy_pool::RouteKind;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -29,6 +30,7 @@ pub struct HistoryAttempt {
     pub attempt_kind: String,
     pub model: Option<String>,
     pub proxy_node: Option<String>,
+    pub route_kind: Option<RouteKind>,
     pub started_at_ms: u64,
     pub completed_at_ms: Option<u64>,
     pub duration_ms: Option<u64>,

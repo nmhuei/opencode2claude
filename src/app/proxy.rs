@@ -1,8 +1,8 @@
 //! Proxy container operations exposed by the CLI.
 
 use super::view::{
-    print_brand_header, print_error, print_proxy_table, print_section, print_success, print_table,
-    print_tip, print_warning,
+    print_brand_header, print_error, print_proxy_table_for_ports, print_section, print_success,
+    print_table, print_tip, print_warning,
 };
 use crate::cli::ProxyCommand;
 use crate::docker;
@@ -23,8 +23,10 @@ struct ProxyOperationResult {
 }
 
 pub(super) async fn cmd_proxy(cmd: ProxyCommand, fmt: OutputFormat) {
-    let primary_ports = proxy_pool::get_primary_ports();
-    let standby_ports = proxy_pool::get_warm_standby_ports();
+    let resolved =
+        crate::config::BridgeConfig::from_env_and_cli(crate::config::CliOverrides::default());
+    let primary_ports = proxy_pool::configured_primary_ports(&resolved);
+    let standby_ports = proxy_pool::configured_warm_standby_ports(&resolved);
 
     match cmd {
         ProxyCommand::Ps | ProxyCommand::Status => {
@@ -170,7 +172,7 @@ async fn show_proxy_status(fmt: OutputFormat, primary_ports: &[u16], standby_por
         }
         OutputFormat::Human => {
             print_brand_header("Proxy pool", "Managed primary and protected standby nodes");
-            let table = print_proxy_table().await;
+            let table = print_proxy_table_for_ports(primary_ports, standby_ports).await;
             print_table(&table);
 
             let running = containers.iter().filter(|(_, _, running)| *running).count();

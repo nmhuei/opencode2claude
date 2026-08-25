@@ -3,12 +3,15 @@
 pub mod identity;
 pub mod maintenance;
 mod pool;
+pub mod reconcile;
 pub mod routing;
+pub mod subsystem;
 pub mod types;
 
 pub use identity::*;
 pub use maintenance::*;
-pub use routing::*;
+pub use reconcile::*;
+pub use subsystem::*;
 pub use types::*;
 
 #[cfg(test)]
