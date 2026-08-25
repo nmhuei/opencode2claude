@@ -16,6 +16,14 @@ pub struct FreeModel {
 
 pub const FREE_MODELS: &[FreeModel] = &[
     FreeModel {
+        id: "opencode/x-preview-f-free",
+        label: "OpenCode X-Preview-F (OX Alpha)",
+        provider: "OpenCode Zen",
+        protocol: "openai_chat_completions",
+        limited_time: true,
+        privacy_notice: "Preview endpoint; do not submit personal or confidential information.",
+    },
+    FreeModel {
         id: "opencode/deepseek-v4-flash-free",
         label: "DeepSeek V4 Flash Free",
         provider: "OpenCode Zen",
@@ -88,7 +96,7 @@ mod tests {
     #[test]
     fn catalog_ids_are_prefixed_unique_and_free() {
         let mut ids = std::collections::HashSet::new();
-        assert_eq!(FREE_MODELS.len(), 5);
+        assert_eq!(FREE_MODELS.len(), 6);
         for model in FREE_MODELS {
             assert!(model.id.starts_with("opencode/"));
             assert!(ids.insert(model.id));

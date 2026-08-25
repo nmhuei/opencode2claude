@@ -91,6 +91,9 @@ pub fn map_model_name(model: &str) -> String {
     match name.as_str() {
         "deepseek-v4-flash" => "deepseek-v4-flash-free".to_string(),
         "nemotron-3-ultra" => "nemotron-3-ultra-free".to_string(),
+        "x-preview" | "x-preview-f" | "ox-alpha" => "x-preview-f-free".to_string(),
+        "sonnet[1m]" => "x-preview-f-free".to_string(),
+        _ if name.starts_with("claude-") => "x-preview-f-free".to_string(),
         _ => name,
     }
 }

@@ -119,7 +119,7 @@ fn test_map_anthropic_to_openai_plain() {
     };
 
     let result = map_anthropic_to_openai(&payload, "claude-3-5-sonnet".to_string());
-    assert_eq!(result.model, "claude-3-5-sonnet");
+    assert_eq!(result.model, "x-preview-f-free");
     assert_eq!(result.messages.len(), 2); // 1 system + 1 user
     assert_eq!(result.messages[0].role, "system");
     assert_eq!(
@@ -362,6 +362,11 @@ fn test_map_model_name() {
 #[test]
 fn test_map_model_name_free_mapping() {
     assert_eq!(map_model_name("nemotron-3-ultra"), "nemotron-3-ultra-free");
+    assert_eq!(map_model_name("ox-alpha"), "x-preview-f-free");
+    assert_eq!(map_model_name("sonnet[1m]"), "x-preview-f-free");
+    assert_eq!(map_model_name("claude-3-5-sonnet"), "x-preview-f-free");
+    assert_eq!(map_model_name("claude-3-7-sonnet"), "x-preview-f-free");
+    assert_eq!(map_model_name("claude-opus-5"), "x-preview-f-free");
 }
 
 #[test]

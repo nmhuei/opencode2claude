@@ -60,7 +60,7 @@ pub fn generate(
     let model = environment
         .model
         .as_deref()
-        .unwrap_or("opencode/deepseek-v4-flash-free");
+        .unwrap_or(super::integration::OX_ALPHA_MODEL);
     let content = match format {
         ClientConfigFormat::Env => dotenv(environment, api_key, model),
         ClientConfigFormat::ClaudeCode => claude_code(environment, api_key, model),

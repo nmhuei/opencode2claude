@@ -693,11 +693,15 @@ async fn test_tc028_config_reload_verification() {
         .await
         .unwrap();
     assert_eq!(save_resp.status(), 200);
+    let save_body: Value = save_resp.json().await.unwrap();
 
-    // 2. Verify config file contains the new configuration
-    let config_path =
-        env::var("BRIDGE_CONFIG_PATH").unwrap_or_else(|_| "opencode2api.toml".to_string());
-    let file_content = fs::read_to_string(&config_path).unwrap();
+    // 2. Verify the exact config path reported by the save operation.
+    // This keeps the test aligned with config resolution, where an empty
+    // BRIDGE_CONFIG_PATH is intentionally treated as unset.
+    let config_path = save_body["path"]
+        .as_str()
+        .expect("config save response should include the written path");
+    let file_content = fs::read_to_string(config_path).unwrap();
     assert!(file_content.contains("opencode/deepseek-v4-flash-free"));
 
     env::remove_var("DASHBOARD_ADMIN_TOKEN");
@@ -1610,12 +1614,12 @@ async fn dashboard_control_models_requires_session_and_returns_free_catalog() {
         .unwrap();
     assert_eq!(response.status(), 200);
     let body: Value = response.json().await.unwrap();
-    assert_eq!(body["models"].as_array().unwrap().len(), 5);
+    assert_eq!(body["models"].as_array().unwrap().len(), 6);
     assert!(body["models"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|entry| entry["id"] == "opencode/deepseek-v4-flash-free"));
+        .any(|entry| entry["id"] == "opencode/x-preview-f-free"));
 }
 
 #[tokio::test]
