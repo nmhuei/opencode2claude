@@ -302,39 +302,6 @@ pub fn ensure_not_protected(port: u16) -> Result<(), String> {
     }
 }
 
-#[cfg(test)]
-mod configured_topology_tests {
-    use super::{configured_primary_ports, configured_warm_standby_ports};
-    use crate::config::BridgeConfig;
-
-    #[test]
-    fn configured_ports_follow_resolved_one_plus_one_topology() {
-        let mut config = BridgeConfig::default();
-        config.primary_proxies = Some(vec!["socks5h://127.0.0.1:40001".to_string()]);
-        config.warm_standby_proxies = Some(vec!["socks5h://127.0.0.1:40004".to_string()]);
-
-        assert_eq!(configured_primary_ports(&config), vec![40001]);
-        assert_eq!(configured_warm_standby_ports(&config), vec![40004]);
-    }
-
-    #[test]
-    fn configured_ports_ignore_invalid_zero_ports_and_deduplicate() {
-        let mut config = BridgeConfig::default();
-        config.primary_proxies = Some(vec![
-            "socks5h://127.0.0.1:40001".to_string(),
-            "socks5h://127.0.0.1:40001".to_string(),
-            "not-a-proxy".to_string(),
-        ]);
-        config.warm_standby_proxies = Some(vec![
-            "socks5h://127.0.0.1:40004".to_string(),
-            "invalid".to_string(),
-        ]);
-
-        assert_eq!(configured_primary_ports(&config), vec![40001]);
-        assert_eq!(configured_warm_standby_ports(&config), vec![40004]);
-    }
-}
-
 fn configured_ports(urls: Option<&Vec<String>>) -> Vec<u16> {
     let mut ports = Vec::new();
     for url in urls.into_iter().flatten() {
@@ -352,4 +319,41 @@ pub fn configured_primary_ports(config: &crate::config::BridgeConfig) -> Vec<u16
 
 pub fn configured_warm_standby_ports(config: &crate::config::BridgeConfig) -> Vec<u16> {
     configured_ports(config.warm_standby_proxies.as_ref())
+}
+
+#[cfg(test)]
+mod configured_topology_tests {
+    use super::{configured_primary_ports, configured_warm_standby_ports};
+    use crate::config::BridgeConfig;
+
+    #[test]
+    fn configured_ports_follow_resolved_one_plus_one_topology() {
+        let config = BridgeConfig {
+            primary_proxies: Some(vec!["socks5h://127.0.0.1:40001".to_string()]),
+            warm_standby_proxies: Some(vec!["socks5h://127.0.0.1:40004".to_string()]),
+            ..Default::default()
+        };
+
+        assert_eq!(configured_primary_ports(&config), vec![40001]);
+        assert_eq!(configured_warm_standby_ports(&config), vec![40004]);
+    }
+
+    #[test]
+    fn configured_ports_ignore_invalid_zero_ports_and_deduplicate() {
+        let config = BridgeConfig {
+            primary_proxies: Some(vec![
+                "socks5h://127.0.0.1:40001".to_string(),
+                "socks5h://127.0.0.1:40001".to_string(),
+                "not-a-proxy".to_string(),
+            ]),
+            warm_standby_proxies: Some(vec![
+                "socks5h://127.0.0.1:40004".to_string(),
+                "invalid".to_string(),
+            ]),
+            ..Default::default()
+        };
+
+        assert_eq!(configured_primary_ports(&config), vec![40001]);
+        assert_eq!(configured_warm_standby_ports(&config), vec![40004]);
+    }
 }

@@ -214,9 +214,11 @@ mod tests {
     #[tokio::test]
     async fn bootstrap_respects_configured_one_plus_one_topology() {
         let runtime = FakeRuntime::default();
-        let mut config = BridgeConfig::default();
-        config.primary_proxies = Some(vec!["socks5h://127.0.0.1:40001".to_string()]);
-        config.warm_standby_proxies = Some(vec!["socks5h://127.0.0.1:40004".to_string()]);
+        let config = BridgeConfig {
+            primary_proxies: Some(vec!["socks5h://127.0.0.1:40001".to_string()]),
+            warm_standby_proxies: Some(vec!["socks5h://127.0.0.1:40004".to_string()]),
+            ..Default::default()
+        };
 
         let (primary, standby) = bootstrap_proxy_pool_with_runtime(&runtime, &config, true)
             .await
@@ -276,12 +278,14 @@ mod tests {
         }
         runtime.offline_ports = vec![40004, 40005];
         runtime.restart_fails = true;
-        let mut config = BridgeConfig::default();
-        config.primary_proxies = Some(vec!["socks5h://127.0.0.1:40001".to_string()]);
-        config.warm_standby_proxies = Some(vec![
-            "socks5h://127.0.0.1:40004".to_string(),
-            "socks5h://127.0.0.1:40005".to_string(),
-        ]);
+        let config = BridgeConfig {
+            primary_proxies: Some(vec!["socks5h://127.0.0.1:40001".to_string()]),
+            warm_standby_proxies: Some(vec![
+                "socks5h://127.0.0.1:40004".to_string(),
+                "socks5h://127.0.0.1:40005".to_string(),
+            ]),
+            ..Default::default()
+        };
         let (primary, standby) = bootstrap_proxy_pool_with_runtime(&runtime, &config, true)
             .await
             .expect("bootstrap must not abort when standby restart fails");
