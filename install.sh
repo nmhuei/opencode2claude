@@ -394,7 +394,7 @@ print_welcome() {
         printf '%s\n' "  Start Claude Code through the bridge with one command:"
         printf '     %s%s%s\n' "${CYAN}" "opencode2api" "${NC}"
         printf '%s\n' ""
-        printf '%s\n' "  The shell hook starts the bridge if needed and loads its environment automatically."
+        printf '%s\n' "  Start the bridge manually first; the shell hook only loads its environment and opens Claude Code."
         printf '%s\n' "  For env-only setup, use: opencode2api set env"
         printf '%s\n' ""
         printf '%s\n' "  To choose a model when starting a stopped server:"

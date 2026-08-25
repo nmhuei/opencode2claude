@@ -19,7 +19,7 @@ use clap::{Args, Parser, Subcommand};
     version,
     about = "A local Anthropic and OpenAI-compatible model gateway",
     long_about = "OpenCode2API accepts Anthropic Messages and OpenAI Chat Completions requests, then routes them to the configured OpenCode-compatible model provider.",
-    after_help = "Quick start:\n  opencode2api                 # start bridge, load env, open Claude Code\n  opencode2api server status\n  opencode2api set env         # env only, no Claude launch\n  opencode2api doctor\n\nTip: the bare launcher is provided by the installed bash/zsh shell hook. Use --json for automation, --quiet for shell-friendly output, and --color never when piping logs.",
+    after_help = "Quick start:\n  opencode2api                 # load env and open Claude Code (bridge must already be running)\n  opencode2api server status\n  opencode2api set env         # env only, no Claude launch\n  opencode2api doctor\n\nTip: the bare launcher is provided by the installed bash/zsh shell hook. Use --json for automation, --quiet for shell-friendly output, and --color never when piping logs.",
     styles = clap_styles()
 )]
 pub struct Cli {
