@@ -1,10 +1,9 @@
 //! Persistent shell integration for commands that must mutate the parent shell.
 //!
 //! A child process cannot modify its parent's environment. The installed shell
-//! hook therefore turns bare `opencode2api` into a Claude Code launcher:
-//! it evaluates the canonical bridge environment in the current interactive shell
-//! and launches `claude`. Starting the bridge remains an explicit manual action.
-//! `opencode2api set env` remains available for env-only use.
+//! hook only intercepts `opencode2api set env`, because a child process cannot
+//! modify its parent shell. Bare `opencode2api` is handled natively by the binary,
+//! which checks the bridge and launches Claude Code with the resolved environment.
 
 use anyhow::{anyhow, Context, Result};
 use std::path::{Path, PathBuf};
@@ -79,25 +78,6 @@ pub fn render_hook() -> String {
     format!(
         r#"{HOOK_BEGIN}
 opencode2api() {{
-    if [ "$#" -eq 0 ]; then
-        local _opencode2api_env _opencode2api_status
-        if ! command -v claude >/dev/null 2>&1; then
-            printf '%s\n' 'opencode2api: Claude Code is not installed or not available in PATH.' >&2
-            return 127
-        fi
-        local _opencode2api_server_status
-        _opencode2api_server_status="$(command opencode2api --quiet server status 2>/dev/null)" || return $?
-        if [ "$_opencode2api_server_status" != "running" ]; then
-            printf '%s\n' 'opencode2api: bridge is not running. Start it first with: opencode2api server start' >&2
-            return 1
-        fi
-        _opencode2api_env="$(command opencode2api --quiet env)" || return $?
-        eval "$_opencode2api_env"
-        _opencode2api_status=$?
-        [ "$_opencode2api_status" -eq 0 ] || return "$_opencode2api_status"
-        command claude
-        return $?
-    fi
     if [ "$#" -eq 2 ] && [ "$1" = "set" ] && [ "$2" = "env" ]; then
         local _opencode2api_env _opencode2api_status
         _opencode2api_env="$(command opencode2api --quiet env)" || return $?
@@ -209,17 +189,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hook_launches_claude_for_bare_command_and_preserves_manual_env_mode() {
+    fn hook_intercepts_env_only_and_delegates_bare_launcher_to_binary() {
         let hook = render_hook();
-        assert!(hook.contains("[ \"$#\" -eq 0 ]"));
-        assert!(hook.contains("command -v claude"));
-        assert!(hook.contains("command opencode2api --quiet server status"));
-        assert!(!hook.contains("command opencode2api --quiet server start"));
-        assert!(hook.contains("command opencode2api --quiet env"));
-        assert!(hook.contains("command claude"));
         assert!(hook.contains("[ \"$1\" = \"set\" ]"));
         assert!(hook.contains("[ \"$2\" = \"env\" ]"));
+        assert!(hook.contains("command opencode2api --quiet env"));
         assert!(hook.contains("command opencode2api \"$@\""));
+        assert!(!hook.contains("server start"));
+        assert!(!hook.contains("server status"));
+        assert!(!hook.contains("command claude"));
         assert!(!hook.contains("OPENCODE_MODEL="));
         assert!(!hook.contains("CLAUDE_CODE_EFFORT_LEVEL="));
     }

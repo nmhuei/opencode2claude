@@ -369,7 +369,7 @@ pub(super) fn cmd_shell(command: ShellCommand, fmt: OutputFormat) {
                         );
                         println!();
                         print_tip(&format!(
-                            "Open a new terminal or run `source {}` once; then run `opencode2api server start` when you want the bridge running. After that, bare `opencode2api` loads the environment and opens Claude Code. `opencode2api set env` remains available for env-only use.",
+                            "Open a new terminal or run `source {}` once when you want `opencode2api set env` to modify the current shell. Bridge startup remains explicit with `opencode2api server start`; bare `opencode2api` itself launches Claude Code natively once the bridge is running.",
                             result.path.display()
                         ));
                         println!();

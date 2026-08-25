@@ -31,43 +31,64 @@ pub fn base_url(config: &BridgeConfig) -> String {
     format!("http://127.0.0.1:{}", config.bridge_port)
 }
 
-pub fn environment(config: &BridgeConfig) -> IntegrationEnvironment {
+pub fn process_environment(config: &BridgeConfig) -> Vec<(String, Option<String>)> {
     let base = base_url(config);
     let key = api_key(config).to_string();
-    let mut exports = vec![
-        format!("export ANTHROPIC_API_KEY={}", shell_quote(&key)),
-        format!("export ANTHROPIC_BASE_URL={}", shell_quote(&base)),
-        format!("export OPENAI_API_KEY={}", shell_quote(&key)),
-        format!(
-            "export OPENAI_BASE_URL={}",
-            shell_quote(&format!("{base}/v1"))
-        ),
-        "unset ANTHROPIC_AUTH_TOKEN".to_string(),
-    ];
     let effective_model = config
         .model
         .as_deref()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or(OX_ALPHA_MODEL);
+        .unwrap_or(OX_ALPHA_MODEL)
+        .to_string();
 
-    exports.push(format!(
-        "export OPENCODE_MODEL={}",
-        shell_quote(effective_model)
-    ));
+    let mut vars = vec![
+        ("ANTHROPIC_API_KEY".to_string(), Some(key.clone())),
+        ("ANTHROPIC_BASE_URL".to_string(), Some(base.clone())),
+        ("OPENAI_API_KEY".to_string(), Some(key)),
+        ("OPENAI_BASE_URL".to_string(), Some(format!("{base}/v1"))),
+        ("ANTHROPIC_AUTH_TOKEN".to_string(), None),
+        ("OPENCODE_MODEL".to_string(), Some(effective_model.clone())),
+    ];
+
     if effective_model == OX_ALPHA_MODEL {
-        exports.extend(ox_alpha_claude_code_exports());
+        vars.extend(
+            ox_alpha_claude_code_vars()
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), Some(value.to_string()))),
+        );
     }
+
+    vars
+}
+
+pub fn environment(config: &BridgeConfig) -> IntegrationEnvironment {
+    let base = base_url(config);
+    let key = api_key(config).to_string();
+    let effective_model = config
+        .model
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(OX_ALPHA_MODEL)
+        .to_string();
+
+    let shell_exports = process_environment(config)
+        .into_iter()
+        .map(|(key, value)| match value {
+            Some(value) => format!("export {key}={}", shell_quote(&value)),
+            None => format!("unset {key}"),
+        })
+        .collect();
 
     IntegrationEnvironment {
         anthropic_base_url: base.clone(),
         openai_base_url: format!("{base}/v1"),
         api_key: key,
-        model: Some(effective_model.to_string()),
-        shell_exports: exports,
+        model: Some(effective_model),
+        shell_exports,
     }
 }
 
-pub fn ox_alpha_claude_code_exports() -> Vec<String> {
+fn ox_alpha_claude_code_vars() -> [(&'static str, &'static str); 9] {
     [
         ("ANTHROPIC_MODEL", OX_ALPHA_CLAUDE_MODEL),
         ("CLAUDE_CODE_DISABLE_1M_CONTEXT", "0"),
@@ -82,9 +103,13 @@ pub fn ox_alpha_claude_code_exports() -> Vec<String> {
         ("CLAUDE_CODE_EFFORT_LEVEL", "max"),
         ("MAX_THINKING_TOKENS", OX_ALPHA_MAX_THINKING_TOKENS),
     ]
-    .into_iter()
-    .map(|(key, value)| format!("export {key}={}", shell_quote(value)))
-    .collect()
+}
+
+pub fn ox_alpha_claude_code_exports() -> Vec<String> {
+    ox_alpha_claude_code_vars()
+        .into_iter()
+        .map(|(key, value)| format!("export {key}={}", shell_quote(value)))
+        .collect()
 }
 
 fn shell_quote(value: &str) -> String {

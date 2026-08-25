@@ -10,7 +10,9 @@ mod utility;
 mod view;
 
 use crate::cli::{self, Command};
+use crate::config::{BridgeConfig, CliOverrides};
 use crate::output::{setup_color, OutputFormat};
+use crate::supervisor::SupervisorStatus;
 use clap::Parser;
 use yansi::Paint;
 
@@ -98,9 +100,52 @@ pub async fn run_cli() {
             server::cmd_logs_legacy(fmt)
         }
 
-        // Default: keep legacy foreground behavior, but do not try to bind over
-        // an already-running bridge. This avoids confusing "address in use"
-        // errors when users type `o2a` after `o2a server start`.
-        None => server::cmd_run_server(crate::server::ServeArgsBridge::default()).await,
+        // Default: the bridge lifecycle stays explicit. A bare invocation only
+        // launches Claude Code after confirming the configured bridge is running.
+        None => launch_claude_code(),
+    }
+}
+
+fn launch_claude_code() {
+    let resolved = BridgeConfig::from_env_and_cli(CliOverrides::default());
+    let supervisor = server::resolve_runtime(None, None);
+
+    match supervisor.status() {
+        Ok(SupervisorStatus::Running { .. }) => {}
+        Ok(SupervisorStatus::Stopped) => {
+            eprintln!(
+                "opencode2api: bridge is not running. Start it first with: opencode2api server start"
+            );
+            std::process::exit(1);
+        }
+        Err(error) => {
+            eprintln!("opencode2api: could not determine bridge status: {error}");
+            std::process::exit(1);
+        }
+    }
+
+    let mut command = std::process::Command::new("claude");
+    for (key, value) in crate::application::integration::process_environment(&resolved) {
+        match value {
+            Some(value) => {
+                command.env(key, value);
+            }
+            None => {
+                command.env_remove(key);
+            }
+        }
+    }
+
+    match command.status() {
+        Ok(status) if status.success() => {}
+        Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("opencode2api: Claude Code is not installed or not available in PATH.");
+            std::process::exit(127);
+        }
+        Err(error) => {
+            eprintln!("opencode2api: failed to launch Claude Code: {error}");
+            std::process::exit(1);
+        }
     }
 }
