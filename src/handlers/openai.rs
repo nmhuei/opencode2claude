@@ -196,7 +196,6 @@ async fn handle_chat_completions_inner(
             return Err(error);
         }
     };
-    capture.attempt_route(upstream.route());
     let status =
         StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let max_capture_bytes = state.config.history.max_response_bytes;
@@ -754,6 +753,12 @@ fn openai_bridge_error(error: BridgeError) -> Response {
             StatusCode::TOO_MANY_REQUESTS,
             "rate_limit_error",
             Some("rate_limit_exceeded"),
+            message,
+        ),
+        BridgeError::EgressUnavailable(message) => openai_error_response(
+            StatusCode::BAD_REQUEST,
+            "api_error",
+            Some("egress_unavailable"),
             message,
         ),
         other => openai_error_response(

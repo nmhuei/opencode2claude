@@ -294,6 +294,23 @@ verify_install() {
     fi
 }
 
+install_shell_integration() {
+    installed_bin="${installdir}/${PROJECT}"
+    shell_rc_path=""
+    if [ ! -x "$installed_bin" ]; then
+        warn "Shell integration was not installed because ${installed_bin} is unavailable."
+        return 0
+    fi
+
+    if shell_rc_path="$("$installed_bin" --quiet shell install 2>/dev/null)"; then
+        ok "Shell integration installed: ${shell_rc_path}"
+    else
+        warn "Could not auto-install the shell integration for ${SHELL:-unknown shell}."
+        info "Run later: opencode2api shell install --shell bash|zsh"
+        shell_rc_path=""
+    fi
+}
+
 # ══════════════════════════════════════════════════════════════════════
 #  Optional dependency: opencode CLI (monitoring only)
 # ══════════════════════════════════════════════════════════════════════
@@ -367,21 +384,33 @@ print_welcome() {
     printf '  %s%s%s\n' "${BOLD}" "Quick start" "${NC}"
     printf '%s\n' ""
 
-    if command -v opencode >/dev/null 2>&1; then
-        printf '%s\n' "  1. Start the bridge:"
-        printf '     %s%s%s\n' "${CYAN}" "oc2api server start" "${NC}"
+    if [ -n "${shell_rc_path:-}" ]; then
+        printf '%s\n' "  Shell hook installed. Open a new terminal, or load it now with:"
+        printf '     %s%s%s\n' "${CYAN}" "source ${shell_rc_path}" "${NC}"
         printf '%s\n' ""
-        printf '%s\n' "  2. Use Claude Code with any LLM:"
+    fi
+
+    if command -v opencode >/dev/null 2>&1; then
+        printf '%s\n' "  1. Start the bridge once:"
+        printf '     %s%s%s\n' "${CYAN}" "opencode2api server start" "${NC}"
+        printf '%s\n' ""
+        printf '%s\n' "  2. In each terminal, load the bridge environment:"
+        printf '     %s%s%s\n' "${CYAN}" "opencode2api set env" "${NC}"
+        printf '%s\n' ""
+        printf '%s\n' "  3. Start Claude Code:"
         printf '     %s%s%s\n' "${CYAN}" "claude" "${NC}"
         printf '%s\n' ""
-        printf '%s\n' "  3. Use a specific model:"
-        printf '     %s%s%s\n' "${CYAN}" "oc2api server start -m opencode/deepseek-v4-flash-free" "${NC}"
+        printf '%s\n' "  To choose a model when starting a stopped server:"
+        printf '     %s%s%s\n' "${CYAN}" "opencode2api server start -m opencode/x-preview-f-free" "${NC}"
     else
-        printf '%s\n' "  1. Install OpenCode first, then start the bridge:"
+        printf '%s\n' "  1. Install OpenCode first, then start the bridge once:"
         printf '     %s%s%s\n' "${CYAN}" "curl -fsSL https://docs.opencode.ai/install.sh | sh" "${NC}"
-        printf '     %s%s%s\n' "${CYAN}" "oc2api server start" "${NC}"
+        printf '     %s%s%s\n' "${CYAN}" "opencode2api server start" "${NC}"
         printf '%s\n' ""
-        printf '%s\n' "  2. Use Claude Code with any LLM:"
+        printf '%s\n' "  2. In each terminal, load the bridge environment:"
+        printf '     %s%s%s\n' "${CYAN}" "opencode2api set env" "${NC}"
+        printf '%s\n' ""
+        printf '%s\n' "  3. Start Claude Code:"
         printf '     %s%s%s\n' "${CYAN}" "claude" "${NC}"
     fi
     printf '%s\n' ""
@@ -442,6 +471,11 @@ main() {
                     echo ""
                 else
                     echo ""
+                    if opencode2api shell --help >/dev/null 2>&1; then
+                        if shell_rc_path="$(opencode2api --quiet shell install 2>/dev/null)"; then
+                            ok "Shell integration is up to date: ${shell_rc_path}"
+                        fi
+                    fi
                     info "Done."
                     exit 0
                 fi
@@ -477,6 +511,7 @@ main() {
 
     if do_install; then
         verify_install
+        install_shell_integration
         check_opencode
         check_warp
         print_welcome

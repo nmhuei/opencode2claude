@@ -3,6 +3,12 @@
 use crate::config::BridgeConfig;
 use serde::Serialize;
 
+pub const OX_ALPHA_MODEL: &str = "opencode/x-preview-f-free";
+pub const OX_ALPHA_CLAUDE_MODEL: &str = "sonnet[1m]";
+pub const OX_ALPHA_MAX_OUTPUT_TOKENS: &str = "128000";
+pub const OX_ALPHA_AUTO_COMPACT_WINDOW: &str = "870000";
+pub const OX_ALPHA_MAX_THINKING_TOKENS: &str = "120000";
+
 #[derive(Debug, Clone, Serialize)]
 pub struct IntegrationEnvironment {
     pub anthropic_base_url: String,
@@ -36,6 +42,7 @@ pub fn environment(config: &BridgeConfig) -> IntegrationEnvironment {
             "export OPENAI_BASE_URL={}",
             shell_quote(&format!("{base}/v1"))
         ),
+        "unset ANTHROPIC_AUTH_TOKEN".to_string(),
     ];
     if let Some(model) = config
         .model
@@ -43,6 +50,9 @@ pub fn environment(config: &BridgeConfig) -> IntegrationEnvironment {
         .filter(|value| !value.trim().is_empty())
     {
         exports.push(format!("export OPENCODE_MODEL={}", shell_quote(model)));
+        if model == OX_ALPHA_MODEL {
+            exports.extend(ox_alpha_claude_code_exports());
+        }
     }
     IntegrationEnvironment {
         anthropic_base_url: base.clone(),
@@ -51,6 +61,26 @@ pub fn environment(config: &BridgeConfig) -> IntegrationEnvironment {
         model: config.model.clone(),
         shell_exports: exports,
     }
+}
+
+pub fn ox_alpha_claude_code_exports() -> Vec<String> {
+    [
+        ("ANTHROPIC_MODEL", OX_ALPHA_CLAUDE_MODEL),
+        ("CLAUDE_CODE_DISABLE_1M_CONTEXT", "0"),
+        ("CLAUDE_CODE_MAX_OUTPUT_TOKENS", OX_ALPHA_MAX_OUTPUT_TOKENS),
+        (
+            "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+            OX_ALPHA_AUTO_COMPACT_WINDOW,
+        ),
+        ("CLAUDE_CODE_DISABLE_THINKING", "0"),
+        ("CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING", "0"),
+        ("CLAUDE_CODE_ALWAYS_ENABLE_EFFORT", "1"),
+        ("CLAUDE_CODE_EFFORT_LEVEL", "max"),
+        ("MAX_THINKING_TOKENS", OX_ALPHA_MAX_THINKING_TOKENS),
+    ]
+    .into_iter()
+    .map(|(key, value)| format!("export {key}={}", shell_quote(value)))
+    .collect()
 }
 
 fn shell_quote(value: &str) -> String {
@@ -80,5 +110,32 @@ mod tests {
             .shell_exports
             .iter()
             .all(|line| !line.contains("secret'value")));
+    }
+
+    #[test]
+    fn ox_alpha_environment_exports_verified_claude_code_session_tuning() {
+        let config = BridgeConfig {
+            model: Some("opencode/x-preview-f-free".to_string()),
+            ..Default::default()
+        };
+
+        let exports = environment(&config).shell_exports;
+        for expected in [
+            "unset ANTHROPIC_AUTH_TOKEN",
+            "export ANTHROPIC_MODEL='sonnet[1m]'",
+            "export CLAUDE_CODE_DISABLE_1M_CONTEXT='0'",
+            "export CLAUDE_CODE_MAX_OUTPUT_TOKENS='128000'",
+            "export CLAUDE_CODE_AUTO_COMPACT_WINDOW='870000'",
+            "export CLAUDE_CODE_DISABLE_THINKING='0'",
+            "export CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING='0'",
+            "export CLAUDE_CODE_ALWAYS_ENABLE_EFFORT='1'",
+            "export CLAUDE_CODE_EFFORT_LEVEL='max'",
+            "export MAX_THINKING_TOKENS='120000'",
+        ] {
+            assert!(
+                exports.iter().any(|line| line == expected),
+                "missing {expected}"
+            );
+        }
     }
 }

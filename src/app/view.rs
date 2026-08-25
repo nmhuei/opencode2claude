@@ -519,28 +519,51 @@ pub(super) fn cmd_print_env(config: &BridgeConfig) {
         "compatibility key; authentication disabled"
     };
     let base_url = claude_code_base_url(config);
-    println!(
-        "{}",
-        presentation::facts(&[
-            ("ANTHROPIC_API_KEY", api_key_status.to_string()),
-            ("ANTHROPIC_BASE_URL", base_url.clone().cyan().to_string()),
-            ("OPENAI_API_KEY", api_key_status.to_string()),
+    let mut rows = vec![
+        ("ANTHROPIC_API_KEY", api_key_status.to_string()),
+        ("ANTHROPIC_BASE_URL", base_url.clone().cyan().to_string()),
+        ("OPENAI_API_KEY", api_key_status.to_string()),
+        (
+            "OPENAI_BASE_URL",
+            format!("{base_url}/v1").cyan().to_string(),
+        ),
+        ("OPENCODE_MODEL", model.clone()),
+    ];
+    if model == crate::application::integration::OX_ALPHA_MODEL {
+        rows.extend([
             (
-                "OPENAI_BASE_URL",
-                format!("{base_url}/v1").cyan().to_string()
+                "ANTHROPIC_MODEL",
+                crate::application::integration::OX_ALPHA_CLAUDE_MODEL.to_string(),
             ),
-            ("OPENCODE_MODEL", model),
-        ])
-    );
+            ("CLAUDE_CODE_DISABLE_1M_CONTEXT", "0".to_string()),
+            (
+                "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+                crate::application::integration::OX_ALPHA_MAX_OUTPUT_TOKENS.to_string(),
+            ),
+            (
+                "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+                crate::application::integration::OX_ALPHA_AUTO_COMPACT_WINDOW.to_string(),
+            ),
+            ("CLAUDE_CODE_DISABLE_THINKING", "0".to_string()),
+            ("CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING", "0".to_string()),
+            ("CLAUDE_CODE_ALWAYS_ENABLE_EFFORT", "1".to_string()),
+            ("CLAUDE_CODE_EFFORT_LEVEL", "max".to_string()),
+            (
+                "MAX_THINKING_TOKENS",
+                crate::application::integration::OX_ALPHA_MAX_THINKING_TOKENS.to_string(),
+            ),
+        ]);
+    }
+    println!("{}", presentation::facts(&rows));
 
     print_section("Shell setup");
     println!(
         "{}{}",
         " ".repeat(presentation::INDENT),
-        "eval \"$(opencode2api --quiet env)\"".cyan()
+        "opencode2api set env".cyan()
     );
     println!();
-    print_tip("Human mode hides credentials. Quiet mode prints eval-safe exports.");
+    print_tip("Release installs add a managed bash/zsh hook. Quiet mode still prints eval-safe exports for automation.");
     println!();
 }
 

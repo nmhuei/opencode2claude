@@ -5,3 +5,4 @@ pub mod completion;
 pub mod integration;
 pub mod lifecycle;
 pub mod models;
+pub mod shell_integration;

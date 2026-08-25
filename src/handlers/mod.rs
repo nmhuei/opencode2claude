@@ -5,6 +5,7 @@ mod metadata;
 mod openai;
 mod prompt;
 mod shell;
+mod title;
 mod types;
 
 pub use messages::handle_messages;
