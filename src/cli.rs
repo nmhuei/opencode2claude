@@ -93,6 +93,13 @@ pub enum Command {
     /// Diagnose common issues with the bridge and its dependencies
     Doctor,
 
+    /// List available free models from OpenCode Zen
+    #[command(alias = "models")]
+    List(ListArgs),
+
+    /// Inspect or set the active model
+    Model(ModelArgs),
+
     /// Generate shell completion scripts
     Completion(CompletionArgs),
 
@@ -133,13 +140,21 @@ pub enum ServerCommand {
     Start(ServerStartArgs),
 
     /// Stop the bridge daemon
+    ///
+    /// Refuses to act when the configured port answers but no supervisor PID
+    /// file tracks the listener (exit code 4); pass --unmanaged to verify that
+    /// listener's process identity, adopt it, and stop it.
     Stop(ServerStopArgs),
 
     /// Show bridge status
     Status(ServerStatusArgs),
 
     /// Restart the bridge daemon
-    Restart,
+    ///
+    /// Refuses to act when the configured port answers but no supervisor PID
+    /// file tracks the listener (exit code 4); pass --unmanaged to verify that
+    /// listener's process identity, adopt it, and restart over it.
+    Restart(ServerRestartArgs),
 
     /// View bridge daemon logs
     Logs,
@@ -218,10 +233,43 @@ pub struct ServerStopArgs {
     /// Remove proxy containers entirely instead of pausing them
     #[arg(long = "purge")]
     pub purge: bool,
+
+    /// Adopt an untracked listener on the configured port before stopping it:
+    /// verifies the listener's executable and start time via /proc, records
+    /// the supervisor PID file, then terminates through the normal verified
+    /// flow. Without this flag an untracked listener is refused (exit code 4).
+    #[arg(long = "unmanaged")]
+    pub unmanaged: bool,
+}
+
+/// Arguments for `server restart`.
+#[derive(Args, Debug, Default)]
+pub struct ServerRestartArgs {
+    /// Adopt an untracked listener on the configured port before restarting
+    /// over it: verifies the listener's executable and start time via /proc,
+    /// records the supervisor PID file, stops it through the normal verified
+    /// flow, then starts a fresh supervised daemon. Without this flag an
+    /// untracked listener aborts the restart before anything is started
+    /// (exit code 4).
+    #[arg(long = "unmanaged")]
+    pub unmanaged: bool,
 }
 
 /// Arguments for `server status`.
-pub type ServerStatusArgs = ServerStopArgs;
+///
+/// Deliberately distinct from [`ServerStopArgs`]: status only reads runtime
+/// state, so stop-only flags (`--purge`, `--unmanaged`) must not appear in its
+/// help or be silently accepted as no-ops.
+#[derive(Args, Debug, Default)]
+pub struct ServerStatusArgs {
+    /// Override bridge port
+    #[arg(short = 'p', long)]
+    pub port: Option<u16>,
+
+    /// Override bind address
+    #[arg(long)]
+    pub host: Option<String>,
+}
 
 /// Proxy pool management subcommands.
 #[derive(Subcommand)]
@@ -394,6 +442,10 @@ pub struct UpdateArgs {
     #[arg(long)]
     pub check: bool,
 
+    /// Resolve and report the candidate without changing the installed binary
+    #[arg(long, conflicts_with = "force")]
+    pub dry_run: bool,
+
     /// Force reinstall even if up-to-date
     #[arg(long)]
     pub force: bool,
@@ -473,4 +525,159 @@ pub enum DashboardCommand {
 
     /// Check dashboard service status and active auth token details
     Status,
+}
+
+/// List available models.
+#[derive(Args, Debug, Clone, Default)]
+pub struct ListArgs {
+    /// Probe live availability and latency from upstream API
+    #[arg(long, short = 'p')]
+    pub probe: bool,
+}
+
+/// Manage configured and available models.
+#[derive(Args, Debug, Clone, Default)]
+pub struct ModelArgs {
+    #[command(subcommand)]
+    pub command: Option<ModelSubcommand>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ModelSubcommand {
+    /// List available free models
+    List(ListArgs),
+
+    /// Set the active model in configuration
+    Set(ModelSetArgs),
+
+    /// Show current active model profile and tuning parameters
+    Status,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ModelSetArgs {
+    /// The model identifier to use (e.g. mimo-v2.5-free, nemotron-3-ultra-free)
+    pub model: String,
+
+    /// Config file to update; defaults to the resolved active config
+    #[arg(short, long)]
+    pub config: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(std::iter::once("opencode2api").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn update_dry_run_is_non_destructive_alias_and_conflicts_with_force() {
+        let parsed = parse(&["update", "--dry-run"]).expect("update dry-run");
+        let Command::Update(args) = parsed.command.unwrap() else {
+            panic!("expected update command");
+        };
+        assert!(args.dry_run);
+        assert!(!args.check);
+        assert!(!args.force);
+        assert!(parse(&["update", "--dry-run", "--force"]).is_err());
+    }
+
+    #[test]
+    fn restart_accepts_unmanaged_override_and_defaults_to_refusing() {
+        let plain = Cli::try_parse_from(["opencode2api", "server", "restart"]).unwrap();
+        let Command::Server(ServerCommand::Restart(args)) = plain.command.unwrap() else {
+            panic!("expected server restart");
+        };
+        assert!(!args.unmanaged, "plain restart must refuse by default");
+
+        let override_parse =
+            Cli::try_parse_from(["opencode2api", "server", "restart", "--unmanaged"]).unwrap();
+        let Command::Server(ServerCommand::Restart(args)) = override_parse.command.unwrap() else {
+            panic!("expected server restart");
+        };
+        assert!(args.unmanaged);
+    }
+
+    #[test]
+    fn stop_keeps_unmanaged_override_and_status_rejects_stop_only_flags() {
+        let stop = Cli::try_parse_from(["opencode2api", "server", "stop", "--unmanaged"]).unwrap();
+        let Command::Server(ServerCommand::Stop(args)) = stop.command.unwrap() else {
+            panic!("expected server stop");
+        };
+        assert!(args.unmanaged);
+
+        // `status` shares no args struct with `stop`, so its dead flags are
+        // gone from both help and the parser.
+        let err = Cli::try_parse_from(["opencode2api", "server", "status", "--purge"])
+            .err()
+            .expect("status must reject the stop-only --purge flag");
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+        let err = Cli::try_parse_from(["opencode2api", "server", "status", "--unmanaged"])
+            .err()
+            .expect("status must reject the stop-only --unmanaged flag");
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+
+        // Plain status still parses and keeps its port/host overrides.
+        let status =
+            Cli::try_parse_from(["opencode2api", "server", "status", "-p", "4321"]).unwrap();
+        let Command::Server(ServerCommand::Status(args)) = status.command.unwrap() else {
+            panic!("expected server status");
+        };
+        assert_eq!(args.port, Some(4321));
+    }
+
+    #[test]
+    fn legacy_hidden_aliases_still_parse() {
+        // The deprecated top-level aliases stay unit-style: their handlers
+        // resolve runtime from config alone and point refusals at the modern
+        // commands.
+        for argv in [vec!["restart"], vec!["stop"], vec!["status"], vec!["start"]] {
+            assert!(
+                parse(&argv).is_ok(),
+                "legacy alias `{}` must keep parsing",
+                argv.join(" ")
+            );
+        }
+        // No subcommand is valid (bare invocation launches Claude Code); an
+        // empty parse must not error at the CLI layer.
+        assert!(parse(&[]).is_ok());
+    }
+
+    #[test]
+    fn list_and_model_subcommands_parse() {
+        let list = parse(&["list"]).unwrap();
+        let Command::List(args) = list.command.unwrap() else {
+            panic!("expected list command");
+        };
+        assert!(!args.probe);
+
+        let list_probed = parse(&["list", "--probe"]).unwrap();
+        let Command::List(args) = list_probed.command.unwrap() else {
+            panic!("expected list --probe command");
+        };
+        assert!(args.probe);
+
+        let model_set = parse(&["model", "set", "mimo-v2.5-free"]).unwrap();
+        let Command::Model(model_args) = model_set.command.unwrap() else {
+            panic!("expected model command");
+        };
+        let Some(ModelSubcommand::Set(set_args)) = model_args.command else {
+            panic!("expected model set subcommand");
+        };
+        assert_eq!(set_args.model, "mimo-v2.5-free");
+
+        let model_status = parse(&["model", "status"]).unwrap();
+        let Command::Model(model_args) = model_status.command.unwrap() else {
+            panic!("expected model command");
+        };
+        assert!(matches!(model_args.command, Some(ModelSubcommand::Status)));
+
+        let model_bare = parse(&["model"]).unwrap();
+        let Command::Model(model_args) = model_bare.command.unwrap() else {
+            panic!("expected model command");
+        };
+        assert!(model_args.command.is_none());
+    }
 }

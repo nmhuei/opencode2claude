@@ -24,6 +24,13 @@ const V0_ALIASES: &[(&str, &str)] = &[
     ("metrics", "metrics_enabled"),
 ];
 
+/// Keys retired from every operator-facing surface (env, TOML, template,
+/// display) because they were enforced nowhere at runtime. Migration drops
+/// them silently — mirroring how unknown keys are tolerated — which keeps
+/// legacy documents loading and lets management's known-key allowlist stop
+/// listing them without rejecting pre-existing files.
+const RETIRED_KEYS: &[&str] = &["max_provider_attempts"];
+
 pub fn migrate_document(content: &str) -> Result<(String, MigrationReport), String> {
     let value = content
         .parse::<toml::Value>()
@@ -50,6 +57,10 @@ pub fn migrate_value(mut value: toml::Value) -> Result<(toml::Value, MigrationRe
         return Err(format!(
             "Configuration schema version {from_version} is newer than supported version {CURRENT_SCHEMA_VERSION}"
         ));
+    }
+
+    for retired in RETIRED_KEYS {
+        table.remove(*retired);
     }
 
     let mut renamed_keys = Vec::new();
@@ -121,5 +132,24 @@ mod tests {
         assert!(!first_report.changed);
         assert!(!second_report.changed);
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn strips_retired_keys_from_any_schema_version() {
+        // Current-schema documents are stripped in place.
+        let (document, _) =
+            migrate_document("schema_version = 1\nmax_provider_attempts = 7\nport = 4000\n")
+                .unwrap();
+        assert!(!document.contains("max_provider_attempts"));
+        assert!(document.contains("port = 4000"));
+
+        // Legacy documents go through the same retirement on their way up.
+        let (document, _) = migrate_document("max_provider_attempts = 7\n").unwrap();
+        assert!(!document.contains("max_provider_attempts"));
+
+        // Stripping is idempotent: re-migrating a stripped document is a no-op.
+        let (second, report) = migrate_document(&document).unwrap();
+        assert!(!report.changed);
+        assert_eq!(second, document);
     }
 }

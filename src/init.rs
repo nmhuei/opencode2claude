@@ -42,7 +42,6 @@ schema_version = 1
 # model_fallbacks = ["opencode/deepseek-v4-flash-free"]
 # enable_default_fallbacks = false
 # max_network_attempts = 5
-# max_provider_attempts = 1
 # retry_base_backoff_ms = 2000
 # retry_max_backoff_ms = 16000
 

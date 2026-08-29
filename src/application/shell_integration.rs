@@ -26,14 +26,13 @@ impl ShellKind {
     }
 
     fn default_rc_path(self) -> Result<PathBuf> {
-        let home = std::env::var_os("HOME")
+        let home = crate::config::ambient_home()
             .map(PathBuf::from)
             .ok_or_else(|| anyhow!("HOME is not set; pass --rc explicitly"))?;
         match self {
             Self::Bash => Ok(home.join(".bashrc")),
             Self::Zsh => {
-                let base = std::env::var_os("ZDOTDIR")
-                    .filter(|value| !value.is_empty())
+                let base = crate::config::ambient_zdotdir()
                     .map(PathBuf::from)
                     .unwrap_or(home);
                 Ok(base.join(".zshrc"))
@@ -54,7 +53,7 @@ pub fn resolve_shell(requested: &str) -> Result<ShellKind> {
         "bash" => Ok(ShellKind::Bash),
         "zsh" => Ok(ShellKind::Zsh),
         "auto" | "" => {
-            let shell = std::env::var("SHELL").unwrap_or_default();
+            let shell = crate::config::ambient_shell();
             let name = Path::new(&shell)
                 .file_name()
                 .and_then(|value| value.to_str())

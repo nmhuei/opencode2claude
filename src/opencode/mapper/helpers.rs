@@ -84,18 +84,7 @@ fn non_empty(value: &str) -> Option<String> {
 }
 
 pub fn map_model_name(model: &str) -> String {
-    let mut name = model.to_string();
-    if name.starts_with("opencode/") {
-        name = name["opencode/".len()..].to_string();
-    }
-    match name.as_str() {
-        "deepseek-v4-flash" => "deepseek-v4-flash-free".to_string(),
-        "nemotron-3-ultra" => "nemotron-3-ultra-free".to_string(),
-        "x-preview" | "x-preview-f" | "ox-alpha" => "x-preview-f-free".to_string(),
-        "sonnet[1m]" => "x-preview-f-free".to_string(),
-        _ if name.starts_with("claude-") => "x-preview-f-free".to_string(),
-        _ => name,
-    }
+    super::capabilities::canonical_model_name(model)
 }
 
 pub fn tool_result_content_to_string(val: &serde_json::Value) -> String {
@@ -105,12 +94,22 @@ pub fn tool_result_content_to_string(val: &serde_json::Value) -> String {
             let mut text_parts = Vec::new();
             for item in arr {
                 if let Some(obj) = item.as_object() {
-                    if obj.get("type").and_then(|t| t.as_str()) == Some("text") {
-                        if let Some(text) = obj.get("text").and_then(|t| t.as_str()) {
-                            text_parts.push(text.to_string());
+                    match obj.get("type").and_then(|t| t.as_str()) {
+                        Some("text") => {
+                            if let Some(text) = obj.get("text").and_then(|t| t.as_str()) {
+                                text_parts.push(text.to_string());
+                            }
                         }
-                    } else {
-                        text_parts.push(item.to_string());
+                        // Media blocks (image/document/…) carry raw base64 in
+                        // `source.data`; JSON-dumping them would balloon the
+                        // upstream prompt with megabytes of garbage tokens.
+                        // Mirror the user-role path's compact marker instead.
+                        Some(other_type) => {
+                            text_parts.push(format!("[attached {other_type} block not forwarded]"))
+                        }
+                        // Untyped objects are small structured payloads; keep
+                        // them verbatim so their information survives.
+                        None => text_parts.push(item.to_string()),
                     }
                 } else {
                     text_parts.push(item.to_string());

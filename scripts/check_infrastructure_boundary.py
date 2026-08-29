@@ -21,9 +21,24 @@ def main() -> int:
         relative = path.relative_to(ROOT)
         if relative.parts[:2] == ALLOWED_PREFIX.parts:
             continue
-        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-            if any(pattern.search(line) for pattern in COMMAND_PATTERNS):
-                violations.append(f"{relative}:{number}: {line.strip()}")
+        lines = path.read_text(encoding="utf-8").splitlines()
+        in_test_module = False
+        pending_test_cfg = False
+        test_depth = 0
+        depth = 0
+        for number, line in enumerate(lines, start=1):
+            stripped = line.strip()
+            if stripped.startswith("#[cfg(test)]"):
+                pending_test_cfg = True
+            if pending_test_cfg and (stripped.startswith("mod tests") or stripped.startswith("pub mod tests")) and "{" in line:
+                in_test_module = True
+                test_depth = depth + line.count("{") - line.count("}")
+                pending_test_cfg = False
+            if any(pattern.search(line) for pattern in COMMAND_PATTERNS) and not in_test_module:
+                violations.append(f"{relative}:{number}: {stripped}")
+            depth += line.count("{") - line.count("}")
+            if in_test_module and depth < test_depth:
+                in_test_module = False
 
     if violations:
         print("infrastructure-boundary: FAILED", file=sys.stderr)

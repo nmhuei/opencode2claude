@@ -11,22 +11,41 @@ pub struct TestBridge {
     pub child: tokio::process::Child,
     pub port: u16,
     pub client: Client,
-    runtime_dir: PathBuf,
+    isolation_root: PathBuf,
 }
 
 impl TestBridge {
     /// Start the Cargo-built bridge process with custom environment overrides.
     pub async fn start(env_overrides: HashMap<&str, &str>) -> Self {
         let port = Self::get_free_port();
-        let runtime_dir = std::env::temp_dir().join(format!(
+        // Per-bridge isolation root holding runtime artifacts, a throwaway
+        // HOME, and the child working directory, so neither the inherited
+        // shell environment, repository dotfiles (.env, opencode2api.toml),
+        // nor machine-wide state (~/.opencode2api, persistent API-key
+        // registry) can leak into the bridge under test.
+        let isolation_root = std::env::temp_dir().join(format!(
             "opencode2api-integration-{}-{}",
             std::process::id(),
             port
         ));
+        let runtime_dir = isolation_root.join("runtime");
+        let home_dir = isolation_root.join("home");
+        std::fs::create_dir_all(&runtime_dir).expect("create isolated runtime dir");
+        std::fs::create_dir_all(&home_dir).expect("create isolated home dir");
         let binary = env!("CARGO_BIN_EXE_opencode2api");
 
         let mut cmd = tokio::process::Command::new(binary);
         cmd.arg("serve")
+            .current_dir(&runtime_dir)
+            // Explicit allowlist: drop every inherited variable so ambient
+            // BRIDGE_*/OPENCODE_*/API-key values cannot reach the child.
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env(
+                "TMPDIR",
+                std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".into()),
+            )
+            .env("HOME", &home_dir)
             .env("BRIDGE_PORT", port.to_string())
             .env("BRIDGE_HOST", "127.0.0.1")
             .env("RUNTIME_DIR", &runtime_dir)
@@ -36,8 +55,8 @@ impl TestBridge {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
 
-        // Make the child hermetic even when the repository contains a local .env.
-        // dotenvy does not overwrite explicitly supplied environment values.
+        // Anonymous-by-default baseline; explicit values always win over the
+        // repository `.env` because dotenvy never overwrites set variables.
         cmd.env("BRIDGE_AUTH_TOKEN", "");
         cmd.env("DASHBOARD_ADMIN_TOKEN", "");
         cmd.env("REST_API_TOKEN", "");
@@ -94,7 +113,7 @@ impl TestBridge {
             child,
             port,
             client,
-            runtime_dir,
+            isolation_root,
         }
     }
 
@@ -140,7 +159,7 @@ impl TestBridge {
 impl Drop for TestBridge {
     fn drop(&mut self) {
         let _ = self.child.start_kill();
-        let _ = std::fs::remove_dir_all(&self.runtime_dir);
+        let _ = std::fs::remove_dir_all(&self.isolation_root);
     }
 }
 

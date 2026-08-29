@@ -177,13 +177,27 @@ struct ReconcileCandidate {
     client: reqwest::Client,
 }
 
+/// Drive the proxy subsystem lifecycle for every proxy-backed egress mode
+/// (`proxy` and `hybrid`).
+///
+/// The loop repeatedly runs a full reconcile cycle: bootstrap configured
+/// candidates through the container runtime, then stage transport, identity,
+/// and route verification, and finally publish readiness by transitioning
+/// `subsystem` (Starting → TransportVerifying → IdentityVerifying →
+/// RouteVerifying → Ready, or Degraded with a bounded error + backoff on
+/// failure). The cycle body is egress-mode independent — it only ever reads
+/// pool/config state — so pure-proxy deployments get the same honest snapshot
+/// consumers see in hybrid mode.
+///
+/// The `hybrid_` prefix is retained from when only hybrid mode spawned this
+/// worker; renaming it would churn callers without behavioral value.
 pub async fn hybrid_proxy_reconciler(
     pool: Arc<RwLock<ProxyPool>>,
     subsystem: Arc<RwLock<ProxySubsystemStatus>>,
     runtime: Arc<dyn ContainerRuntime>,
     verifier: Arc<dyn ProxyVerifier>,
     config: Arc<BridgeConfig>,
-    _metrics: Arc<Metrics>,
+    metrics: Arc<Metrics>,
     context: WorkerContext,
 ) -> Result<(), String> {
     let mut failure_attempt = 0_u32;
@@ -199,6 +213,7 @@ pub async fn hybrid_proxy_reconciler(
                     runtime.as_ref(),
                     verifier.as_ref(),
                     &config,
+                    &metrics,
                 ),
             ) => match result {
                 Ok(result) => result,
@@ -228,6 +243,7 @@ pub async fn hybrid_proxy_reconciler(
                     .write()
                     .await
                     .mark_degraded(error, Some(backoff_until));
+                metrics.record_proxy_state_transition();
                 if sleep_with_heartbeat(&context, backoff).await {
                     return Ok(());
                 }
@@ -242,11 +258,13 @@ async fn reconcile_once(
     runtime: &dyn ContainerRuntime,
     verifier: &dyn ProxyVerifier,
     config: &BridgeConfig,
+    metrics: &Metrics,
 ) -> Result<(), String> {
     subsystem
         .write()
         .await
         .transition(ProxySubsystemPhase::Starting, None);
+    metrics.record_proxy_state_transition();
 
     let candidates = {
         let guard = pool.read().await;
@@ -263,15 +281,20 @@ async fn reconcile_once(
             .collect::<Vec<_>>()
     };
     if candidates.is_empty() {
-        return Err("hybrid proxy pool has no configured candidates".to_string());
+        return Err("proxy pool has no configured candidates".to_string());
     }
 
     let mut bootstrapped = Vec::new();
     let mut bootstrap_error = None;
     for candidate in &candidates {
+        metrics.record_proxy_bootstrap_attempt();
         match ensure_candidate(runtime, candidate, config).await {
-            Ok(()) => bootstrapped.push(candidate.clone()),
+            Ok(()) => {
+                metrics.record_proxy_bootstrap_success();
+                bootstrapped.push(candidate.clone());
+            }
             Err(error) => {
+                metrics.record_proxy_bootstrap_failure();
                 if bootstrap_error.is_none() {
                     bootstrap_error = Some(error);
                 }
@@ -289,6 +312,7 @@ async fn reconcile_once(
         .write()
         .await
         .transition(ProxySubsystemPhase::TransportVerifying, None);
+    metrics.record_proxy_state_transition();
     let mut transport_ready = Vec::new();
     let mut first_error = None;
     for candidate in &bootstrapped {
@@ -314,6 +338,7 @@ async fn reconcile_once(
         .write()
         .await
         .transition(ProxySubsystemPhase::IdentityVerifying, None);
+    metrics.record_proxy_state_transition();
     let mut identity_results = Vec::with_capacity(transport_ready.len());
     let mut identity_successes = 0_usize;
     for candidate in &transport_ready {
@@ -380,6 +405,7 @@ async fn reconcile_once(
         .write()
         .await
         .transition(ProxySubsystemPhase::RouteVerifying, None);
+    metrics.record_proxy_state_transition();
     let mut route_successes = 0_usize;
     for candidate in route_candidates {
         match verify_route_stage(
@@ -395,6 +421,7 @@ async fn reconcile_once(
                 pool.write().await.record_success(candidate.index);
             }
             Err(error) => {
+                metrics.record_proxy_route_probe_failure();
                 if first_error.is_none() {
                     first_error = Some(error.to_string());
                 }
@@ -417,6 +444,7 @@ async fn reconcile_once(
     }
 
     subsystem.write().await.mark_ready();
+    metrics.record_proxy_state_transition();
     Ok(())
 }
 
@@ -710,6 +738,7 @@ mod reconciler_tests {
     use crate::proxy_pool::{ProxyPool, ProxySubsystemPhase, ProxySubsystemStatus};
     use crate::workers::WorkerRegistry;
     use async_trait::async_trait;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::sync::RwLock;
@@ -955,8 +984,9 @@ mod reconciler_tests {
             inspect_error: false,
         };
         let verifier = AlwaysVerifier;
+        let metrics = Metrics::default();
 
-        reconcile_once(&pool, &subsystem, &runtime, &verifier, &config)
+        reconcile_once(&pool, &subsystem, &runtime, &verifier, &config, &metrics)
             .await
             .expect("full verification cycle");
 
@@ -965,6 +995,32 @@ mod reconciler_tests {
             ProxySubsystemPhase::Ready
         );
         assert!(subsystem.read().await.is_ready());
+    }
+
+    #[tokio::test]
+    async fn reconcile_cycle_is_mode_independent_for_pure_proxy_egress() {
+        // The reconciler body must drive the identical lifecycle in pure
+        // proxy mode (state.rs now spawns it there too) with zero changes.
+        let mut raw = (*hybrid_config()).clone();
+        raw.egress.mode = EgressMode::Proxy;
+        let config = Arc::new(raw);
+        let pool = pool(&config);
+        let subsystem = Arc::new(RwLock::new(ProxySubsystemStatus::starting()));
+        let runtime = TestRuntime {
+            inspect_delay: Duration::ZERO,
+            inspect_error: false,
+        };
+        let verifier = AlwaysVerifier;
+        let metrics = Metrics::default();
+
+        reconcile_once(&pool, &subsystem, &runtime, &verifier, &config, &metrics)
+            .await
+            .expect("pure proxy verification cycle");
+
+        assert_eq!(
+            subsystem.read().await.snapshot().phase,
+            ProxySubsystemPhase::Ready
+        );
     }
 
     #[test]
@@ -976,5 +1032,244 @@ mod reconciler_tests {
             Duration::from_secs(2)
         );
         assert_eq!(failure_attempt_after_cycle(0, false), 1);
+    }
+
+    /// Verifier handing every candidate a distinct fresh exit identity so the
+    /// duplicate suppression keeps all candidates eligible for route probing.
+    #[derive(Debug)]
+    struct DistinctIdentityVerifier {
+        identity_calls: Arc<AtomicUsize>,
+        route_error: Option<String>,
+    }
+
+    impl DistinctIdentityVerifier {
+        fn route_failure() -> Self {
+            Self {
+                identity_calls: Arc::new(AtomicUsize::new(0)),
+                route_error: Some("upstream route probe failed".to_string()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ProxyVerifier for DistinctIdentityVerifier {
+        async fn verify_transport(
+            &self,
+            _client: &reqwest::Client,
+            _timeout: Duration,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn verify_identity(
+            &self,
+            _client: &reqwest::Client,
+            _endpoints: &[String],
+            _timeout: Duration,
+        ) -> Result<ExitIdentity, String> {
+            let sequence = self.identity_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ExitIdentity {
+                public_ip: format!("192.0.2.{}", sequence + 1),
+                provider: Some("test".to_string()),
+                colo: Some("TST".to_string()),
+                verified_at_unix_secs: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            })
+        }
+
+        async fn verify_route(
+            &self,
+            _client: &reqwest::Client,
+            _upstream_base_url: &str,
+            _timeout: Duration,
+        ) -> Result<(), String> {
+            match &self.route_error {
+                Some(error) => Err(error.clone()),
+                None => Ok(()),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn successful_reconcile_cycle_counts_bootstrap_and_transitions_exactly_once() {
+        let config = hybrid_config();
+        let pool = pool(&config);
+        let subsystem = Arc::new(RwLock::new(ProxySubsystemStatus::starting()));
+        let runtime = TestRuntime {
+            inspect_delay: Duration::ZERO,
+            inspect_error: false,
+        };
+        let verifier = AlwaysVerifier;
+        let metrics = Metrics::default();
+
+        reconcile_once(&pool, &subsystem, &runtime, &verifier, &config, &metrics)
+            .await
+            .expect("full verification cycle");
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(
+            snapshot.proxy_bootstrap_attempts, 2,
+            "one bootstrap attempt per configured candidate"
+        );
+        assert_eq!(snapshot.proxy_bootstrap_successes, 2);
+        assert_eq!(snapshot.proxy_bootstrap_failures, 0);
+        assert_eq!(
+            snapshot.proxy_state_transitions, 5,
+            "Starting, TransportVerifying, IdentityVerifying, RouteVerifying, Ready"
+        );
+        assert_eq!(snapshot.proxy_route_probe_failures, 0);
+        assert_eq!(snapshot.proxy_duplicate_exit_events, 0);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_failure_counts_one_attempt_and_failure_and_skips_later_stages() {
+        let config = hybrid_config();
+        let pool = pool(&config);
+        let subsystem = Arc::new(RwLock::new(ProxySubsystemStatus::starting()));
+        let runtime = TestRuntime {
+            inspect_delay: Duration::ZERO,
+            inspect_error: true,
+        };
+        let verifier = AlwaysVerifier;
+        let metrics = Metrics::default();
+
+        let result =
+            reconcile_once(&pool, &subsystem, &runtime, &verifier, &config, &metrics).await;
+        assert!(result.is_err(), "unavailable runtime must fail the cycle");
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.proxy_bootstrap_attempts, 2);
+        assert_eq!(snapshot.proxy_bootstrap_successes, 0);
+        assert_eq!(
+            snapshot.proxy_bootstrap_failures, 2,
+            "each failed container bootstrap counts exactly one failure"
+        );
+        assert_eq!(
+            snapshot.proxy_state_transitions, 1,
+            "only Starting is applied before bootstrap fails"
+        );
+        assert_eq!(snapshot.proxy_route_probe_failures, 0);
+    }
+
+    #[tokio::test]
+    async fn route_probe_failure_counts_one_event_per_failing_candidate() {
+        let config = hybrid_config();
+        let pool = pool(&config);
+        let subsystem = Arc::new(RwLock::new(ProxySubsystemStatus::starting()));
+        let runtime = TestRuntime {
+            inspect_delay: Duration::ZERO,
+            inspect_error: false,
+        };
+        let verifier = DistinctIdentityVerifier::route_failure();
+        let metrics = Metrics::default();
+
+        let result =
+            reconcile_once(&pool, &subsystem, &runtime, &verifier, &config, &metrics).await;
+        assert!(
+            result.is_err(),
+            "all-failed route probes must fail the cycle"
+        );
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(
+            snapshot.proxy_route_probe_failures, 2,
+            "each failing candidate probe is exactly one event"
+        );
+        assert_eq!(
+            snapshot.proxy_state_transitions, 4,
+            "Starting through RouteVerifying; no Ready after failure"
+        );
+        assert_eq!(snapshot.proxy_bootstrap_attempts, 2);
+        assert_eq!(snapshot.proxy_bootstrap_successes, 2);
+        assert_eq!(snapshot.proxy_bootstrap_failures, 0);
+    }
+
+    #[tokio::test]
+    async fn repeated_reconcile_cycles_accumulate_counters_additively() {
+        let config = hybrid_config();
+        let pool = pool(&config);
+        let subsystem = Arc::new(RwLock::new(ProxySubsystemStatus::starting()));
+        let runtime = TestRuntime {
+            inspect_delay: Duration::ZERO,
+            inspect_error: false,
+        };
+        let verifier = AlwaysVerifier;
+        let metrics = Metrics::default();
+
+        for _ in 0..2 {
+            reconcile_once(&pool, &subsystem, &runtime, &verifier, &config, &metrics)
+                .await
+                .expect("full verification cycle");
+        }
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.proxy_bootstrap_attempts, 4);
+        assert_eq!(snapshot.proxy_bootstrap_successes, 4);
+        assert_eq!(
+            snapshot.proxy_state_transitions, 10,
+            "two full cycles never double-charge a single transition application"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_cycle_marks_degraded_with_exactly_one_extra_transition() {
+        let config = hybrid_config();
+        let pool = pool(&config);
+        let subsystem = Arc::new(RwLock::new(ProxySubsystemStatus::starting()));
+        let runtime: Arc<dyn ContainerRuntime> = Arc::new(TestRuntime {
+            inspect_delay: Duration::ZERO,
+            inspect_error: true,
+        });
+        let verifier: Arc<dyn ProxyVerifier> = Arc::new(AlwaysVerifier);
+        let metrics = Arc::new(Metrics::default());
+        let registry = WorkerRegistry::new();
+        let task_pool = pool.clone();
+        let task_subsystem = subsystem.clone();
+        let task_config = config.clone();
+        let task_metrics = metrics.clone();
+        registry.spawn_critical("test-reconcile", move |context| async move {
+            hybrid_proxy_reconciler(
+                task_pool,
+                task_subsystem,
+                runtime,
+                verifier,
+                task_config,
+                task_metrics,
+                context,
+            )
+            .await
+        });
+
+        for _ in 0..50 {
+            if subsystem.read().await.snapshot().phase == ProxySubsystemPhase::Degraded {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        registry
+            .shutdown(Duration::from_millis(250))
+            .await
+            .expect("worker remains cancellable while backing off");
+
+        // The first backoff step exceeds the poll window, so exactly one cycle
+        // has completed: Starting + Degraded transitions and one failed
+        // container-bootstrap outcome per configured candidate.
+        let snapshot = metrics.snapshot();
+        assert_eq!(
+            subsystem.read().await.snapshot().phase,
+            ProxySubsystemPhase::Degraded
+        );
+        assert_eq!(
+            snapshot.proxy_bootstrap_attempts, 2,
+            "primary and warm standby are both bootstrapped"
+        );
+        assert_eq!(snapshot.proxy_bootstrap_failures, 2);
+        assert_eq!(snapshot.proxy_bootstrap_successes, 0);
+        assert_eq!(
+            snapshot.proxy_state_transitions, 2,
+            "Starting plus the degraded mark"
+        );
     }
 }

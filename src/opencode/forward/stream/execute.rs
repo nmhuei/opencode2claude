@@ -1,13 +1,14 @@
 //! Streaming request execution loop and search-interception retries.
 
 use super::context::{
-    finalize_stream, finalize_stream_with_text, process_openai_sse_line, StreamContext,
+    finalize_stream, finalize_stream_with_text, process_openai_sse_line, send_tracked,
+    StreamContext,
 };
 use super::transport::{send_sse, DropCancel};
 use crate::error::BridgeError;
 use crate::handlers::MessagesRequest;
 use crate::history::HistoryCapture;
-use crate::observability::ToolProtocolMetricClass;
+use crate::observability::{StreamMetricsGuard, ToolProtocolMetricClass};
 use crate::opencode::forward::common::{
     estimate_input_tokens, estimate_string_tokens, inject_search_results, normalize_search_query,
     prepare_compat_tool_retry, prepare_final_search_synthesis, prepare_native_tool_retry,
@@ -69,6 +70,33 @@ async fn finalize_transport_error(
     let _ = send_sse(tx, builder.api_error(message)).await;
 }
 
+/// Record bookkeeping for a consumer that stopped accepting SSE events
+/// (receiver dropped or stalled past the bounded send window) and report
+/// whether the task must terminate now. The response ends without any clean
+/// terminator: half-open blocks stay half-open because the connection is gone.
+fn dead_consumer_takedown(
+    ctx: &StreamContext,
+    capture: &HistoryCapture,
+    stream_metrics: &mut StreamMetricsGuard,
+) -> bool {
+    if !ctx.send_failed {
+        return false;
+    }
+    capture.append_reasoning(&ctx.accumulated_thinking);
+    capture.append_response(&ctx.accumulated_text);
+    capture.attempt_finished(
+        None,
+        "cancelled",
+        None,
+        Some("sse_send_failed"),
+        Some("SSE consumer stopped accepting events"),
+    );
+    capture.cancel();
+    stream_metrics.cancelled();
+    info!("SSE consumer stopped accepting events; stream terminated without a clean end");
+    true
+}
+
 /// Perform a streaming completions request to upstream OpenCode API and stream Anthropic SSE chunks.
 #[allow(clippy::too_many_arguments)]
 pub async fn forward_to_llm_stream(
@@ -113,7 +141,7 @@ pub async fn forward_to_llm_stream(
             let mut message_emitted = false;
             let mut tracker = SseBlockTracker::new();
 
-            loop {
+            'turns: loop {
                 // Check if client disconnected
                 if cancel_token_spawn.is_cancelled() {
                     let failure = crate::opencode::retry::cancellation_failure();
@@ -144,14 +172,22 @@ pub async fn forward_to_llm_stream(
                         "Search synthesis turn limit reached"
                     );
                     let terminal = "Web research reached the configured turn limit. Additional searches were suppressed; use the results already collected in this conversation.";
+                    // This gate fires before the per-attempt context exists;
+                    // build a throwaway one carrying the message lifecycle so
+                    // the finalizer neither re-emits nor skips message_start.
+                    let mut ctx = StreamContext::new_with_encoded_fallback(is_compact, false);
+                    ctx.message_started = message_emitted;
                     finalize_stream_with_text(
                         terminal,
                         &tx,
                         &builder,
                         &mut tracker,
-                        message_emitted,
+                        &mut ctx,
                     )
                     .await;
+                    if dead_consumer_takedown(&ctx, &capture, &mut stream_metrics) {
+                        break 'turns;
+                    }
                     capture.append_response(terminal);
                     capture.finish_success(200, Some("end_turn"), Some(&model_clone));
                     stream_metrics.completed();
@@ -260,7 +296,10 @@ pub async fn forward_to_llm_stream(
 
                 if upstream_turns == 1 {
                     let input_tokens = estimate_input_tokens(&current_payload);
-                    let _ = send_sse(&tx, builder.message_start(input_tokens)).await;
+                    send_tracked(&mut ctx, &tx, builder.message_start(input_tokens)).await;
+                    if dead_consumer_takedown(&ctx, &capture, &mut stream_metrics) {
+                        break 'turns;
+                    }
                     ctx.message_started = true;
                     message_emitted = true;
                 } else {
@@ -317,7 +356,8 @@ pub async fn forward_to_llm_stream(
                                     max_bytes = max_sse_line_bytes,
                                     "Upstream SSE line exceeded configured byte limit"
                                 );
-                                let _ = send_sse(
+                                send_tracked(
+                                    &mut ctx,
                                     &tx,
                                     builder.api_error(
                                         "Upstream SSE line exceeded configured byte limit",
@@ -350,6 +390,15 @@ pub async fn forward_to_llm_stream(
                     if stream_done {
                         break;
                     }
+                }
+
+                // A failed SSE send means the client channel is dead or stalled
+                // past the bounded window. Terminate exactly like a client
+                // cancellation: no finalize, no fake message_delta/message_stop,
+                // nothing further emitted. Half-open blocks intentionally stay
+                // half-open — the connection is gone.
+                if dead_consumer_takedown(&ctx, &capture, &mut stream_metrics) {
+                    break 'turns;
                 }
 
                 if client_cancelled {
@@ -529,7 +578,10 @@ pub async fn forward_to_llm_stream(
                         );
                         prepare_native_tool_retry(&mut current_payload);
                         for (_, idx) in tracker.close_all() {
-                            let _ = send_sse(&tx, crate::sse::emit_block_stop(idx)).await;
+                            send_tracked(&mut ctx, &tx, crate::sse::emit_block_stop(idx)).await;
+                        }
+                        if dead_consumer_takedown(&ctx, &capture, &mut stream_metrics) {
+                            break 'turns;
                         }
                         continue;
                     }
@@ -540,9 +592,12 @@ pub async fn forward_to_llm_stream(
                         &tx,
                         &builder,
                         &mut tracker,
-                        message_emitted,
+                        &mut ctx,
                     )
                     .await;
+                    if dead_consumer_takedown(&ctx, &capture, &mut stream_metrics) {
+                        break 'turns;
+                    }
                     capture.append_response(terminal);
                     capture.attempt_finished(
                         Some(200),
@@ -577,9 +632,12 @@ pub async fn forward_to_llm_stream(
                         &tx,
                         &builder,
                         &mut tracker,
-                        message_emitted,
+                        &mut ctx,
                     )
                     .await;
+                    if dead_consumer_takedown(&ctx, &capture, &mut stream_metrics) {
+                        break 'turns;
+                    }
                     capture.append_response(terminal);
                     capture.attempt_finished(
                         Some(200),
@@ -599,6 +657,10 @@ pub async fn forward_to_llm_stream(
 
                 if ctx.intercepting_search && !ctx.compat_retry_requested {
                     capture.append_reasoning(&ctx.accumulated_thinking);
+                    // Visible text emitted before the marker belongs in the
+                    // response transcript even though this turn ends in
+                    // interception.
+                    capture.append_response(&ctx.accumulated_text);
                     capture.tool_call(&ctx.search_tc_name, Some(&ctx.search_tc_args));
                     let input_val: serde_json::Value = serde_json::from_str(&ctx.search_tc_args)
                         .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
@@ -640,9 +702,12 @@ pub async fn forward_to_llm_stream(
                             &tx,
                             &builder,
                             &mut tracker,
-                            message_emitted,
+                            &mut ctx,
                         )
                         .await;
+                        if dead_consumer_takedown(&ctx, &capture, &mut stream_metrics) {
+                            break 'turns;
+                        }
                         capture.append_response(&terminal);
                         capture.attempt_finished(
                             Some(200),
@@ -703,7 +768,10 @@ pub async fn forward_to_llm_stream(
                     }
 
                     for (_, idx) in tracker.close_all() {
-                        let _ = send_sse(&tx, crate::sse::emit_block_stop(idx)).await;
+                        send_tracked(&mut ctx, &tx, crate::sse::emit_block_stop(idx)).await;
+                    }
+                    if dead_consumer_takedown(&ctx, &capture, &mut stream_metrics) {
+                        break 'turns;
                     }
                     // Intentionally no reset(): block indices must stay monotonic
                     // within one Anthropic message across search loop iterations,
@@ -737,7 +805,10 @@ pub async fn forward_to_llm_stream(
                         );
                         prepare_compat_tool_retry(&mut current_payload);
                         for (_, idx) in tracker.close_all() {
-                            let _ = send_sse(&tx, crate::sse::emit_block_stop(idx)).await;
+                            send_tracked(&mut ctx, &tx, crate::sse::emit_block_stop(idx)).await;
+                        }
+                        if dead_consumer_takedown(&ctx, &capture, &mut stream_metrics) {
+                            break 'turns;
                         }
                         // No reset(): keep block indices monotonic within the
                         // message across the retried upstream stream.
@@ -750,9 +821,12 @@ pub async fn forward_to_llm_stream(
                         &tx,
                         &builder,
                         &mut tracker,
-                        message_emitted,
+                        &mut ctx,
                     )
                     .await;
+                    if dead_consumer_takedown(&ctx, &capture, &mut stream_metrics) {
+                        break 'turns;
+                    }
                     capture.append_response(terminal);
                     capture.attempt_finished(
                         Some(200),
@@ -772,7 +846,10 @@ pub async fn forward_to_llm_stream(
 
                 // Close any remaining active content blocks
                 for (_, idx) in tracker.close_all() {
-                    let _ = send_sse(&tx, crate::sse::emit_block_stop(idx)).await;
+                    send_tracked(&mut ctx, &tx, crate::sse::emit_block_stop(idx)).await;
+                }
+                if dead_consumer_takedown(&ctx, &capture, &mut stream_metrics) {
+                    break 'turns;
                 }
 
                 if !tracker.has_any_blocks_ever_opened() {
@@ -804,7 +881,9 @@ pub async fn forward_to_llm_stream(
                 let stop_reason = if ctx.has_emitted_tool_use {
                     "tool_use".to_string()
                 } else {
-                    ctx.final_stop_reason
+                    // Cloned, not moved: the tracked terminator sends below
+                    // still need mutable access to the context.
+                    ctx.final_stop_reason.clone()
                 };
 
                 // Send final message_delta and message_stop
@@ -816,13 +895,17 @@ pub async fn forward_to_llm_stream(
                     output_tokens
                 };
 
-                let _ = send_sse(
+                send_tracked(
+                    &mut ctx,
                     &tx,
                     builder.message_delta_with_stop(&stop_reason, output_tokens),
                 )
                 .await;
 
-                let _ = send_sse(&tx, builder.message_stop()).await;
+                send_tracked(&mut ctx, &tx, builder.message_stop()).await;
+                if dead_consumer_takedown(&ctx, &capture, &mut stream_metrics) {
+                    break 'turns;
+                }
                 capture.append_reasoning(&ctx.accumulated_thinking);
                 capture.append_response(&ctx.accumulated_text);
                 if ctx.has_emitted_tool_use {

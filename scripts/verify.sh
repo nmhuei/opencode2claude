@@ -46,6 +46,30 @@ while [[ $# -gt 0 ]]; do
 done
 export PROFILE FROM_GATE ONLY_GATE LIST_GATES PHASE_ORDER
 
+# ── Binary freshness guard ──
+# Phase gates execute "$ROOT_DIR/target/debug/opencode2api" directly. If
+# CARGO_TARGET_DIR is exported (see ~/.zshrc / ~/.bashrc), cargo writes
+# artifacts elsewhere and ./target silently goes stale — verification would
+# then exercise old code. Fail fast instead of verifying a stale binary.
+require_fresh_binary() {
+  local bin="$1"
+  if [[ ! -x "$bin" ]]; then
+    error "Missing binary: $bin"
+    error "CARGO_TARGET_DIR='${CARGO_TARGET_DIR:-<unset>}' may redirect cargo artifacts away from ./target."
+    error "Run 'cargo build' in $ROOT_DIR and confirm $bin was produced, then retry."
+    exit 1
+  fi
+  local newer=""
+  newer="$(find "$ROOT_DIR/src" -type f -newer "$bin" -print -quit)"
+  if [[ -n "$newer" ]]; then
+    error "Sources are newer than binary: $newer is newer than $bin"
+    error "CARGO_TARGET_DIR='${CARGO_TARGET_DIR:-<unset>}' may redirect cargo artifacts away from ./target."
+    error "Run 'cargo build' in $ROOT_DIR to refresh the binary, then retry."
+    exit 1
+  fi
+}
+require_fresh_binary "$ROOT_DIR/target/debug/opencode2api"
+
 # ── Phase dispatch ──
 if [[ "$PHASE" == "all" ]]; then
   for p in "${PHASE_ORDER[@]}"; do

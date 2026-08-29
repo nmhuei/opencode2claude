@@ -27,33 +27,13 @@ pub const MSG_ID_SHELL: &str = "msg_local_shell";
 
 /// Load environment variables from a deterministic `.env` location.
 ///
-/// `dotenvy::dotenv()` only searches from the process working directory. A
-/// daemon started from `$HOME` therefore misses a project-local `.env` even
-/// when the executable itself lives inside that project. We first preserve
-/// the conventional current-directory lookup, then search the executable's
-/// ancestor directories. Existing process environment variables always win.
+/// All process-environment access lives in `loader`; this wrapper preserves
+/// the existing public bootstrap API without opening a second config boundary.
 pub fn load_dotenv() -> Option<std::path::PathBuf> {
-    if let Some(explicit) = std::env::var_os("BRIDGE_ENV_PATH") {
-        let path = std::path::PathBuf::from(explicit);
-        if path.is_file() && dotenvy::from_path(&path).is_ok() {
-            return Some(path);
-        }
-    }
-
-    if let Ok(path) = dotenvy::dotenv() {
-        return Some(path);
-    }
-
-    let executable = std::env::current_exe().ok()?;
-    for directory in executable.parent()?.ancestors() {
-        let candidate = directory.join(".env");
-        if candidate.is_file() && dotenvy::from_path(&candidate).is_ok() {
-            return Some(candidate);
-        }
-    }
-
-    None
+    loader::load_dotenv()
 }
+
+pub(crate) use loader::{ambient_home, ambient_shell, ambient_zdotdir, terminal_columns};
 
 const DEFAULT_SHELL_ALLOWLIST: &str = "git,ls,pwd,cat,find,grep,echo,wc,head,tail,diff";
 const DEFAULT_PRIMARY_PROXIES: &str = "socks5h://127.0.0.1:40001";

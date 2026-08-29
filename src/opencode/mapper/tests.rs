@@ -101,6 +101,63 @@ fn test_tool_result_content_to_string() {
     assert_eq!(tool_result_content_to_string(&val_num), "42");
 }
 
+/// Read-style tool results carry image/document blocks whose `source.data` is
+/// raw base64 (often megabytes). Those must never be JSON-dumped into the
+/// upstream tool-message content: they would balloon the prompt with garbage
+/// tokens (or blow the context window) instead of telling the model an
+/// attachment existed. Mirrors the user-role path's compact marker.
+#[test]
+fn tool_result_media_blocks_are_replaced_with_compact_markers() {
+    let val = serde_json::json!([
+        { "type": "text", "text": "screenshot follows" },
+        {
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": "QUJDREVGRw=="}
+        },
+        {
+            "type": "document",
+            "source": {"type": "base64", "media_type": "application/pdf", "data": "UERG"}
+        }
+    ]);
+    let rendered = tool_result_content_to_string(&val);
+    assert!(rendered.contains("screenshot follows"), "{rendered}");
+    assert!(
+        rendered.contains("[attached image block not forwarded]"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("[attached document block not forwarded]"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("QUJDREVGRw"),
+        "base64 payload leaked upstream: {rendered}"
+    );
+    assert!(
+        !rendered.contains("UERG"),
+        "base64 payload leaked upstream: {rendered}"
+    );
+}
+
+/// Objects in a tool_result array without a `type` discriminator are plain
+/// structured payloads; they stay verbatim JSON (small and informative).
+#[test]
+fn tool_result_untyped_objects_stay_verbatim_json() {
+    let val = serde_json::json!([{"rows": 3, "query": "select 1"}]);
+    let rendered = tool_result_content_to_string(&val);
+    // A single array item renders as that item's own JSON, joined by newlines
+    // when several items exist.
+    let parsed: serde_json::Value =
+        serde_json::from_str(&rendered).expect("untyped object must stay valid JSON");
+    assert_eq!(parsed, serde_json::json!({"rows": 3, "query": "select 1"}));
+
+    let mixed = serde_json::json!([{"a": 1}, {"b": 2}]);
+    assert_eq!(
+        tool_result_content_to_string(&mixed),
+        "{\"a\":1}\n{\"b\":2}"
+    );
+}
+
 #[test]
 fn test_map_anthropic_to_openai_plain() {
     let payload = MessagesRequest {
@@ -1400,5 +1457,562 @@ fn parallel_tool_calls_omitted_for_non_search_tool_sets() {
     assert!(
         !serialized.contains("parallel_tool_calls"),
         "non-search tool sets must not force serial emission: {serialized}"
+    );
+}
+
+// ── Golden regression tests (integration/branch-audit) ─────────────────────
+// The request-mapping layer is protected "fixed once" functionality. The tests
+// below pin exact wire conversions; changes here must be deliberate.
+
+/// An assistant history turn whose blocks are all unconvertible (e.g.
+/// `redacted_thinking`, unknown future types) must be skipped entirely: an
+/// emitted `{"role":"assistant"}` with no content/tool_calls/reasoning is
+/// rejected by OpenAI-compatible providers with an opaque 400 that blames the
+/// whole conversation.
+#[test]
+fn assistant_turn_with_only_unconvertible_blocks_is_dropped() {
+    let payload = MessagesRequest {
+        messages: vec![
+            Message {
+                role: "user".to_string(),
+                content: ContentVal::Single("hi".to_string()),
+            },
+            Message {
+                role: "assistant".to_string(),
+                content: ContentVal::Multiple(vec![MessageContent {
+                    content_type: "redacted_thinking".to_string(),
+                    data: Some("encrypted-blob".to_string()),
+                    ..Default::default()
+                }]),
+            },
+            Message {
+                role: "user".to_string(),
+                content: ContentVal::Single("continue".to_string()),
+            },
+        ],
+        max_tokens: Some(64),
+        ..Default::default()
+    };
+
+    let mapped = map_anthropic_to_openai(&payload, "gpt-4o".to_string());
+    assert_eq!(
+        mapped.messages.len(),
+        2,
+        "empty assistant turn must not reach upstream"
+    );
+    for message in &mapped.messages {
+        assert_ne!(message.role, "assistant");
+    }
+}
+
+/// Assistant turns with real content keep their reasoning even when the
+/// visible text is empty (thinking-only turn replayed by the client).
+#[test]
+fn assistant_thinking_only_turn_keeps_reasoning_content() {
+    let payload = MessagesRequest {
+        messages: vec![Message {
+            role: "assistant".to_string(),
+            content: ContentVal::Multiple(vec![MessageContent {
+                content_type: "thinking".to_string(),
+                thinking: Some("deliberating".to_string()),
+                ..Default::default()
+            }]),
+        }],
+        max_tokens: Some(64),
+        ..Default::default()
+    };
+
+    let mapped = map_anthropic_to_openai(&payload, "gpt-4o".to_string());
+    assert_eq!(mapped.messages.len(), 1);
+    assert_eq!(
+        mapped.messages[0].reasoning_content.as_deref(),
+        Some("deliberating")
+    );
+}
+
+/// Multiple thinking blocks concatenate with a newline separator. A marker
+/// fragment ending one block (`<｜DSML｜`) must never fuse with the opening of
+/// the next (`tool_calls>`) into a live DSML marker inside the reasoning
+/// content replayed upstream on every subsequent turn.
+#[test]
+fn adjacent_thinking_blocks_cannot_fuse_a_marker_across_the_boundary() {
+    let payload = MessagesRequest {
+        messages: vec![Message {
+            role: "assistant".to_string(),
+            content: ContentVal::Multiple(vec![
+                MessageContent {
+                    content_type: "thinking".to_string(),
+                    thinking: Some("ends with marker prefix <｜DSML｜".to_string()),
+                    ..Default::default()
+                },
+                MessageContent {
+                    content_type: "thinking".to_string(),
+                    thinking: Some("tool_calls> and more deliberation".to_string()),
+                    ..Default::default()
+                },
+            ]),
+        }],
+        max_tokens: Some(64),
+        ..Default::default()
+    };
+
+    let mapped = map_anthropic_to_openai(&payload, "gpt-4o".to_string());
+    let reasoning = mapped.messages[0]
+        .reasoning_content
+        .as_deref()
+        .expect("thinking history must map to reasoning_content");
+    assert!(
+        !reasoning.contains("<｜DSML｜tool_calls>"),
+        "separator-free concatenation fused a live DSML marker: {reasoning}"
+    );
+}
+
+/// Pin of CURRENT behavior: a user turn consisting solely of empty text blocks
+/// vanishes from the mapped conversation instead of forwarding an empty user
+/// message upstream. If this ever changes (e.g. to a placeholder), update this
+/// test together with the new convention deliberately.
+#[test]
+fn empty_text_only_user_turn_documents_current_drop() {
+    let payload = MessagesRequest {
+        messages: vec![
+            Message {
+                role: "user".to_string(),
+                content: ContentVal::Single("hi".to_string()),
+            },
+            Message {
+                role: "assistant".to_string(),
+                content: ContentVal::Single("hello".to_string()),
+            },
+            Message {
+                role: "user".to_string(),
+                content: ContentVal::Multiple(vec![MessageContent {
+                    content_type: "text".to_string(),
+                    text: Some(String::new()),
+                    ..Default::default()
+                }]),
+            },
+        ],
+        max_tokens: Some(64),
+        ..Default::default()
+    };
+
+    let mapped = map_anthropic_to_openai(&payload, "gpt-4o".to_string());
+    assert_eq!(mapped.messages.len(), 2);
+    assert_eq!(
+        mapped.messages.last().map(|m| m.role.as_str()),
+        Some("assistant"),
+        "empty trailing user turn currently drops; pinned so changes are deliberate"
+    );
+}
+
+/// `top_k` has no OpenAI Chat Completions equivalent in the fixed wire struct;
+/// it must never leak into the serialized request where unknown fields make
+/// strict providers reject the whole call.
+#[test]
+fn top_k_is_never_forwarded_upstream() {
+    let payload = MessagesRequest {
+        messages: vec![Message {
+            role: "user".to_string(),
+            content: ContentVal::Single("hi".to_string()),
+        }],
+        top_k: Some(40),
+        max_tokens: Some(64),
+        ..Default::default()
+    };
+
+    let mapped = map_anthropic_to_openai(&payload, "gpt-4o".to_string());
+    let serialized = serde_json::to_string(&mapped).unwrap();
+    assert!(
+        !serialized.contains("top_k"),
+        "top_k must stay bridge-internal: {serialized}"
+    );
+}
+
+#[test]
+fn golden_serialized_upstream_request_matches_expected_wire_shape() {
+    let payload: MessagesRequest = serde_json::from_value(serde_json::json!({
+        "model": "gpt-4o",
+        "system": "be terse",
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": [{
+            "name": "bash",
+            "description": "run a command",
+            "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}}
+        }],
+        "tool_choice": {"type": "any"},
+        "stream": false,
+        "temperature": 0.5,
+        "top_p": 0.75,
+        "max_tokens": 256,
+        "stop_sequences": ["STOP"]
+    }))
+    .unwrap();
+
+    let mapped = map_anthropic_to_openai(&payload, "gpt-4o".to_string());
+    let value = serde_json::to_value(&mapped).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "system", "content": "be terse"},
+                {"role": "user", "content": "hi"}
+            ],
+            "tools": [{"type": "function", "function": {
+                "name": "bash",
+                "description": "run a command",
+                "parameters": {"type": "object", "properties": {"command": {"type": "string"}}}
+            }}],
+            "tool_choice": "required",
+            "stream": false,
+            "temperature": 0.5,
+            "top_p": 0.75,
+            "stop": ["STOP"],
+            "max_tokens": 256
+        }),
+        "upstream request wire shape changed; Claude Code depends on it"
+    );
+}
+
+#[test]
+fn tool_choice_variants_map_to_openai_wire_shapes() {
+    let cases = [
+        (
+            serde_json::json!({"type": "auto"}),
+            serde_json::json!("auto"),
+        ),
+        (
+            serde_json::json!({"type": "any"}),
+            serde_json::json!("required"),
+        ),
+        (
+            serde_json::json!({"type": "tool", "name": "Bash"}),
+            serde_json::json!({"type": "function", "function": {"name": "Bash"}}),
+        ),
+        // Missing name degrades to auto rather than an invalid upstream object.
+        (
+            serde_json::json!({"type": "tool"}),
+            serde_json::json!("auto"),
+        ),
+        // Unknown types degrade to auto.
+        (
+            serde_json::json!({"type": "mystery"}),
+            serde_json::json!("auto"),
+        ),
+        // Plain strings pass through untouched.
+        (serde_json::json!("none"), serde_json::json!("none")),
+        // Non-string non-object values degrade to auto.
+        (serde_json::json!(42), serde_json::json!("auto")),
+    ];
+    for (choice, expected) in cases {
+        let payload = MessagesRequest {
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: ContentVal::Single("hi".to_string()),
+            }],
+            tools: Some(vec![AnthropicTool {
+                name: "Bash".to_string(),
+                description: "run".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+                ..Default::default()
+            }]),
+            tool_choice: Some(choice.clone()),
+            max_tokens: Some(64),
+            ..Default::default()
+        };
+        let mapped = map_anthropic_to_openai(&payload, "gpt-4o".to_string());
+        assert_eq!(
+            mapped.tool_choice.as_ref(),
+            Some(&expected),
+            "tool_choice {choice} must map to {expected}"
+        );
+    }
+}
+
+#[test]
+fn tool_definition_fields_forward_verbatim() {
+    let payload = MessagesRequest {
+        messages: vec![Message {
+            role: "user".to_string(),
+            content: ContentVal::Single("hi".to_string()),
+        }],
+        tools: Some(vec![AnthropicTool {
+            name: "bash".to_string(),
+            description: "run a shell command".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"]
+            }),
+            cache_control: Some(serde_json::json!({"type": "ephemeral"})),
+            ..Default::default()
+        }]),
+        max_tokens: Some(64),
+        ..Default::default()
+    };
+
+    let mapped = map_anthropic_to_openai(&payload, "gpt-4o".to_string());
+    let tools = mapped.tools.expect("tools must survive mapping");
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].tool_type, "function");
+    assert_eq!(tools[0].function.name, "bash");
+    assert_eq!(tools[0].function.description, "run a shell command");
+    assert_eq!(
+        tools[0].function.parameters,
+        serde_json::json!({
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": ["command"]
+        })
+    );
+}
+
+#[test]
+fn system_block_array_with_cache_control_joins_text_only() {
+    let val = serde_json::json!([
+        {"type": "text", "text": "part one", "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": "part two"}
+    ]);
+    assert_eq!(extract_system_prompt(&val), "part one\npart two");
+}
+
+#[test]
+fn sampling_params_and_stop_sequences_pass_through_for_plain_models() {
+    let payload = MessagesRequest {
+        messages: vec![Message {
+            role: "user".to_string(),
+            content: ContentVal::Single("hi".to_string()),
+        }],
+        stream: false,
+        temperature: Some(0.9),
+        top_p: Some(0.8),
+        stop_sequences: Some(vec!["\n\nUser:".to_string()]),
+        max_tokens: Some(256),
+        ..Default::default()
+    };
+
+    let mapped = map_anthropic_to_openai(&payload, "gpt-4o".to_string());
+    assert_eq!(mapped.temperature, Some(0.9));
+    assert_eq!(mapped.top_p, Some(0.8));
+    assert_eq!(mapped.stop, Some(vec!["\n\nUser:".to_string()]));
+    assert_eq!(mapped.max_tokens, Some(256));
+}
+
+#[test]
+fn model_normalization_applies_prefix_strip_before_suffix_rules() {
+    assert_eq!(
+        map_model_name("opencode/deepseek-v4-flash"),
+        "deepseek-v4-flash-free"
+    );
+    assert_eq!(map_model_name("opencode/gpt-4o"), "gpt-4o");
+    assert_eq!(map_model_name("x-preview"), "x-preview-f-free");
+    assert_eq!(map_model_name("x-preview-f"), "x-preview-f-free");
+}
+
+#[test]
+fn user_turn_with_mixed_text_and_tool_result_orders_tool_message_first() {
+    let payload = MessagesRequest {
+        messages: vec![Message {
+            role: "user".to_string(),
+            content: ContentVal::Multiple(vec![
+                MessageContent {
+                    content_type: "text".to_string(),
+                    text: Some("before".to_string()),
+                    ..Default::default()
+                },
+                MessageContent {
+                    content_type: "tool_result".to_string(),
+                    tool_use_id: Some("call_1".to_string()),
+                    name: Some("bash".to_string()),
+                    content: Some(serde_json::json!("out")),
+                    ..Default::default()
+                },
+                MessageContent {
+                    content_type: "text".to_string(),
+                    text: Some("after".to_string()),
+                    ..Default::default()
+                },
+            ]),
+        }],
+        max_tokens: Some(64),
+        ..Default::default()
+    };
+
+    let mapped = map_anthropic_to_openai(&payload, "gpt-4o".to_string());
+    assert_eq!(mapped.messages.len(), 2);
+    // Tool results are emitted as their own OpenAI `tool` message in block
+    // order; the surrounding user text is folded into one trailing message.
+    assert_eq!(mapped.messages[0].role, "tool");
+    assert_eq!(mapped.messages[0].tool_call_id.as_deref(), Some("call_1"));
+    assert_eq!(mapped.messages[0].content.as_deref(), Some("out"));
+    assert_eq!(mapped.messages[1].role, "user");
+    assert_eq!(mapped.messages[1].content.as_deref(), Some("before\nafter"));
+}
+
+#[test]
+fn tool_result_is_error_flag_is_not_surfaced_upstream_today() {
+    // Golden pin of CURRENT behavior: `is_error` has no OpenAI equivalent and
+    // is dropped without inventing an error marker. If this behavior changes,
+    // update this test deliberately together with the new convention.
+    let payload = MessagesRequest {
+        messages: vec![
+            Message {
+                role: "assistant".to_string(),
+                content: ContentVal::Multiple(vec![MessageContent {
+                    content_type: "tool_use".to_string(),
+                    id: Some("call_1".to_string()),
+                    name: Some("bash".to_string()),
+                    input: Some(serde_json::json!({"command": "false"})),
+                    ..Default::default()
+                }]),
+            },
+            Message {
+                role: "user".to_string(),
+                content: ContentVal::Multiple(vec![MessageContent {
+                    content_type: "tool_result".to_string(),
+                    tool_use_id: Some("call_1".to_string()),
+                    content: Some(serde_json::json!("exit code 1")),
+                    is_error: Some(true),
+                    ..Default::default()
+                }]),
+            },
+        ],
+        max_tokens: Some(64),
+        ..Default::default()
+    };
+
+    let mapped = map_anthropic_to_openai(&payload, "gpt-4o".to_string());
+    assert_eq!(mapped.messages.len(), 2);
+    let tool_message = &mapped.messages[1];
+    assert_eq!(tool_message.role, "tool");
+    assert_eq!(tool_message.content.as_deref(), Some("exit code 1"));
+    assert_eq!(tool_message.name.as_deref(), Some("bash"));
+}
+
+#[test]
+fn compact_requests_bypass_streaming_reasoning_floor() {
+    let payload: MessagesRequest = serde_json::from_value(serde_json::json!({
+        "messages": [{"role": "user", "content": "please summarize the thread"}],
+        "stream": true,
+        "max_tokens": 32
+    }))
+    .unwrap();
+    assert!(is_compact_request(&payload));
+
+    let mapped = map_anthropic_to_openai(&payload, "opencode/deepseek-r1-free".to_string());
+    assert_eq!(
+        mapped.max_tokens,
+        Some(32),
+        "compact requests keep the client-requested token budget"
+    );
+    assert_eq!(mapped.include_reasoning, None);
+
+    let plain: MessagesRequest = serde_json::from_value(serde_json::json!({
+        "messages": [{"role": "user", "content": "run the tests"}]
+    }))
+    .unwrap();
+    assert!(!is_compact_request(&plain));
+
+    let system_compact: MessagesRequest = serde_json::from_value(serde_json::json!({
+        "system": [{"type": "text", "text": "/compact the conversation"}],
+        "messages": [{"role": "user", "content": "go"}]
+    }))
+    .unwrap();
+    assert!(is_compact_request(&system_compact));
+}
+
+#[test]
+fn streaming_max_tokens_floor_respects_larger_requests() {
+    let build = |max_tokens: Option<u32>| -> MessagesRequest {
+        MessagesRequest {
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: ContentVal::Single("think hard".to_string()),
+            }],
+            stream: true,
+            max_tokens,
+            ..Default::default()
+        }
+    };
+
+    let mapped =
+        map_anthropic_to_openai(&build(Some(4096)), "opencode/deepseek-r1-free".to_string());
+    assert_eq!(mapped.max_tokens, Some(4096));
+
+    let mapped = map_anthropic_to_openai(&build(None), "opencode/deepseek-r1-free".to_string());
+    assert_eq!(mapped.max_tokens, Some(DEFAULT_MIN_REASONING_STREAM_TOKENS));
+}
+
+#[test]
+fn non_deepseek_models_keep_sampling_and_never_get_thinking_field() {
+    let payload: MessagesRequest = serde_json::from_value(serde_json::json!({
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": true,
+        "temperature": 0.7,
+        "thinking": {"type": "enabled", "budget_tokens": 2048}
+    }))
+    .unwrap();
+
+    let mapped = map_anthropic_to_openai(&payload, "opencode/gpt-4o".to_string());
+    assert!(
+        mapped.thinking.is_none(),
+        "only DeepSeek V4 models receive the upstream thinking field"
+    );
+    assert!(mapped.reasoning_effort.is_none());
+    // Client-requested extended thinking still requests the reasoning channel
+    // from the free backend even for non-DeepSeek mappings.
+    assert_eq!(mapped.include_reasoning, Some(true));
+    assert_eq!(mapped.temperature, Some(0.7));
+}
+
+#[test]
+fn response_format_golden_mappings_per_model_family() {
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {"name": {"type": "string"}}
+    });
+    let format = serde_json::json!({"type": "json_schema", "schema": schema});
+
+    // DeepSeek V4 (pro): json_schema collapses to documented JSON-object mode.
+    let deepseek: MessagesRequest = serde_json::from_value(serde_json::json!({
+        "messages": [{"role": "user", "content": "x"}],
+        "output_config": {"format": format}
+    }))
+    .unwrap();
+    let mapped = map_anthropic_to_openai(&deepseek, "deepseek-v4-pro".to_string());
+    assert_eq!(
+        mapped.response_format,
+        Some(serde_json::json!({"type": "json_object"}))
+    );
+
+    // Other models: json_object passes through unchanged.
+    let json_object: MessagesRequest = serde_json::from_value(serde_json::json!({
+        "messages": [{"role": "user", "content": "x"}],
+        "output_config": {"format": {"type": "json_object"}}
+    }))
+    .unwrap();
+    let mapped = map_anthropic_to_openai(&json_object, "gpt-4o".to_string());
+    assert_eq!(
+        mapped.response_format,
+        Some(serde_json::json!({"type": "json_object"}))
+    );
+
+    // Other models: json_schema becomes the strict structured-output wrapper.
+    let structured: MessagesRequest = serde_json::from_value(serde_json::json!({
+        "messages": [{"role": "user", "content": "x"}],
+        "output_config": {"format": {"type": "json_schema", "schema": schema}}
+    }))
+    .unwrap();
+    let mapped = map_anthropic_to_openai(&structured, "gpt-4o".to_string());
+    assert_eq!(
+        mapped.response_format,
+        Some(serde_json::json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "claude_code_output",
+                "schema": schema,
+                "strict": true
+            }
+        }))
     );
 }

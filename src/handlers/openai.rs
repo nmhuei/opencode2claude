@@ -77,9 +77,14 @@ async fn handle_chat_completions_inner(
         ));
     }
 
-    let _permit =
+    // Acquire an *owned* permit so it can be moved into the response-body
+    // stream: the global concurrency limit must cover the whole upstream
+    // exchange (including streaming), not just handler setup. Released on
+    // early error returns by ordinary drop, and when the body completes or
+    // the client disconnects mid-stream.
+    let rate_permit =
         match &state.rate_limiter {
-            Some(limiter) => Some(limiter.acquire().await.map_err(|_| {
+            Some(limiter) => Some(limiter.clone().acquire_owned().await.map_err(|_| {
                 BridgeError::InvalidRequest("Rate limiter is unavailable".to_string())
             })?),
             None => None,
@@ -200,6 +205,9 @@ async fn handle_chat_completions_inner(
         StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let max_capture_bytes = state.config.history.max_response_bytes;
     let body_stream = async_stream::stream! {
+        // Hold the global rate-limit permit until the body stream is fully
+        // consumed or dropped (client disconnect mid-stream included).
+        let _rate_permit = rate_permit;
         let mut upstream_stream = upstream.bytes_stream();
         let mut collector = OpenAiResponseCollector::new(
             capture,
@@ -556,23 +564,32 @@ fn apply_openai_client_policy(
         return Err(policy_error(ApiKeyPolicyError::StreamingDisabled));
     }
 
-    if let Some(Value::Array(tools)) = payload
-        .extra
-        .get("tools")
-        .filter(|value| value.as_array().is_some_and(|items| !items.is_empty()))
-    {
+    // Tool gating must cover both the modern `tools` array and the legacy
+    // OpenAI `functions` field: a key without tool (or web-search) permission
+    // must not slip capability declarations past the gate by switching wire
+    // syntax. Gating keys on *presence* of a non-empty declaration list (the
+    // historical `tools` semantic), while the web-search sub-check inspects
+    // callable names across both wire shapes.
+    let tool_fields = ["tools", "functions"];
+    let has_tool_declarations = tool_fields.into_iter().any(|field| {
+        payload
+            .extra
+            .get(field)
+            .and_then(Value::as_array)
+            .is_some_and(|items| !items.is_empty())
+    });
+    if has_tool_declarations {
         if !policy.permissions.tools {
             return Err(policy_error(ApiKeyPolicyError::ToolsDisabled));
         }
-        if !policy.permissions.web_search
-            && tools.iter().any(|tool| {
-                tool.get("function")
-                    .and_then(|function| function.get("name"))
-                    .or_else(|| tool.get("name"))
-                    .and_then(Value::as_str)
-                    .is_some_and(is_web_search_tool)
-            })
-        {
+        let web_search_requested = tool_fields
+            .into_iter()
+            .filter_map(|field| payload.extra.get(field))
+            .filter_map(Value::as_array)
+            .flatten()
+            .filter_map(openai_tool_name)
+            .any(is_web_search_tool);
+        if !policy.permissions.web_search && web_search_requested {
             return Err(policy_error(ApiKeyPolicyError::WebSearchDisabled));
         }
     }
@@ -582,16 +599,34 @@ fn apply_openai_client_policy(
     } else {
         "max_tokens"
     };
-    let requested_tokens = payload
-        .extra
-        .get(token_field)
-        .and_then(Value::as_u64)
-        .and_then(|value| u32::try_from(value).ok());
-    if requested_tokens.is_some() || policy.max_output_tokens.is_some() {
+    // Enforce the per-key output cap on *every* token-limit field the client
+    // actually sent: a body carrying both `max_tokens` and the newer
+    // `max_completion_tokens` must not slip the un-preferred sibling past the
+    // clamp. Absent fields stay absent, except that the preferred field is
+    // seeded below when the policy defines a cap and neither was requested.
+    let any_token_field_present = ["max_completion_tokens", "max_tokens"]
+        .into_iter()
+        .any(|field| payload.extra.contains_key(field));
+    for field in ["max_completion_tokens", "max_tokens"] {
+        let requested = payload
+            .extra
+            .get(field)
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok());
+        if requested.is_none()
+            && (!payload.extra.contains_key(field) || policy.max_output_tokens.is_none())
+        {
+            continue;
+        }
         if let Some(enforced) = policy
-            .enforce_output_tokens(requested_tokens)
+            .enforce_output_tokens(requested)
             .map_err(policy_error)?
         {
+            payload.extra.insert(field.to_string(), json!(enforced));
+        }
+    }
+    if !any_token_field_present && policy.max_output_tokens.is_some() {
+        if let Some(enforced) = policy.enforce_output_tokens(None).map_err(policy_error)? {
             payload
                 .extra
                 .insert(token_field.to_string(), json!(enforced));
@@ -667,6 +702,15 @@ fn apply_openai_client_policy(
 
 fn policy_error(error: ApiKeyPolicyError) -> BridgeError {
     BridgeError::Forbidden(error.to_string())
+}
+
+/// Extract the callable name from either wire shape: modern
+/// `{"type":"function","function":{"name":…}}` or legacy `{"name":…}`.
+fn openai_tool_name(tool: &Value) -> Option<&str> {
+    tool.get("function")
+        .and_then(|function| function.get("name"))
+        .or_else(|| tool.get("name"))
+        .and_then(Value::as_str)
 }
 
 fn normalize_openai_request_for_model(payload: &mut OpenAiInboundRequest) {
@@ -755,6 +799,12 @@ fn openai_bridge_error(error: BridgeError) -> Response {
             Some("rate_limit_exceeded"),
             message,
         ),
+        BridgeError::PaymentRequired(message) => openai_error_response(
+            StatusCode::PAYMENT_REQUIRED,
+            "billing_error",
+            Some("payment_required"),
+            message,
+        ),
         BridgeError::EgressUnavailable(message) => openai_error_response(
             StatusCode::BAD_REQUEST,
             "api_error",
@@ -771,9 +821,204 @@ fn openai_bridge_error(error: BridgeError) -> Response {
 }
 
 #[cfg(test)]
+mod rate_limit_tests {
+    use super::*;
+    use crate::config::{BridgeConfig, EgressConfig, EgressMode};
+    use crate::server::build_router;
+    use crate::state::AppState;
+    use axum::body::Body;
+    use axum::http::header;
+    use axum::routing::post;
+    use axum::Router;
+    use futures_util::StreamExt;
+    use std::time::Duration;
+    use tokio::net::TcpListener;
+    use tower::util::ServiceExt;
+
+    async fn sse_upstream() -> axum::response::Response {
+        axum::response::Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/event-stream")
+            .body(Body::from(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n",
+            ))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn rate_limit_permit_is_held_for_the_whole_response_body() {
+        let upstream = Router::new()
+            .route("/chat/completions", post(|| async { sse_upstream().await }))
+            .into_make_service();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+
+        let defaults = BridgeConfig::default();
+        let mut config = BridgeConfig {
+            model: Some("fixture-model".to_string()),
+            retry: crate::config::RetryConfig {
+                upstream_base_url: format!("http://{address}"),
+                max_network_attempts: 1,
+                base_backoff: Duration::ZERO,
+                ..defaults.retry
+            },
+            egress: EgressConfig {
+                mode: EgressMode::Direct,
+                ..defaults.egress
+            },
+            ..defaults
+        };
+        config.observability.max_concurrent_requests = Some(1);
+        config.management.config_path = std::env::temp_dir().join(format!(
+            "opencode2api-openai-ratelimit-{}-{}.toml",
+            std::process::id(),
+            crate::api_key::unix_timestamp(),
+        ));
+        let state = AppState::new(config);
+        let app = build_router(state.clone());
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "model": "fixture-model",
+                            "stream": true,
+                            "messages": [{"role": "user", "content": "hi"}]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // The response head has returned but the body is still unconsumed:
+        // the single global permit must remain held for the whole body.
+        let limiter = state.rate_limiter.as_ref().unwrap();
+        assert_eq!(
+            limiter.available_permits(),
+            0,
+            "permit must stay acquired while the streaming body is in flight"
+        );
+
+        let mut body = response.into_body().into_data_stream();
+        while let Some(chunk) = body.next().await {
+            chunk.unwrap();
+        }
+        assert_eq!(
+            limiter.available_permits(),
+            1,
+            "permit must be released once the body completes"
+        );
+    }
+
+    async fn json_upstream() -> axum::response::Response {
+        axum::response::Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "id": "chatcmpl-1",
+                    "model": "fixture-model",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "hi"},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {"prompt_tokens": 3, "completion_tokens": 1}
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn rate_limit_permit_is_held_for_the_whole_non_streaming_body() {
+        let upstream = Router::new()
+            .route(
+                "/chat/completions",
+                post(|| async { json_upstream().await }),
+            )
+            .into_make_service();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+
+        let defaults = BridgeConfig::default();
+        let mut config = BridgeConfig {
+            model: Some("fixture-model".to_string()),
+            retry: crate::config::RetryConfig {
+                upstream_base_url: format!("http://{address}"),
+                max_network_attempts: 1,
+                base_backoff: Duration::ZERO,
+                ..defaults.retry
+            },
+            egress: EgressConfig {
+                mode: EgressMode::Direct,
+                ..defaults.egress
+            },
+            ..defaults
+        };
+        config.observability.max_concurrent_requests = Some(1);
+        config.management.config_path = std::env::temp_dir().join(format!(
+            "opencode2api-openai-ratelimit-sync-{}-{}.toml",
+            std::process::id(),
+            crate::api_key::unix_timestamp(),
+        ));
+        let state = AppState::new(config);
+        let app = build_router(state.clone());
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "model": "fixture-model",
+                            "stream": false,
+                            "messages": [{"role": "user", "content": "hi"}]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Non-streaming responses relay through the same body stream: the
+        // single global permit must stay held until the client drains it.
+        let limiter = state.rate_limiter.as_ref().unwrap();
+        assert_eq!(
+            limiter.available_permits(),
+            0,
+            "permit must stay acquired while the sync response body is in flight"
+        );
+
+        let mut body = response.into_body().into_data_stream();
+        while let Some(chunk) = body.next().await {
+            chunk.unwrap();
+        }
+        assert_eq!(
+            limiter.available_permits(),
+            1,
+            "permit must be released once the sync body completes"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api_key::{ApiKeyPolicy, LimitAction, ReasoningMode};
+    use crate::api_key::{ApiKeyPermissions, ApiKeyPolicy, LimitAction, ReasoningMode};
 
     fn client(policy: ApiKeyPolicy) -> AuthenticatedClient {
         AuthenticatedClient {
@@ -849,5 +1094,239 @@ mod tests {
         assert_eq!(payload.extra["max_tokens"], 4096);
         assert_eq!(payload.extra["thinking"]["budget_tokens"], 2048);
         assert_eq!(payload.extra["reasoning_effort"], "max");
+    }
+
+    #[tokio::test]
+    async fn payment_required_maps_to_402_with_openai_envelope() {
+        let response = openai_bridge_error(BridgeError::PaymentRequired(
+            "Upstream API requires payment.".to_string(),
+        ));
+        assert_eq!(
+            response.status(),
+            StatusCode::PAYMENT_REQUIRED,
+            "a billing failure must not be masked as a transient 502"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["error"]["type"], "billing_error");
+        assert_eq!(value["error"]["code"], "payment_required");
+    }
+
+    #[test]
+    fn legacy_functions_field_is_subject_to_tool_policy() {
+        let mut payload = OpenAiInboundRequest {
+            model: "fixture-model".to_string(),
+            messages: vec![json!({"role":"user","content":"hi"})],
+            stream: false,
+            extra: std::collections::BTreeMap::from([(
+                "functions".to_string(),
+                json!([{"name": "run_code", "parameters": {}}]),
+            )]),
+        };
+        let policy = ApiKeyPolicy {
+            permissions: ApiKeyPermissions {
+                tools: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(
+            matches!(
+                apply_openai_client_policy(&client(policy), &mut payload),
+                Err(BridgeError::Forbidden(_))
+            ),
+            "legacy `functions` must not bypass the tools permission gate"
+        );
+    }
+
+    #[test]
+    fn legacy_functions_web_search_is_gated_by_web_search_permission() {
+        let mut payload = OpenAiInboundRequest {
+            model: "fixture-model".to_string(),
+            messages: vec![json!({"role":"user","content":"hi"})],
+            stream: false,
+            extra: std::collections::BTreeMap::from([(
+                "functions".to_string(),
+                json!([{"name": "web_search", "parameters": {}}]),
+            )]),
+        };
+        let policy = ApiKeyPolicy {
+            permissions: ApiKeyPermissions {
+                web_search: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(
+            matches!(
+                apply_openai_client_policy(&client(policy), &mut payload),
+                Err(BridgeError::Forbidden(_))
+            ),
+            "legacy `functions` must not bypass the web-search permission gate"
+        );
+    }
+
+    #[test]
+    fn requests_without_tool_fields_stay_admissible_under_disabled_tools() {
+        let mut payload = OpenAiInboundRequest {
+            model: "fixture-model".to_string(),
+            messages: vec![json!({"role":"user","content":"hi"})],
+            stream: false,
+            extra: std::collections::BTreeMap::new(),
+        };
+        let policy = ApiKeyPolicy {
+            permissions: ApiKeyPermissions {
+                tools: false,
+                web_search: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        apply_openai_client_policy(&client(policy), &mut payload)
+            .expect("tool gating must stay keyed on tool fields being present");
+    }
+
+    #[test]
+    fn unnamed_tool_declarations_stay_gated_by_tools_permission() {
+        // Historical behavior: any non-empty `tools` array is gated even when
+        // no entry carries an extractable name.
+        let mut payload = OpenAiInboundRequest {
+            model: "fixture-model".to_string(),
+            messages: vec![json!({"role":"user","content":"hi"})],
+            stream: false,
+            extra: std::collections::BTreeMap::from([(
+                "tools".to_string(),
+                json!([{"type": "function"}]),
+            )]),
+        };
+        let policy = ApiKeyPolicy {
+            permissions: ApiKeyPermissions {
+                tools: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(matches!(
+            apply_openai_client_policy(&client(policy), &mut payload),
+            Err(BridgeError::Forbidden(_))
+        ));
+    }
+
+    #[test]
+    fn both_token_limit_fields_are_clamped() {
+        let mut payload = OpenAiInboundRequest {
+            model: "fixture-model".to_string(),
+            messages: vec![json!({"role":"user","content":"hi"})],
+            stream: false,
+            extra: std::collections::BTreeMap::from([
+                ("max_completion_tokens".to_string(), json!(10)),
+                ("max_tokens".to_string(), json!(99_000)),
+            ]),
+        };
+        let policy = ApiKeyPolicy {
+            max_output_tokens: Some(1024),
+            limit_action: LimitAction::Clamp,
+            ..Default::default()
+        };
+        apply_openai_client_policy(&client(policy), &mut payload).unwrap();
+        assert_eq!(payload.extra["max_completion_tokens"], 10);
+        assert_eq!(
+            payload.extra["max_tokens"], 1024,
+            "the sibling token field must not slip past the output cap"
+        );
+    }
+
+    // --- Allowlist namespace parity (end-to-end for this entry) ------------
+
+    async fn allowlist_echo_upstream(Json(payload): Json<Value>) -> Response {
+        let model = payload["model"].as_str().unwrap_or_default().to_string();
+        (
+            StatusCode::OK,
+            Json(json!({
+                "id": "chatcmpl-echo",
+                "model": model,
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": model},
+                    "finish_reason": "stop",
+                }],
+            })),
+        )
+            .into_response()
+    }
+
+    #[tokio::test]
+    async fn resolved_namespace_allowlist_admits_wire_name_and_forwards_mapped_model() {
+        use crate::config::{BridgeConfig, EgressConfig, EgressMode};
+        use axum::routing::post;
+        use axum::Router;
+        use std::time::Duration;
+        use tokio::net::TcpListener;
+
+        // Stub upstream echoes back the model id it actually received.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let upstream = Router::new()
+                .route("/chat/completions", post(allowlist_echo_upstream))
+                .into_make_service();
+            axum::serve(listener, upstream).await.unwrap();
+        });
+
+        let defaults = BridgeConfig::default();
+        let mut config = BridgeConfig {
+            model: None,
+            retry: crate::config::RetryConfig {
+                upstream_base_url: format!("http://{address}"),
+                max_network_attempts: 1,
+                base_backoff: Duration::ZERO,
+                ..defaults.retry
+            },
+            egress: EgressConfig {
+                mode: EgressMode::Direct,
+                ..defaults.egress
+            },
+            ..defaults
+        };
+        config.management.config_path = std::env::temp_dir().join(format!(
+            "opencode2api-openai-allowlist-{}-{}.toml",
+            std::process::id(),
+            crate::api_key::unix_timestamp(),
+        ));
+        let state = AppState::new(config);
+
+        // The key allows the RESOLVED id only; the client sends the WIRE name.
+        let mut policy = ApiKeyPolicy {
+            allowed_models: vec!["deepseek-v4-flash-free".to_string()],
+            ..Default::default()
+        };
+        policy.normalize();
+
+        let response = handle_chat_completions_inner(
+            state,
+            Some(client(policy)),
+            None,
+            HeaderMap::new(),
+            Ok(Json(OpenAiInboundRequest {
+                model: "deepseek-v4-flash".to_string(),
+                messages: vec![json!({"role": "user", "content": "hi"})],
+                stream: false,
+                extra: BTreeMap::new(),
+            })),
+        )
+        .await
+        .expect("a wire-name request resolving onto the allowlisted id must pass policy");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body["choices"][0]["message"]["content"], "deepseek-v4-flash-free",
+            "the forwarder must still receive the mapped/resolved id"
+        );
     }
 }

@@ -1,13 +1,13 @@
 //! Upstream request execution with model fallback and egress-aware retries.
 
 use super::policy::{
-    bounded_backoff, build_model_retry_list, classify_reqwest_error, classify_status,
-    client_retry_after, is_rate_limit_body, is_reasoning_heavy_model, parse_retry_after,
-    FailureClass,
+    bounded_backoff, build_model_retry_list, clamp_provider_retry_after, classify_reqwest_error,
+    classify_status, client_retry_after, is_rate_limit_body, is_reasoning_heavy_model,
+    parse_retry_after, FailureClass,
 };
 use super::response::LeasedResponse;
 use crate::error::BridgeError;
-use crate::observability::RetryMetricClass;
+use crate::observability::{EgressRouteMetricClass, RetryMetricClass};
 use crate::opencode::types::{OpenAiInboundRequest, OpenAiRequest};
 use crate::proxy_pool::{EgressLease, EgressRole, RouteKind, RouteMetadata};
 use crate::state::AppState;
@@ -255,7 +255,11 @@ async fn execute_retryable_request<T: RetryableOpenAiRequest>(
                             .and_then(|value| value.to_str().ok())
                             .and_then(|value| {
                                 parse_retry_after(value, std::time::SystemTime::now())
-                            });
+                            })
+                            // Clamp before any pool bookkeeping: the raw
+                            // provider value feeds `Instant + duration`
+                            // downstream, which panics on overflow.
+                            .map(clamp_provider_retry_after);
                         apply_rate_limit_penalty(state, &route, retry_count, retry_after).await;
                         last_failed_proxy = None;
                         if let Some(delay) = retry_after {
@@ -452,12 +456,28 @@ async fn execute_retryable_request<T: RetryableOpenAiRequest>(
                     continue;
                 }
 
-                return Err(BridgeError::UpstreamError(format!(
-                    "Network error after {retry_count} retries: {error}"
+                return Err(BridgeError::UpstreamError(client_network_error_message(
+                    retry_count,
+                    error,
                 )));
             }
         }
     }
+}
+
+/// Client-facing summary for a terminal network error. The raw reqwest error
+/// embeds the configured upstream URL in its Display output; full detail is
+/// already in the logs above, while clients get a location-free message that
+/// mirrors the streaming path's no-upstream-body-leak rule.
+fn client_network_error_message(retry_count: u32, error: reqwest::Error) -> String {
+    let detail = if error.is_timeout() {
+        "upstream timed out"
+    } else if error.is_connect() {
+        "upstream connection failed"
+    } else {
+        "upstream request failed"
+    };
+    format!("Network error after {retry_count} retries: {detail}")
 }
 
 fn is_reasoning_content_compatibility_error(body: &str) -> bool {
@@ -505,17 +525,30 @@ async fn select_route_for_attempt(
     select_route(state, routing_key, excluded_proxy).await
 }
 
+/// Commits one egress route for an upstream attempt (spec §12).
+///
+/// Each successful return is a fresh route decision and records exactly one
+/// `record_egress_route` event. Retained rate-limit routes bypass this
+/// function entirely (`select_route_for_attempt`), so in-flight retries never
+/// double-count; only transport/model fallbacks that re-select a route count
+/// as additional decisions.
 async fn select_route(
     state: &AppState,
     routing_key: &str,
     excluded_proxy: Option<usize>,
 ) -> Result<SelectedRoute, BridgeError> {
     if state.config.egress.mode == crate::config::EgressMode::Direct {
+        state
+            .metrics
+            .record_egress_route(EgressRouteMetricClass::Direct);
         return Ok(direct_route(state, RouteKind::Direct));
     }
 
     if state.config.egress.mode == crate::config::EgressMode::Hybrid {
         if !state.proxy_subsystem.read().await.is_ready() {
+            state
+                .metrics
+                .record_egress_route(EgressRouteMetricClass::DirectHybridFallback);
             return Ok(direct_route(state, RouteKind::DirectHybridFallback));
         }
 
@@ -544,6 +577,9 @@ async fn select_route(
 
         if let Some((client, proxy_url, proxy_index, lease, upstream_real_ip, metadata)) = selection
         {
+            state
+                .metrics
+                .record_egress_route(EgressRouteMetricClass::Proxy);
             return Ok(SelectedRoute {
                 client,
                 proxy_url: Some(proxy_url),
@@ -554,6 +590,9 @@ async fn select_route(
             });
         }
 
+        state
+            .metrics
+            .record_egress_route(EgressRouteMetricClass::DirectHybridFallback);
         return Ok(direct_route(state, RouteKind::DirectHybridFallback));
     }
 
@@ -599,6 +638,9 @@ async fn select_route(
 
         if let Some((client, proxy_url, proxy_index, lease, upstream_real_ip, metadata)) = selection
         {
+            state
+                .metrics
+                .record_egress_route(EgressRouteMetricClass::Proxy);
             return Ok(SelectedRoute {
                 client,
                 proxy_url: Some(proxy_url),
@@ -691,8 +733,10 @@ async fn clear_rate_limit_penalty_after_success(state: &AppState, route: &Select
         return;
     };
     let mut pool = state.proxy_pool.write().await;
-    pool.mark_healthy(index);
-    pool.restart_queue.retain(|queued| *queued != index);
+    // A provider-quota success proves only that this same egress may serve the
+    // provider again. It does not prove transport recovery: keep any open
+    // circuit/cooldown/restart queue created by independent network failures.
+    pool.clear_rate_limit_recovery(index);
     info!(
         proxy_index = index,
         "same-egress retry succeeded; cleared rate-limit quarantine without switching exits"
@@ -1069,6 +1113,79 @@ mod tests {
         assert_eq!(route.proxy_index, Some(1));
     }
 
+    /// A same-egress retry success proves the provider quota window reopened;
+    /// it says nothing about transport health. The success path must clear
+    /// ONLY the rate-limit quarantine and leave open circuits, cooldown
+    /// deadlines, and queued container restarts to recover through their own
+    /// bounded half-open / RECOVERY_SUCCESS_COUNT flow.
+    #[tokio::test]
+    async fn same_egress_rate_limit_success_preserves_transport_recovery_state() {
+        let state = hybrid_test_state().await;
+        {
+            let mut pool = state.proxy_pool.write().await;
+            // Genuine transport failures trip the circuit and queue a restart.
+            pool.record_failure(0);
+            pool.record_failure(0);
+            assert!(matches!(pool.proxies[0].circuit, CircuitState::Open { .. }));
+            assert!(pool.restart_queue.contains(&0));
+
+            // An interleaved provider rate limit quarantines the same exit...
+            pool.proxies[0].exit_identity = Some(ExitIdentity {
+                public_ip: "203.0.113.7".to_string(),
+                provider: Some("test".to_string()),
+                colo: Some("TST".to_string()),
+                verified_at_unix_secs: 0,
+            });
+            pool.mark_rate_limited(0, Duration::from_secs(300));
+            assert!(pool.proxies[0].rate_limit_until.is_some());
+
+            // ...and later transport failures re-open recovery while the
+            // quota quarantine is still active (record_failure must not wipe
+            // rate-limit fields when recovery_cause is RateLimit).
+            pool.record_failure(0);
+            pool.record_failure(0);
+            assert!(matches!(pool.proxies[0].circuit, CircuitState::Open { .. }));
+            assert!(pool.restart_queue.contains(&0));
+            assert!(pool.proxies[0].rate_limit_until.is_some());
+        }
+
+        let route = SelectedRoute {
+            client: Client::new(),
+            proxy_url: Some("socks5://127.0.0.1:40001".to_string()),
+            proxy_index: Some(0),
+            lease: None,
+            upstream_real_ip: None,
+            metadata: RouteMetadata {
+                kind: RouteKind::Proxy,
+                proxy_node: Some("opencode-warp-1".to_string()),
+            },
+        };
+        clear_rate_limit_penalty_after_success(&state, &route).await;
+
+        let pool = state.proxy_pool.read().await;
+        // Rate-limit quarantine IS cleared by the success.
+        assert!(pool.proxies[0].rate_limit_until.is_none());
+        assert!(pool.proxies[0].quarantined_exit_ip.is_none());
+        assert_ne!(
+            pool.proxies[0].recovery_cause,
+            Some(crate::proxy_pool::RecoveryCause::RateLimit)
+        );
+        // Transport recovery state must survive a single success.
+        assert!(
+            matches!(pool.proxies[0].circuit, CircuitState::Open { .. }),
+            "one same-egress success must not close a transport-open circuit"
+        );
+        assert!(
+            matches!(pool.proxies[0].health, HealthState::Unhealthy),
+            "one same-egress success must not mark a failed node healthy"
+        );
+        assert!(pool.proxies[0].cooldown_until.is_some());
+        assert!(
+            pool.restart_queue.contains(&0),
+            "queued container restarts must proceed for genuine transport failures"
+        );
+    }
+
     #[test]
     fn hybrid_may_change_egress_only_after_transport_failures() {
         assert!(may_change_egress_after_failure(FailureClass::Transport));
@@ -1171,6 +1288,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hybrid_fallback_metrics_increment_once_per_fresh_selection() {
+        let state = hybrid_test_state().await;
+        state
+            .proxy_subsystem
+            .write()
+            .await
+            .transition(ProxySubsystemPhase::Starting, None);
+
+        let first = select_route(&state, "hybrid-metrics-1", None)
+            .await
+            .expect("first direct fallback");
+        assert_eq!(first.metadata.kind, RouteKind::DirectHybridFallback);
+        let second = select_route(&state, "hybrid-metrics-2", None)
+            .await
+            .expect("second direct fallback");
+        assert_eq!(second.metadata.kind, RouteKind::DirectHybridFallback);
+
+        // Counters accumulate across sequential requests on shared state.
+        let snapshot = state.metrics.snapshot();
+        assert_eq!(snapshot.egress_hybrid_fallbacks, 2);
+        assert_eq!(snapshot.egress_direct_requests, 2);
+        assert_eq!(snapshot.egress_proxy_requests, 0);
+
+        // A retained rate-limit route reuses an already-counted decision and
+        // must not increment again.
+        select_route_for_attempt(&state, "same-request", None, Some(second))
+            .await
+            .expect("retained route");
+        let snapshot = state.metrics.snapshot();
+        assert_eq!(snapshot.egress_hybrid_fallbacks, 2);
+        assert_eq!(snapshot.egress_direct_requests, 2);
+    }
+
+    #[tokio::test]
+    async fn hybrid_ready_proxy_selection_counts_proxy_not_fallback() {
+        let state = hybrid_test_state().await;
+        {
+            let mut pool = state.proxy_pool.write().await;
+            pool.proxies[0].health = HealthState::Healthy;
+            pool.proxies[0].circuit = CircuitState::Closed;
+        }
+        state.proxy_subsystem.write().await.mark_ready();
+
+        let route = select_route(&state, "hybrid-proxy-metrics", None)
+            .await
+            .expect("hybrid proxy route");
+        assert_eq!(route.metadata.kind, RouteKind::Proxy);
+
+        let snapshot = state.metrics.snapshot();
+        assert_eq!(snapshot.egress_proxy_requests, 1);
+        assert_eq!(snapshot.egress_hybrid_fallbacks, 0);
+        assert_eq!(snapshot.egress_direct_requests, 0);
+    }
+
+    #[tokio::test]
+    async fn direct_mode_never_records_hybrid_fallbacks() {
+        let mut config = BridgeConfig::default();
+        config.egress.mode = crate::config::EgressMode::Direct;
+        let state = AppState::new(config);
+
+        select_route(&state, "direct-metrics", None)
+            .await
+            .expect("pure direct route");
+
+        let snapshot = state.metrics.snapshot();
+        assert_eq!(snapshot.egress_direct_requests, 1);
+        assert_eq!(snapshot.egress_hybrid_fallbacks, 0);
+        assert_eq!(snapshot.egress_proxy_requests, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn strict_proxy_fail_closed_records_no_served_egress_request() {
+        let mut config = BridgeConfig {
+            primary_proxies: Some(vec!["socks5://127.0.0.1:40001".to_string()]),
+            ..BridgeConfig::default()
+        };
+        config.egress.mode = crate::config::EgressMode::Proxy;
+        let state = AppState::new_with_container_runtime(config, Arc::new(NoopContainerRuntime));
+        state.workers.cancel();
+        tokio::task::yield_now().await;
+        {
+            let mut pool = state.proxy_pool.write().await;
+            pool.proxies[0].health = HealthState::Unhealthy;
+            pool.proxies[0].circuit = CircuitState::Open {
+                until: std::time::Instant::now() + Duration::from_secs(60),
+            };
+        }
+
+        assert!(select_route(&state, "fail-closed-metrics", None)
+            .await
+            .is_err());
+
+        let snapshot = state.metrics.snapshot();
+        assert_eq!(snapshot.egress_direct_requests, 0);
+        assert_eq!(snapshot.egress_proxy_requests, 0);
+        assert_eq!(snapshot.egress_hybrid_fallbacks, 0);
+    }
+
+    #[tokio::test]
     async fn direct_rate_limit_never_reconnects_host_warp() {
         let mut config = BridgeConfig::default();
         config.egress.mode = crate::config::EgressMode::Direct;
@@ -1205,7 +1421,9 @@ mod tests {
         };
         config.egress.mode = crate::config::EgressMode::Proxy;
         config.egress.require_verified_exit_ip = false;
-        let state = AppState::new(config);
+        let state = AppState::new_with_container_runtime(config, Arc::new(NoopContainerRuntime));
+        state.workers.cancel();
+        tokio::task::yield_now().await;
         {
             let mut pool = state.proxy_pool.write().await;
             pool.proxies[0].health = HealthState::Healthy;
@@ -1281,7 +1499,9 @@ mod tests {
         };
         config.egress.mode = crate::config::EgressMode::Proxy;
         config.egress.require_verified_exit_ip = false;
-        let state = AppState::new(config);
+        let state = AppState::new_with_container_runtime(config, Arc::new(NoopContainerRuntime));
+        state.workers.cancel();
+        tokio::task::yield_now().await;
         {
             let mut pool = state.proxy_pool.write().await;
             pool.mark_rate_limited(0, Duration::from_secs(47_897));
@@ -1326,7 +1546,13 @@ mod tests {
         };
         config.egress.mode = crate::config::EgressMode::Proxy;
         config.egress.require_verified_exit_ip = false;
-        let state = AppState::new(config);
+        // All three configured primaries belong to the serving set; otherwise
+        // proxies[1..] are permanent spares and the scenario below has no
+        // healthy routed exit to fail over to.
+        config.egress.active_proxy_count = 3;
+        let state = AppState::new_with_container_runtime(config, Arc::new(NoopContainerRuntime));
+        state.workers.cancel();
+        tokio::task::yield_now().await;
         {
             let mut pool = state.proxy_pool.write().await;
             for node in &mut pool.proxies {
@@ -1356,7 +1582,12 @@ mod tests {
         };
         config.egress.mode = crate::config::EgressMode::Proxy;
         config.egress.require_verified_exit_ip = false;
-        let state = AppState::new(config);
+        // Both primaries must be in the serving set so the fresh request has a
+        // healthy routed exit distinct from the cooling-down original route.
+        config.egress.active_proxy_count = 2;
+        let state = AppState::new_with_container_runtime(config, Arc::new(NoopContainerRuntime));
+        state.workers.cancel();
+        tokio::task::yield_now().await;
 
         let retained = {
             let mut pool = state.proxy_pool.write().await;
@@ -1399,7 +1630,9 @@ mod tests {
             ..BridgeConfig::default()
         };
         config.egress.mode = crate::config::EgressMode::Proxy;
-        let state = AppState::new(config);
+        let state = AppState::new_with_container_runtime(config, Arc::new(NoopContainerRuntime));
+        state.workers.cancel();
+        tokio::task::yield_now().await;
         {
             let mut pool = state.proxy_pool.write().await;
             pool.proxies[0].health = HealthState::Unhealthy;
@@ -1415,5 +1648,117 @@ mod tests {
         assert!(error
             .to_string()
             .contains("no eligible egress route is available"));
+    }
+
+    /// One-shot HTTP server that answers a single request with a 429 carrying
+    /// the given Retry-After header value.
+    async fn spawn_429_once_server(retry_after: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("address");
+        let head = format!(
+            "HTTP/1.1 429 Too Many Requests\r\nRetry-After: {retry_after}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+        );
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut request = [0_u8; 2048];
+                let _ = socket.read(&mut request).await;
+                let _ = socket.write_all(head.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        format!("http://{address}")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn overflowing_provider_retry_after_cannot_panic_instant_arithmetic() {
+        let mock = spawn_429_once_server("18446744073709551615").await;
+        let mut config = BridgeConfig {
+            primary_proxies: Some(vec!["socks5://127.0.0.1:40001".to_string()]),
+            ..BridgeConfig::default()
+        };
+        config.egress.mode = crate::config::EgressMode::Proxy;
+        config.egress.require_verified_exit_ip = false;
+        config.retry.upstream_base_url = mock.clone();
+        let state = AppState::new_with_container_runtime(config, Arc::new(NoopContainerRuntime));
+        state.workers.cancel();
+        tokio::task::yield_now().await;
+        {
+            let mut pool = state.proxy_pool.write().await;
+            pool.proxies[0].health = HealthState::Healthy;
+            pool.proxies[0].circuit = CircuitState::Closed;
+            // Route the "proxy" client straight at the local mock so the 429
+            // response itself (not a SOCKS handshake) drives classification.
+            pool.proxies[0].client = reqwest::Client::new();
+        }
+
+        let request = OpenAiRequest {
+            model: "plain-model".to_string(),
+            stream: false,
+            ..OpenAiRequest::default()
+        };
+        let error = execute_with_warp_retry(&state, "retry-after-overflow", &request)
+            .await
+            .expect_err("huge provider Retry-After must fail the request");
+
+        assert!(
+            matches!(error, BridgeError::EgressUnavailable(_)),
+            "{error}"
+        );
+        assert!(error.to_string().contains("retry after 30"), "{error}");
+
+        let quarantine = state.proxy_pool.read().await.proxies[0]
+            .rate_limit_until
+            .and_then(|until| until.checked_duration_since(std::time::Instant::now()));
+        assert!(
+            quarantine.is_some_and(
+                |remaining| remaining <= super::super::policy::MAX_RESPECTED_RETRY_AFTER
+            ),
+            "stored quarantine must stay within the clamp: {quarantine:?}"
+        );
+        // The mock URL must not leak into the client-visible message.
+        assert!(!error.to_string().contains("http://"), "{error}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn terminal_network_error_message_hides_upstream_url() {
+        use tokio::net::TcpListener;
+
+        // Accept then immediately close: guarantees a reqwest send error whose
+        // Display would otherwise embed the upstream URL.
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("address");
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                drop(socket);
+            }
+        });
+
+        let mut config = BridgeConfig::default();
+        config.egress.mode = crate::config::EgressMode::Direct;
+        config.retry.upstream_base_url = format!("http://{address}");
+        config.retry.max_network_attempts = 1;
+        let state = AppState::new_with_container_runtime(config, Arc::new(NoopContainerRuntime));
+        state.workers.cancel();
+        tokio::task::yield_now().await;
+
+        let request = OpenAiRequest {
+            model: "plain-model".to_string(),
+            stream: false,
+            ..OpenAiRequest::default()
+        };
+        let error = execute_with_warp_retry(&state, "url-leak", &request)
+            .await
+            .expect_err("connection-reset upstream must fail");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("Network error after 1 retries"),
+            "{message}"
+        );
+        assert!(!message.contains("http://"), "{message}");
+        assert!(!message.contains(&address.to_string()), "{message}");
     }
 }

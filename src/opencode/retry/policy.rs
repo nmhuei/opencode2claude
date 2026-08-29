@@ -114,15 +114,29 @@ pub(super) fn client_retry_after(remaining: Duration) -> Duration {
         .min(Duration::from_secs(30))
 }
 
+/// Longest provider `Retry-After` value honored for internal quarantine
+/// bookkeeping. Real quota windows are hours at most; the clamp exists because
+/// the raw value feeds `Instant + duration`, which panics on overflow (an
+/// arbitrary upstream header must never be able to panic the bridge). The cap
+/// stays far above any legitimate window and above the client-visible 30s
+/// recovery cadence.
+pub(super) const MAX_RESPECTED_RETRY_AFTER: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+pub(super) fn clamp_provider_retry_after(delay: Duration) -> Duration {
+    delay.min(MAX_RESPECTED_RETRY_AFTER)
+}
+
 pub(super) fn bounded_backoff(retry: &RetryConfig, attempt: u32, jitter_seed: u64) -> Duration {
     let factor = 1_u32.checked_shl(attempt.min(16)).unwrap_or(u32::MAX);
     let base_ms = retry
         .base_backoff
         .as_millis()
         .saturating_mul(u128::from(factor));
-    let capped_ms = base_ms.min(retry.max_backoff.as_millis());
-    // Deterministic 75%-125% jitter keeps tests reproducible and avoids synchronized retries.
+    // Deterministic 75%-125% jitter keeps tests reproducible and avoids
+    // synchronized retries. Jitter is applied before the cap so
+    // `max_backoff` is enforced exactly instead of up to +25%.
     let jitter_percent = 75_u128 + u128::from(jitter_seed % 51);
-    let jittered_ms = capped_ms.saturating_mul(jitter_percent) / 100;
-    Duration::from_millis(jittered_ms.min(u128::from(u64::MAX)) as u64)
+    let jittered_ms = base_ms.saturating_mul(jitter_percent) / 100;
+    let capped_ms = jittered_ms.min(retry.max_backoff.as_millis());
+    Duration::from_millis(capped_ms.min(u128::from(u64::MAX)) as u64)
 }

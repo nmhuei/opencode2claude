@@ -142,4 +142,23 @@ mod tests {
         )
         .is_empty());
     }
+
+    #[test]
+    fn hostile_html_never_panics_or_loops() {
+        let policy = SearchPolicy::default();
+        let padded_multibyte = format!("ệ{}ệ", "data-matarget=\"algo\"".repeat(50));
+        let hostile = [
+            "data-matarget=\"algo\"",
+            "<a data-matarget=\"algo\"",  // no tag close
+            "<a data-matarget=\"algo\" ", // href missing
+            "<a data-matarget=\"algo\" href=\"x\">no close",
+            "<a data-matarget=\"algo\" href=\"/RU=/RK=y\">h3</a>",
+            "<li><a data-matarget=\"algo\" href=\"z\">tiếng Việt</a>",
+            padded_multibyte.as_str(),
+        ];
+        for input in hostile {
+            let results = parse_html(input, &policy);
+            assert!(results.len() <= policy.max_results);
+        }
+    }
 }

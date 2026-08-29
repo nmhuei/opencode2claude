@@ -156,11 +156,13 @@ Hidden compatibility aliases remain for `serve`, `start`, `status`, `stop`, `res
 
 | Code | Meaning |
 |---:|---|
-| `0` | Command completed successfully. |
-| `1` | Operational, validation, dependency, lifecycle, or diagnostic failure. |
+| `0` | Command completed successfully; managed `server status` reports a running tracked instance. |
+| `1` | Operational/validation failure, a negative diagnostic result, or `server status` reports stopped. |
 | `2` | Invalid CLI syntax or missing required argument as reported by Clap. |
+| `3` | `server status` found a responding but unmanaged listener. |
+| `4` | A lifecycle mutation was refused because the listener is unmanaged and was not explicitly adopted. |
 
-`doctor` returns nonzero when its report contains failures. Machine-readable output does not change exit-code semantics.
+`doctor` returns nonzero when its report contains failures. `server stop` remains idempotent and returns `0` when nothing is running. Machine-readable output does not change exit-code semantics.
 
 ## Automation examples
 

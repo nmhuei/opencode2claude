@@ -66,6 +66,26 @@ assert_json() {
   fi
 }
 
+assert_json_exit() {
+  local name="$1" expected_code="$2" expression="$3"; shift 3
+  capture "$@"
+  if [[ $CAPTURE_CODE -eq $expected_code ]] && printf '%s' "$CAPTURE_OUTPUT" | python3 -c "import json,sys; d=json.load(sys.stdin); assert ($expression)" 2>/dev/null; then
+    pass "$name"
+  else
+    fail "$name" "exit=$CAPTURE_CODE expected=$expected_code invalid/unexpected JSON: $CAPTURE_OUTPUT"
+  fi
+}
+
+assert_contains_exit() {
+  local name="$1" expected_code="$2" needle="$3"; shift 3
+  capture "$@"
+  if [[ $CAPTURE_CODE -eq $expected_code && "$CAPTURE_OUTPUT" == *"$needle"* ]]; then
+    pass "$name"
+  else
+    fail "$name" "exit=$CAPTURE_CODE expected=$expected_code missing='$needle' output=$CAPTURE_OUTPUT"
+  fi
+}
+
 wait_http() {
   local path="$1" expected="$2"
   for _ in $(seq 1 100); do
@@ -140,18 +160,32 @@ assert_contains "server help exposes lifecycle" "restart" "$BIN" server --help
 assert_contains "proxy help exposes dry-run" "--dry-run" "$BIN" proxy restart --help
 assert_failure "invalid subcommand exits non-zero" "$BIN" server nonexistent
 assert_failure "invalid shell policy exits non-zero" "$BIN" server start --shell-policy invalid
-assert_json "stopped status JSON" "d.get('status') == 'stopped' or d.get('state') == 'stopped'" "$BIN" --json server status --port "$TEST_PORT"
+assert_json_exit "stopped status JSON" 1 "d.get('status') == 'stopped' or d.get('state') == 'stopped'" "$BIN" --json server status --port "$TEST_PORT"
 assert_json "safe config JSON" "d['bridge_port'] == $TEST_PORT and d['auth_enabled'] is False" "$BIN" --json server config
 assert_json "environment JSON" "isinstance(d, dict)" "$BIN" --json env
 assert_json "doctor JSON" "isinstance(d, dict)" "$BIN" --json doctor
 assert_contains "bash completion generated" "opencode2api" "$BIN" completion bash
 assert_contains "zsh completion generated" "opencode2api" "$BIN" completion zsh
 
+section "Utility and credential workflows"
+assert_json_exit "set env explains required parent-shell hook" 1 "d.get('status') == 'shell-hook-required' and d.get('install') == 'opencode2api shell install'" "$BIN" --json set env
+assert_contains "shell hook renders managed marker" "opencode2api shell integration" "$BIN" shell hook --shell bash
+SHELL_RC="$TEST_ROOT/test.bashrc"
+: > "$SHELL_RC"
+assert_json "shell install writes only isolated rc" "d.get('status') == 'ok' and d.get('action') == 'installed' and d.get('changed') is True" "$BIN" --json shell install --shell bash --rc "$SHELL_RC"
+if grep -q 'opencode2api shell integration' "$SHELL_RC"; then pass "isolated shell rc contains managed hook"; else fail "isolated shell rc contains managed hook" "managed block missing"; fi
+assert_json "shell install is idempotent" "d.get('status') == 'ok' and d.get('action') == 'installed' and d.get('changed') is False" "$BIN" --json shell install --shell bash --rc "$SHELL_RC"
+assert_json "shell uninstall removes isolated hook" "d.get('status') == 'ok' and d.get('action') == 'uninstalled' and d.get('changed') is True" "$BIN" --json shell uninstall --shell bash --rc "$SHELL_RC"
+if ! grep -q 'opencode2api shell integration' "$SHELL_RC"; then pass "isolated shell rc no longer contains managed hook"; else fail "isolated shell rc no longer contains managed hook" "managed block remained"; fi
+assert_json "api-key generate is non-persistent by default" "len(d.get('keys', [])) == 2 and d.get('saved') is False and d.get('config_path') is None and all(k.startswith('test-') for k in d['keys'])" "$BIN" --json api-key generate --count 2 --bytes 16 --prefix test-
+assert_failure "api-key rejects undersized entropy" "$BIN" api-key generate --bytes 8
+assert_json "dashboard stopped status is machine-readable" "d.get('running') is False and isinstance(d.get('url'), str)" "$BIN" --json dashboard status
+
 section "Non-destructive proxy commands"
 assert_json "proxy list returns JSON array" "isinstance(d, list)" "$BIN" --json proxy ps
-assert_json "proxy logs returns JSON array" "isinstance(d, list)" "$BIN" --json proxy logs
-assert_json "proxy restart dry-run plans three actions" "len(d) == 3 and all(x['dry_run'] for x in d)" "$BIN" --json proxy restart --dry-run
-assert_json "proxy purge dry-run plans six actions" "len(d) == 6 and all(x['dry_run'] for x in d)" "$BIN" --json proxy purge --yes --dry-run
+assert_json "proxy logs returns typed JSON envelope" "isinstance(d, dict) and isinstance(d.get('logs'), list) and isinstance(d.get('errors'), list)" "$BIN" --json proxy logs
+assert_json "proxy restart dry-run reflects isolated empty pool" "d.get('dry_run') is True and d.get('action') == 'restart' and d.get('ports') == []" "$BIN" --json proxy restart --dry-run
+assert_json "proxy purge dry-run reflects isolated empty pool" "d.get('dry_run') is True and d.get('action') == 'purge and recreate' and d.get('ports') == []" "$BIN" --json proxy purge --yes --dry-run
 
 section "Config initialization and migration surface"
 assert_success "init creates config" "$BIN" init --output "$INIT_FILE"
@@ -212,7 +246,7 @@ else
 fi
 FG_PID=""
 if ! curl -fsS "http://127.0.0.1:${TEST_PORT}/health/live" >/dev/null 2>&1; then pass "foreground SIGTERM is graceful"; else fail "foreground SIGTERM is graceful" "server still responding"; fi
-assert_contains "legacy status alias remains compatible" "deprecated" "$BIN" status --port "$TEST_PORT"
+assert_contains_exit "legacy status alias remains compatible" 1 "deprecated" "$BIN" status --port "$TEST_PORT"
 assert_contains "legacy stop alias remains compatible" "deprecated" "$BIN" stop --port "$TEST_PORT"
 
 section "Summary"

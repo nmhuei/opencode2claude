@@ -101,29 +101,89 @@ pub async fn fetch_latest_release(client: &reqwest::Client) -> Result<ReleaseInf
     })
 }
 
-/// Compare two semantic version strings.
-///
-/// Supports strict semver (e.g. `0.4.0`). Returns:
-/// - `Ordering::Greater` if `a > b`
-/// - `Ordering::Less` if `a < b`
-/// - `Ordering::Equal` if equal
-fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
-    let a_parts: Vec<u32> = a.split('.').filter_map(|p| p.parse::<u32>().ok()).collect();
-    let b_parts: Vec<u32> = b.split('.').filter_map(|p| p.parse::<u32>().ok()).collect();
-
-    for i in 0..a_parts.len().max(b_parts.len()) {
-        let av = a_parts.get(i).copied().unwrap_or(0);
-        let bv = b_parts.get(i).copied().unwrap_or(0);
-        if av != bv {
-            return av.cmp(&bv);
-        }
-    }
-    std::cmp::Ordering::Equal
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedVersion<'a> {
+    core: Vec<u64>,
+    prerelease: Option<Vec<&'a str>>,
 }
 
-/// Check whether an update is available.
+fn parse_version(value: &str) -> Option<ParsedVersion<'_>> {
+    let without_build = value
+        .trim()
+        .split_once('+')
+        .map_or(value.trim(), |(head, _)| head);
+    let (core_text, prerelease_text) = match without_build.split_once('-') {
+        Some((core, pre)) if !pre.is_empty() => (core, Some(pre)),
+        Some(_) => return None,
+        None => (without_build, None),
+    };
+    let core = core_text
+        .split('.')
+        .map(str::parse::<u64>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    if core.is_empty() {
+        return None;
+    }
+    let prerelease = prerelease_text
+        .map(|pre| pre.split('.').collect::<Vec<_>>())
+        .filter(|parts| parts.iter().all(|part| !part.is_empty()));
+    if prerelease_text.is_some() && prerelease.is_none() {
+        return None;
+    }
+    Some(ParsedVersion { core, prerelease })
+}
+
+fn compare_prerelease(a: Option<&[&str]>, b: Option<&[&str]>) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (a, b) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Greater,
+        (Some(_), None) => Ordering::Less,
+        (Some(a), Some(b)) => {
+            for (left, right) in a.iter().zip(b.iter()) {
+                let ordering = match (left.parse::<u64>(), right.parse::<u64>()) {
+                    (Ok(left), Ok(right)) => left.cmp(&right),
+                    (Ok(_), Err(_)) => Ordering::Less,
+                    (Err(_), Ok(_)) => Ordering::Greater,
+                    (Err(_), Err(_)) => left.cmp(right),
+                };
+                if ordering != Ordering::Equal {
+                    return ordering;
+                }
+            }
+            a.len().cmp(&b.len())
+        }
+    }
+}
+
+/// Compare relaxed semantic versions while preserving SemVer prerelease ordering.
+/// Core segments may omit or append zero components for backward compatibility
+/// (`0.4 == 0.4.0 == 0.4.0.0`). Malformed versions fail closed.
+fn compare_versions(a: &str, b: &str) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    let a = parse_version(a)?;
+    let b = parse_version(b)?;
+    for index in 0..a.core.len().max(b.core.len()) {
+        let ordering = a
+            .core
+            .get(index)
+            .copied()
+            .unwrap_or(0)
+            .cmp(&b.core.get(index).copied().unwrap_or(0));
+        if ordering != Ordering::Equal {
+            return Some(ordering);
+        }
+    }
+    Some(compare_prerelease(
+        a.prerelease.as_deref(),
+        b.prerelease.as_deref(),
+    ))
+}
+
+/// Check whether an update is available. Malformed release tags fail closed.
 pub fn has_update(current: &str, release: &ReleaseInfo) -> bool {
-    compare_versions(release.version.as_str(), current) == std::cmp::Ordering::Greater
+    compare_versions(release.version.as_str(), current) == Some(std::cmp::Ordering::Greater)
 }
 
 /// Find the asset matching the current platform.
@@ -295,7 +355,7 @@ mod tests {
     fn test_compare_versions_equal() {
         assert_eq!(
             compare_versions("0.4.0", "0.4.0"),
-            std::cmp::Ordering::Equal
+            Some(std::cmp::Ordering::Equal)
         );
     }
 
@@ -303,31 +363,68 @@ mod tests {
     fn test_compare_versions_newer() {
         assert_eq!(
             compare_versions("0.5.0", "0.4.0"),
-            std::cmp::Ordering::Greater
+            Some(std::cmp::Ordering::Greater)
         );
         assert_eq!(
             compare_versions("0.4.1", "0.4.0"),
-            std::cmp::Ordering::Greater
+            Some(std::cmp::Ordering::Greater)
         );
         assert_eq!(
             compare_versions("1.0.0", "0.9.9"),
-            std::cmp::Ordering::Greater
+            Some(std::cmp::Ordering::Greater)
         );
     }
 
     #[test]
     fn test_compare_versions_older() {
-        assert_eq!(compare_versions("0.3.0", "0.4.0"), std::cmp::Ordering::Less);
-        assert_eq!(compare_versions("0.3.9", "0.4.0"), std::cmp::Ordering::Less);
+        assert_eq!(
+            compare_versions("0.3.0", "0.4.0"),
+            Some(std::cmp::Ordering::Less)
+        );
+        assert_eq!(
+            compare_versions("0.3.9", "0.4.0"),
+            Some(std::cmp::Ordering::Less)
+        );
     }
 
     #[test]
     fn test_compare_versions_different_lengths() {
-        assert_eq!(compare_versions("0.4", "0.4.0"), std::cmp::Ordering::Equal);
+        assert_eq!(
+            compare_versions("0.4", "0.4.0"),
+            Some(std::cmp::Ordering::Equal)
+        );
         assert_eq!(
             compare_versions("0.4.0.0", "0.4.0"),
-            std::cmp::Ordering::Equal
+            Some(std::cmp::Ordering::Equal)
         );
+    }
+
+    #[test]
+    fn prerelease_orders_below_stable_and_build_metadata_is_ignored() {
+        assert_eq!(
+            compare_versions("0.5.0-beta.1", "0.5.0"),
+            Some(std::cmp::Ordering::Less)
+        );
+        assert_eq!(
+            compare_versions("0.5.0-rc.2", "0.5.0-rc.10"),
+            Some(std::cmp::Ordering::Less)
+        );
+        assert_eq!(
+            compare_versions("0.5.0+build.7", "0.5.0+build.2"),
+            Some(std::cmp::Ordering::Equal)
+        );
+    }
+
+    #[test]
+    fn malformed_release_version_fails_closed() {
+        assert_eq!(compare_versions("0.5.beta", "0.5.0"), None);
+        let release = ReleaseInfo {
+            tag: "not-a-version".into(),
+            version: "not-a-version".into(),
+            assets: vec![],
+            body: String::new(),
+        };
+        assert!(!has_update("0.5.0", &release));
     }
 
     #[test]

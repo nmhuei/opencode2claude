@@ -131,7 +131,7 @@ impl ProxyPool {
             let role_enabled = node.role != EgressRole::Primary || node.routing_enabled;
             let rate_limited = node.rate_limit_until.is_some_and(|until| now < until);
             let hard_open = node.circuit.is_open(now);
-            if !role_enabled || node.is_duplicate() || rate_limited || hard_open {
+            if !role_enabled || node.draining || node.is_duplicate() || rate_limited || hard_open {
                 return false;
             }
 
@@ -242,6 +242,7 @@ fn build_entry(url: &String, require_verified_exit_ip: bool) -> Option<ProxyEntr
             LifecyclePolicy::Protected
         },
         routing_enabled: role == EgressRole::Primary,
+        draining: false,
         health: if require_verified_exit_ip {
             HealthState::Unknown
         } else {
@@ -269,6 +270,7 @@ fn node_stats(proxy: &ProxyEntry) -> ProxyNodeStats {
         role: proxy.role,
         lifecycle: proxy.lifecycle,
         routing_enabled: proxy.routing_enabled,
+        draining: proxy.draining,
         health: proxy.health,
         circuit: proxy.circuit.label().to_string(),
         status: compatibility_status(proxy).to_string(),
@@ -276,6 +278,11 @@ fn node_stats(proxy: &ProxyEntry) -> ProxyNodeStats {
         success_count: proxy.consecutive_successes,
         restart_attempts: proxy.restart_attempts,
         cooldown_remaining_secs: proxy.cooldown_until.and_then(|until| {
+            until
+                .checked_duration_since(now)
+                .map(|duration| duration.as_secs())
+        }),
+        rate_limit_remaining_secs: proxy.rate_limit_until.and_then(|until| {
             until
                 .checked_duration_since(now)
                 .map(|duration| duration.as_secs())

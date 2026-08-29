@@ -271,7 +271,6 @@ egress.max_restart_attempts
 egress.health_interval
 egress.require_verified_exit_ip
 retry.max_network_attempts
-retry.max_provider_attempts
 retry.model_fallbacks
 runtime.warp_image
 runtime.docker_binary

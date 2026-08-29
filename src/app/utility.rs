@@ -92,7 +92,7 @@ pub(super) async fn cmd_update(args: UpdateArgs, fmt: OutputFormat) {
     let current = update::current_version();
     let available = has_update(current, &release);
 
-    if args.check {
+    if args.check || args.dry_run {
         match fmt {
             OutputFormat::Json => println!(
                 "{}",

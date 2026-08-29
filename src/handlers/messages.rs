@@ -17,6 +17,7 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use axum::response::sse::{KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use futures_util::StreamExt;
 use std::collections::HashSet;
 use tracing::info;
 
@@ -29,9 +30,18 @@ pub async fn handle_messages(
 ) -> Result<Response, BridgeError> {
     let Json(mut payload) = payload
         .map_err(|error| BridgeError::InvalidRequest(format!("Invalid request body: {error}")))?;
-    let _rate_permit = acquire_rate_permit(&state).await?;
-    validate_messages_request(&payload)?;
+    // Cheap request validation runs before admission so malformed requests
+    // never consume a concurrency slot. Live bridge-issued shell tickets are
+    // valid external referents for compact client-side/deferred tool-result
+    // echoes; forged/expired IDs are not exempted.
+    let live_shell_tool_use_ids =
+        shell::live_shell_result_ticket_ids(&payload, &state.shell_delegations);
+    validate_messages_request_with_known_tool_use_ids(&payload, &live_shell_tool_use_ids)?;
 
+    // Per-key policy and model resolution are equally cheap, pure decisions:
+    // they also run before admission so a request whose fate is already
+    // decided fails fast with its policy error instead of queueing on the
+    // semaphore behind saturated upstream streams.
     let inbound_request = serde_json::to_value(&payload).ok();
     let requested_model = payload.model.clone();
     let client = client.map(|Extension(value)| value);
@@ -48,13 +58,26 @@ pub async fn handle_messages(
                 DEFAULT_MODEL,
             )
             .map_err(policy_error)?,
-        None => state
-            .config
-            .model
-            .clone()
-            .or_else(|| payload.model.clone())
-            .unwrap_or_else(|| DEFAULT_MODEL.to_string()),
+        None => resolve_anonymous_model(state.config.model.as_deref(), payload.model.as_deref()),
     };
+
+    // Shell-policy verdicts are decidable pre-admission: reject before queueing on the permit.
+    if let Some(rejection) = shell::shell_admission_rejection(
+        &state.config.shell_policy,
+        client.as_ref(),
+        &payload,
+        &state.shell_delegations,
+    ) {
+        return Err(rejection);
+    }
+
+    // Acquire an *owned* permit so it can be moved into the response-body
+    // stream: the global concurrency limit must cover the whole upstream
+    // exchange (including streaming), not just handler setup. Released on
+    // early error returns by ordinary drop, and when the body completes or
+    // the client disconnects mid-stream.
+    let rate_permit = acquire_rate_permit(&state).await?;
+
     log_request(&payload, &model, client.as_ref());
 
     let operation_kind = if last_user_shell_cmd(&payload.messages).is_some() {
@@ -96,7 +119,7 @@ pub async fn handle_messages(
         return Ok(response);
     }
 
-    match shell::try_handle(&state, &payload, model.clone()).await {
+    match shell::try_handle(&state, client.as_ref(), &payload, model.clone()).await {
         Ok(Some(response)) => {
             capture.finish_success(
                 response.status().as_u16(),
@@ -149,6 +172,16 @@ pub async fn handle_messages(
                 return Err(error);
             }
         };
+        // Hold the global rate-limit permit until the body stream is fully
+        // consumed or dropped (client disconnect mid-stream included): the
+        // permit is moved out of the handler frame into the stream body.
+        let stream = async_stream::stream! {
+            let _rate_permit = rate_permit;
+            let mut stream = std::pin::pin!(stream);
+            while let Some(event) = stream.next().await {
+                yield event;
+            }
+        };
         return Ok(disable_proxy_buffering(
             Sse::new(stream)
                 .keep_alive(KeepAlive::default())
@@ -176,7 +209,15 @@ pub async fn handle_messages(
     Ok(Json(response).into_response())
 }
 
+#[cfg(test)]
 fn validate_messages_request(payload: &MessagesRequest) -> Result<(), BridgeError> {
+    validate_messages_request_with_known_tool_use_ids(payload, &[])
+}
+
+fn validate_messages_request_with_known_tool_use_ids(
+    payload: &MessagesRequest,
+    externally_known_tool_use_ids: &[String],
+) -> Result<(), BridgeError> {
     if payload.messages.is_empty() {
         return Err(BridgeError::InvalidRequest("No messages found".to_string()));
     }
@@ -242,6 +283,12 @@ fn validate_messages_request(payload: &MessagesRequest) -> Result<(), BridgeErro
         }
     }
 
+    // Anthropic tool_result blocks may only answer a tool_use that has
+    // already appeared in an earlier assistant turn. Track IDs in request
+    // order so orphan/forward references fail in one linear pass. Duplicate
+    // tool_use IDs intentionally keep the first occurrence canonical.
+    let mut seen_tool_use_ids: HashSet<String> =
+        externally_known_tool_use_ids.iter().cloned().collect();
     for (message_index, message) in payload.messages.iter().enumerate() {
         if !matches!(message.role.as_str(), "user" | "assistant" | "system") {
             return Err(BridgeError::InvalidRequest(format!(
@@ -296,6 +343,9 @@ fn validate_messages_request(payload: &MessagesRequest) -> Result<(), BridgeErro
                             "{location} requires non-empty id/name and an object input"
                         )));
                     }
+                    // First occurrence is canonical; duplicate IDs are kept
+                    // compatible with historical Claude Code transcripts.
+                    seen_tool_use_ids.insert(block.id.as_deref().unwrap().to_string());
                 }
                 "tool_result" => {
                     if message.role != "user" {
@@ -308,6 +358,12 @@ fn validate_messages_request(payload: &MessagesRequest) -> Result<(), BridgeErro
                     {
                         return Err(BridgeError::InvalidRequest(format!(
                             "{location} requires tool_use_id and content"
+                        )));
+                    }
+                    let tool_use_id = block.tool_use_id.as_deref().unwrap();
+                    if !seen_tool_use_ids.contains(tool_use_id) {
+                        return Err(BridgeError::InvalidRequest(format!(
+                            "{location} references unknown prior tool_use_id `{tool_use_id}`"
                         )));
                     }
                 }
@@ -449,15 +505,29 @@ pub(super) fn disable_proxy_buffering(mut response: Response) -> Response {
 
 async fn acquire_rate_permit(
     state: &AppState,
-) -> Result<Option<tokio::sync::SemaphorePermit<'_>>, BridgeError> {
+) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, BridgeError> {
     match &state.rate_limiter {
         Some(limiter) => limiter
-            .acquire()
+            .clone()
+            .acquire_owned()
             .await
             .map(Some)
             .map_err(|_| BridgeError::InvalidRequest("Rate limiter is unavailable".to_string())),
         None => Ok(None),
     }
+}
+
+/// Model selection for anonymous (auth-disabled) callers. Mirrors the
+/// authenticated `resolve_model` semantics: a configured global model wins,
+/// and blank/whitespace values count as unspecified instead of being
+/// forwarded upstream as a deterministic failure.
+fn resolve_anonymous_model(configured: Option<&str>, requested: Option<&str>) -> String {
+    configured
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| requested.map(str::trim).filter(|value| !value.is_empty()))
+        .unwrap_or(DEFAULT_MODEL)
+        .to_string()
 }
 
 fn log_request(payload: &MessagesRequest, model: &str, client: Option<&AuthenticatedClient>) {
@@ -473,6 +543,251 @@ fn log_request(payload: &MessagesRequest, model: &str, client: Option<&Authentic
         info!(
             tools = ?tools.iter().map(|tool| &tool.name).collect::<Vec<_>>(),
             "client tools available"
+        );
+    }
+}
+
+#[cfg(test)]
+mod rate_limit_tests {
+    use crate::config::{BridgeConfig, EgressConfig, EgressMode};
+    use crate::server::build_router;
+    use crate::state::AppState;
+    use axum::body::Body;
+    use axum::http::header;
+    use axum::http::StatusCode;
+    use axum::routing::post;
+    use axum::Router;
+    use futures_util::StreamExt;
+    use std::time::Duration;
+    use tokio::net::TcpListener;
+    use tower::util::ServiceExt;
+
+    async fn sse_upstream() -> axum::response::Response {
+        axum::response::Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/event-stream")
+            .body(Body::from(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n",
+            ))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn rate_limit_permit_is_held_for_the_whole_response_body() {
+        let upstream = Router::new()
+            .route("/chat/completions", post(|| async { sse_upstream().await }))
+            .into_make_service();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+
+        let defaults = BridgeConfig::default();
+        let mut config = BridgeConfig {
+            model: Some("fixture-model".to_string()),
+            retry: crate::config::RetryConfig {
+                upstream_base_url: format!("http://{address}"),
+                max_network_attempts: 1,
+                base_backoff: Duration::ZERO,
+                ..defaults.retry
+            },
+            egress: EgressConfig {
+                mode: EgressMode::Direct,
+                ..defaults.egress
+            },
+            ..defaults
+        };
+        config.observability.max_concurrent_requests = Some(1);
+        config.management.config_path = std::env::temp_dir().join(format!(
+            "opencode2api-messages-ratelimit-{}-{}.toml",
+            std::process::id(),
+            crate::api_key::unix_timestamp(),
+        ));
+        let state = AppState::new(config);
+        let app = build_router(state.clone());
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "model": "fixture-model",
+                            "stream": true,
+                            "max_tokens": 64,
+                            "messages": [{"role": "user", "content": "hi"}]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // The response head has returned but the body is still unconsumed:
+        // the single global permit must remain held for the whole body.
+        let limiter = state.rate_limiter.as_ref().unwrap();
+        assert_eq!(
+            limiter.available_permits(),
+            0,
+            "permit must stay acquired while the streaming body is in flight"
+        );
+
+        let mut body = response.into_body().into_data_stream();
+        while let Some(chunk) = body.next().await {
+            chunk.unwrap();
+        }
+        assert_eq!(
+            limiter.available_permits(),
+            1,
+            "permit must be released once the body completes"
+        );
+    }
+}
+
+#[cfg(test)]
+mod admission_order_tests {
+    use super::*;
+    use crate::api_key::{ApiKeyPermissions, ApiKeyPolicy};
+    use crate::config::{BridgeConfig, EgressConfig, EgressMode};
+    use axum::body::Body;
+    use axum::extract::Extension;
+    use axum::http::{header, StatusCode};
+    use axum::routing::post;
+    use axum::Router;
+    use std::time::Duration;
+    use tower::util::ServiceExt;
+
+    fn streaming_denied_client() -> AuthenticatedClient {
+        AuthenticatedClient {
+            key_id: "key_streaming_disabled".to_string(),
+            name: "Streaming Disabled".to_string(),
+            environment: "development".to_string(),
+            policy: ApiKeyPolicy {
+                permissions: ApiKeyPermissions {
+                    streaming: false,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        }
+    }
+
+    /// A policy-doomed request must fail fast instead of queueing behind a
+    /// saturated semaphore: every cheap rejectable condition is decided
+    /// before admission, so the caller gets its 403 even while the single
+    /// global slot is held elsewhere.
+    #[tokio::test]
+    async fn policy_rejections_do_not_queue_for_a_concurrency_slot() {
+        // Upstream that would hang forever if the doomed request ever
+        // reached forwarding; the assertion below proves it never does.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+
+        let defaults = BridgeConfig::default();
+        let mut config = BridgeConfig {
+            model: Some("fixture-model".to_string()),
+            retry: crate::config::RetryConfig {
+                upstream_base_url: format!("http://{address}"),
+                max_network_attempts: 1,
+                base_backoff: Duration::ZERO,
+                ..defaults.retry
+            },
+            egress: EgressConfig {
+                mode: EgressMode::Direct,
+                ..defaults.egress
+            },
+            ..defaults
+        };
+        config.observability.max_concurrent_requests = Some(1);
+        config.management.config_path = std::env::temp_dir().join(format!(
+            "opencode2api-messages-admission-{}-{}.toml",
+            std::process::id(),
+            crate::api_key::unix_timestamp(),
+        ));
+        let state = AppState::new(config);
+
+        // Drain the only global slot before the request arrives.
+        let held = state
+            .rate_limiter
+            .as_ref()
+            .unwrap()
+            .clone()
+            .acquire_owned()
+            .await
+            .unwrap();
+
+        let app = Router::new()
+            .route("/v1/messages", post(handle_messages))
+            .layer(Extension(streaming_denied_client()))
+            .with_state(state);
+
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/messages")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "stream": true,
+                    "max_tokens": 64,
+                    "messages": [{"role": "user", "content": "hi"}]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+
+        let response = tokio::time::timeout(Duration::from_secs(5), app.oneshot(request))
+            .await
+            .expect("policy-rejected request must not wait for a concurrency slot")
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "streaming-disabled key must be rejected without needing a slot"
+        );
+        drop(held);
+    }
+}
+
+#[cfg(test)]
+mod model_resolution_tests {
+    use super::*;
+
+    #[test]
+    fn configured_global_model_still_wins_over_requested() {
+        assert_eq!(
+            resolve_anonymous_model(Some("global-model"), Some("requested-model")),
+            "global-model"
+        );
+    }
+
+    #[test]
+    fn requested_model_is_used_when_nothing_is_configured() {
+        assert_eq!(
+            resolve_anonymous_model(None, Some("requested-model")),
+            "requested-model"
+        );
+    }
+
+    #[test]
+    fn blank_models_fall_back_instead_of_reaching_upstream() {
+        assert_eq!(
+            resolve_anonymous_model(None, Some("   ")),
+            DEFAULT_MODEL,
+            "whitespace-only requested model must fall back, not forward garbage"
+        );
+        assert_eq!(
+            resolve_anonymous_model(Some(""), Some("requested-model")),
+            "requested-model",
+            "blank configured model must be treated as unset"
+        );
+        assert_eq!(
+            resolve_anonymous_model(Some("  "), None),
+            DEFAULT_MODEL,
+            "blank configured model with nothing else must use the default"
         );
     }
 }
@@ -647,6 +962,159 @@ mod request_validation_tests {
             .unwrap_err()
             .to_string()
             .contains("user message"));
+    }
+
+    fn tool_use_block(id: &str) -> MessageContent {
+        MessageContent {
+            content_type: "tool_use".to_string(),
+            id: Some(id.to_string()),
+            name: Some("Read".to_string()),
+            input: Some(serde_json::json!({"path": "src/lib.rs"})),
+            ..Default::default()
+        }
+    }
+
+    fn tool_result_block(id: &str) -> MessageContent {
+        MessageContent {
+            content_type: "tool_result".to_string(),
+            tool_use_id: Some(id.to_string()),
+            content: Some(serde_json::json!("ok")),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn rejects_tool_result_referencing_unknown_tool_use_id() {
+        let mut request = base_request();
+        request.messages = vec![Message {
+            role: "user".to_string(),
+            content: ContentVal::Multiple(vec![tool_result_block("call-orphan")]),
+        }];
+        let error = validate_messages_request(&request).unwrap_err().to_string();
+        assert!(error.contains("unknown"), "got: {error}");
+        assert!(error.contains("call-orphan"), "got: {error}");
+    }
+
+    #[test]
+    fn accepts_paired_tool_use_and_result_history() {
+        let mut request = base_request();
+        request.messages = vec![
+            Message {
+                role: "user".to_string(),
+                content: ContentVal::Single("read the file".to_string()),
+            },
+            Message {
+                role: "assistant".to_string(),
+                content: ContentVal::Multiple(vec![tool_use_block("call-1")]),
+            },
+            Message {
+                role: "user".to_string(),
+                content: ContentVal::Multiple(vec![
+                    tool_result_block("call-1"),
+                    MessageContent {
+                        content_type: "text".to_string(),
+                        text: Some("and summarize".to_string()),
+                        ..Default::default()
+                    },
+                ]),
+            },
+        ];
+        assert!(validate_messages_request(&request).is_ok());
+    }
+
+    #[test]
+    fn rejects_tool_result_that_precedes_its_tool_use() {
+        // Anthropic semantics: a tool_result answers the PREVIOUS assistant
+        // turn. A forward reference (result before the emitting assistant
+        // message) must be rejected like an orphan.
+        let mut request = base_request();
+        request.messages = vec![
+            Message {
+                role: "user".to_string(),
+                content: ContentVal::Multiple(vec![tool_result_block("call-late")]),
+            },
+            Message {
+                role: "assistant".to_string(),
+                content: ContentVal::Multiple(vec![tool_use_block("call-late")]),
+            },
+        ];
+        let error = validate_messages_request(&request).unwrap_err().to_string();
+        assert!(error.contains("unknown"), "got: {error}");
+    }
+
+    #[test]
+    fn duplicate_tool_use_ids_allow_first_reference_match() {
+        // Documented judgment call: duplicate tool_use ids are tolerated and
+        // the FIRST occurrence is the canonical referent, so a tool_result
+        // matching the shared id resolves instead of being rejected as
+        // ambiguous.
+        let mut request = base_request();
+        request.messages = vec![
+            Message {
+                role: "assistant".to_string(),
+                content: ContentVal::Multiple(vec![tool_use_block("call-dup")]),
+            },
+            Message {
+                role: "assistant".to_string(),
+                content: ContentVal::Multiple(vec![tool_use_block("call-dup")]),
+            },
+            Message {
+                role: "user".to_string(),
+                content: ContentVal::Multiple(vec![tool_result_block("call-dup")]),
+            },
+        ];
+        assert!(validate_messages_request(&request).is_ok());
+    }
+
+    #[test]
+    fn rejects_empty_tool_use_ids_at_both_ends() {
+        let mut request = base_request();
+        request.messages = vec![
+            Message {
+                role: "assistant".to_string(),
+                content: ContentVal::Multiple(vec![tool_use_block("")]),
+            },
+            Message {
+                role: "user".to_string(),
+                content: ContentVal::Multiple(vec![tool_result_block("call-1")]),
+            },
+        ];
+        assert!(validate_messages_request(&request)
+            .unwrap_err()
+            .to_string()
+            .contains("non-empty id"));
+
+        request.messages = vec![Message {
+            role: "user".to_string(),
+            content: ContentVal::Multiple(vec![tool_result_block("")]),
+        }];
+        assert!(validate_messages_request(&request)
+            .unwrap_err()
+            .to_string()
+            .contains("requires tool_use_id"));
+    }
+
+    #[test]
+    fn validates_large_paired_histories_in_a_single_pass() {
+        let mut request = base_request();
+        let mut messages = Vec::with_capacity(4_001);
+        messages.push(Message {
+            role: "user".to_string(),
+            content: ContentVal::Single("go".to_string()),
+        });
+        for round in 0..2_000_u32 {
+            let id = format!("call-{round}");
+            messages.push(Message {
+                role: "assistant".to_string(),
+                content: ContentVal::Multiple(vec![tool_use_block(&id)]),
+            });
+            messages.push(Message {
+                role: "user".to_string(),
+                content: ContentVal::Multiple(vec![tool_result_block(&id)]),
+            });
+        }
+        request.messages = messages;
+        assert!(validate_messages_request(&request).is_ok());
     }
 
     #[test]

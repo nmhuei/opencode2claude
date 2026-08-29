@@ -147,6 +147,9 @@ pub async fn forward_to_llm_sync(
                     Some("transport_or_provider_error"),
                     Some(&error.to_string()),
                 );
+                // Explicit terminal classification: without this the Drop guard
+                // would misreport a server-side failure as a client cancel.
+                capture.fail(None, "transport_or_provider_error", &error.to_string());
                 return Err(error);
             }
         };
@@ -162,6 +165,11 @@ pub async fn forward_to_llm_sync(
                     None,
                     Some("response_read_error"),
                     Some(&error.to_string()),
+                );
+                capture.fail(
+                    Some(status.as_u16()),
+                    "response_read_error",
+                    &error.to_string(),
                 );
                 return Err(error);
             }
@@ -185,6 +193,11 @@ pub async fn forward_to_llm_sync(
                 Some("upstream_non_2xx"),
                 Some(&format!("upstream returned status {status}")),
             );
+            capture.fail(
+                Some(status.as_u16()),
+                "upstream_non_2xx",
+                &format!("upstream returned status {status}"),
+            );
             return Err(BridgeError::UpstreamError(format!(
                 "Upstream returned status {}",
                 status
@@ -200,6 +213,11 @@ pub async fn forward_to_llm_sync(
                     None,
                     Some("malformed_response"),
                     Some(&error.to_string()),
+                );
+                capture.fail(
+                    Some(status.as_u16()),
+                    "malformed_response",
+                    &error.to_string(),
                 );
                 return Err(BridgeError::UpstreamError(format!(
                     "Failed to parse response: {error}"
@@ -218,6 +236,11 @@ pub async fn forward_to_llm_sync(
                     None,
                     Some("empty_choices"),
                     Some("no choices returned from upstream"),
+                );
+                capture.fail(
+                    Some(status.as_u16()),
+                    "empty_choices",
+                    "no choices returned from upstream",
                 );
                 return Err(BridgeError::UpstreamError(
                     "No choices returned from upstream".to_string(),
@@ -359,6 +382,11 @@ pub async fn forward_to_llm_sync(
                         prepare_native_tool_retry(&mut payload);
                         continue;
                     }
+                    capture.fail(
+                        Some(status.as_u16()),
+                        "encoded_native_retry_exhausted",
+                        "Encoded native recovery retry budget exhausted",
+                    );
                     return Err(BridgeError::UpstreamError(
                         "Encoded native recovery retry budget exhausted".to_string(),
                     ));
@@ -423,6 +451,7 @@ pub async fn forward_to_llm_sync(
                 prepare_compat_tool_retry(&mut payload);
                 continue;
             }
+            capture.fail(Some(status.as_u16()), retry_code, terminal);
             return Err(BridgeError::UpstreamError(terminal.to_string()));
         }
 
@@ -552,6 +581,11 @@ pub async fn forward_to_llm_sync(
                 prepare_compat_tool_retry(&mut payload);
                 continue;
             }
+            capture.fail(
+                Some(status.as_u16()),
+                "invalid_tool_protocol",
+                &format!("Upstream repeatedly emitted an invalid tool protocol: {issue}"),
+            );
             return Err(BridgeError::UpstreamError(format!(
                 "Upstream repeatedly emitted an invalid tool protocol: {issue}"
             )));
@@ -676,6 +710,9 @@ pub async fn forward_to_llm_sync(
                 &search_tc_input,
             );
             capture.search(&search_query, Some(&search_results));
+            // Visible text emitted before the marker belongs in the response
+            // transcript even though this turn ends in interception.
+            capture.append_response(&text_cleaned);
             capture.attempt_finished(
                 Some(status.as_u16()),
                 "completed",
@@ -883,7 +920,18 @@ pub async fn forward_to_llm_sync(
                     "end_turn"
                 }
             }
-            Some("tool_calls") => "tool_use",
+            // A `tool_calls` finish only maps to a tool_use stop when at least
+            // one call survived filtering. If every call was unavailable,
+            // duplicated, or dropped, reporting tool_use with zero tool_use
+            // blocks would leave the client waiting for tool results that
+            // never arrive — fall back to end_turn like the stream path does.
+            Some("tool_calls") => {
+                if has_tool_calls {
+                    "tool_use"
+                } else {
+                    "end_turn"
+                }
+            }
             Some("length") => "max_tokens",
             _ => {
                 if has_tool_calls {

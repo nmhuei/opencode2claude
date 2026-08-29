@@ -24,7 +24,7 @@ use std::time::Duration;
 use tracing::{trace, warn};
 
 const MAX_DSML_BUFFER_SIZE: usize = 256 * 1024;
-const MAX_COMPAT_TOOL_BUFFER_SIZE: usize = 64 * 1024;
+pub(super) const MAX_COMPAT_TOOL_BUFFER_SIZE: usize = 64 * 1024;
 // Claude Code's interactive renderer keeps an open thinking block collapsed
 // until content_block_stop. Segment long reasoning into bounded blocks so the
 // user sees completed reasoning portions while the model is still working.
@@ -34,6 +34,22 @@ const THINKING_RENDER_CHUNK_BYTES: usize = 16384;
 // very briefly between chunks so Claude Code can visibly render progress
 // instead of repainting the whole report in one scheduler burst.
 const RENDER_DELTA_CHUNK_BYTES: usize = 256;
+/// Largest raw upstream text retained per accumulator (visible and reasoning
+/// each). Streaming output itself is never truncated — only what we keep in
+/// memory for retry gates, search synthesis, and usage estimation is bounded,
+/// mirroring the bounded-retention philosophy of history capture sizes.
+pub(super) const MAX_ACCUMULATOR_BYTES: usize = 1024 * 1024;
+/// Retention cap for one native tool call's streamed arguments. Native calls
+/// are the primary protocol, so they get generous headroom (a large Write
+/// payload fits), but a hostile upstream must not be able to balloon memory
+/// indefinitely before `finish_reason` finalizes the call.
+pub(super) const MAX_NATIVE_TOOL_ARGUMENT_BYTES: usize = 1024 * 1024;
+/// Total bytes retained across ALL pending native tool-call entries (ids,
+/// names, and arguments combined). Bounds both per-call growth and the
+/// unbounded-entry-count attack (millions of single-byte indices).
+pub(super) const MAX_NATIVE_PENDING_BYTES: usize = 4 * 1024 * 1024;
+/// Retention cap for one native tool call's streamed id or name fragment.
+pub(super) const MAX_NATIVE_TOOL_IDENTIFIER_BYTES: usize = 16 * 1024;
 const LARGE_DELTA_PACING_DELAY: Duration = Duration::from_millis(2);
 const DSML_OPEN_TAG: &str = "<｜DSML｜tool_calls>";
 const DSML_CLOSE_TAG: &str = "</｜DSML｜tool_calls>";
@@ -72,18 +88,55 @@ fn merge_streamed_identifier(slot: &mut Option<String>, fragment: &str) {
     }
 }
 
-/// Merge streamed JSON arguments while tolerating gateways that resend the
-/// complete argument snapshot on every chunk instead of true deltas.
-fn merge_streamed_arguments(current: &mut String, fragment: &str) {
+/// Merge an id/name identifier fragment under a hard byte cap. Returns the
+/// retained growth in bytes.
+fn merge_bounded_identifier(slot: &mut Option<String>, fragment: &str, cap: usize) -> usize {
+    if fragment.is_empty() {
+        return 0;
+    }
+    let before = slot.as_ref().map_or(0, |value| value.len());
+    if before >= cap {
+        return 0;
+    }
+    merge_streamed_identifier(slot, fragment);
+    let mut after = slot.as_ref().map_or(0, |value| value.len());
+    if after > cap {
+        if let Some(value) = slot.as_mut() {
+            let (keep, _) = split_utf8_prefix(value, cap);
+            let kept = keep.to_string();
+            value.clear();
+            value.push_str(&kept);
+            after = kept.len();
+        }
+    }
+    after.saturating_sub(before)
+}
+
+/// Merge streamed JSON arguments under a hard byte cap, preserving the
+/// cumulative-snapshot replacement semantics of `merge_streamed_arguments`.
+/// Returns `(bytes_added, truncated)`; `truncated` marks that part of the
+/// fragment was dropped because the merged result would exceed `cap`, so the
+/// accumulated arguments are known to be incomplete and must never execute.
+fn merge_bounded_arguments(current: &mut String, fragment: &str, cap: usize) -> (usize, bool) {
     if fragment.is_empty() || current == fragment {
-        return;
+        return (0, false);
     }
     if fragment.starts_with(current.as_str()) {
+        // Cumulative snapshot replaces everything retained so far.
+        let (keep, _) = split_utf8_prefix(fragment, cap);
+        let retained = keep.len();
         current.clear();
-        current.push_str(fragment);
-    } else {
-        current.push_str(fragment);
+        current.push_str(keep);
+        return (retained, retained < fragment.len());
     }
+    let room = cap.saturating_sub(current.len());
+    if room == 0 {
+        return (0, true);
+    }
+    let (keep, _) = split_utf8_prefix(fragment, room);
+    let retained = keep.len();
+    current.push_str(keep);
+    (retained, retained < fragment.len())
 }
 
 #[derive(Debug, Clone, Default)]
@@ -91,6 +144,13 @@ struct PendingToolCall {
     id: Option<String>,
     name: Option<String>,
     arguments: String,
+    /// Set when retention hit a byte bound and the accumulated arguments are
+    /// known to be incomplete. A truncated call must never execute: finalize
+    /// treats it like invalid JSON (retry or omit), never as a valid tool call.
+    truncated: bool,
+    /// Bytes this entry last charged against `pending_native_bytes`, so
+    /// replacement merges that shrink the entry adjust the global total.
+    accounted: usize,
 }
 
 /// Finalize the stream.
@@ -101,6 +161,46 @@ struct PendingToolCall {
 /// single Anthropic `error` event that ENDS the stream — no `message_delta`
 /// and no `message_stop` follow it, per the Messages API spec. Only a healthy
 /// end of message emits `message_delta` + `message_stop`.
+/// Append `text` to `buffer` without ever exceeding `cap` bytes, truncating
+/// at a UTF-8 character boundary when the tail would straddle one. Once the
+/// buffer is full this becomes a no-op: retention is capped, but callers keep
+/// streaming every byte to the client regardless.
+pub(super) fn push_bounded(buffer: &mut String, text: &str, cap: usize) {
+    let room = cap.saturating_sub(buffer.len());
+    if room == 0 {
+        return;
+    }
+    if text.len() <= room {
+        buffer.push_str(text);
+        return;
+    }
+    let mut keep = room;
+    while keep > 0 && !text.is_char_boundary(keep) {
+        keep -= 1;
+    }
+    buffer.push_str(&text[..keep]);
+}
+
+/// Send one SSE event, recording the first failed delivery as terminal
+/// transport death. Once a send fails (receiver dropped, or stalled long
+/// enough to overflow the bounded channel), every subsequent send is a no-op:
+/// a dead consumer must never observe further block events, and half-open
+/// blocks intentionally stay half-open because the executor ends the response
+/// at once instead of finalizing a clean end.
+pub(super) async fn send_tracked(
+    ctx: &mut StreamContext,
+    tx: &tokio::sync::mpsc::Sender<Event>,
+    event: Event,
+) {
+    if ctx.send_failed {
+        return;
+    }
+    if !send_sse(tx, event).await {
+        ctx.send_failed = true;
+        warn!("SSE consumer stopped accepting events; tearing the stream down");
+    }
+}
+
 pub(super) async fn finalize_stream(
     reason: &str,
     tx: &tokio::sync::mpsc::Sender<Event>,
@@ -110,7 +210,7 @@ pub(super) async fn finalize_stream(
 ) {
     if !ctx.message_started {
         // message_start was never emitted — emit a minimal fallback one
-        let _ = send_sse(tx, builder.message_start(0)).await;
+        send_tracked(ctx, tx, builder.message_start(0)).await;
         ctx.message_started = true;
     }
 
@@ -121,7 +221,7 @@ pub(super) async fn finalize_stream(
 
     // Close any remaining active blocks
     for (_, idx) in tracker.close_all() {
-        let _ = send_sse(tx, crate::sse::emit_block_stop(idx)).await;
+        send_tracked(ctx, tx, crate::sse::emit_block_stop(idx)).await;
     }
 
     let stranded = !tracker.has_any_blocks_ever_opened()
@@ -148,7 +248,7 @@ pub(super) async fn finalize_stream(
         } else {
             format!("Upstream stream ended with a read error (reason: {reason})")
         };
-        let _ = send_sse(tx, builder.api_error(&error_msg)).await;
+        let _ = send_tracked(ctx, tx, builder.api_error(&error_msg)).await;
         return;
     }
 
@@ -157,8 +257,8 @@ pub(super) async fn finalize_stream(
     } else {
         "end_turn".to_string()
     };
-    let _ = send_sse(tx, builder.message_delta_with_stop(&stop_reason, 1)).await;
-    let _ = send_sse(tx, builder.message_stop()).await;
+    send_tracked(ctx, tx, builder.message_delta_with_stop(&stop_reason, 1)).await;
+    send_tracked(ctx, tx, builder.message_stop()).await;
 }
 
 pub(super) async fn finalize_stream_with_text(
@@ -166,24 +266,26 @@ pub(super) async fn finalize_stream_with_text(
     tx: &tokio::sync::mpsc::Sender<Event>,
     builder: &SseEventBuilder,
     tracker: &mut SseBlockTracker,
-    message_started: bool,
+    ctx: &mut StreamContext,
 ) {
-    if !message_started {
-        let _ = send_sse(tx, builder.message_start(0)).await;
+    if !ctx.message_started {
+        send_tracked(ctx, tx, builder.message_start(0)).await;
+        ctx.message_started = true;
     }
     for (_, idx) in tracker.close_all() {
-        let _ = send_sse(tx, crate::sse::emit_block_stop(idx)).await;
+        send_tracked(ctx, tx, crate::sse::emit_block_stop(idx)).await;
     }
     let (text_idx, _, _) = tracker.ensure_text();
-    let _ = send_sse(
+    send_tracked(
+        ctx,
         tx,
         builder.content_block_start_at(text_idx, "text", None, None),
     )
     .await;
-    let _ = send_sse(tx, builder.text_delta_at(text_idx, text)).await;
-    let _ = send_sse(tx, crate::sse::emit_block_stop(text_idx)).await;
-    let _ = send_sse(tx, builder.message_delta_with_stop("end_turn", 1)).await;
-    let _ = send_sse(tx, builder.message_stop()).await;
+    send_tracked(ctx, tx, builder.text_delta_at(text_idx, text)).await;
+    send_tracked(ctx, tx, crate::sse::emit_block_stop(text_idx)).await;
+    send_tracked(ctx, tx, builder.message_delta_with_stop("end_turn", 1)).await;
+    send_tracked(ctx, tx, builder.message_stop()).await;
 }
 
 pub(super) async fn process_openai_sse_line(
@@ -194,6 +296,13 @@ pub(super) async fn process_openai_sse_line(
     builder: &SseEventBuilder,
     payload: &MessagesRequest,
 ) -> bool {
+    // A previous send already failed: the consumer is gone. Report the stream
+    // as done immediately so the executor tears it down instead of parsing
+    // (and potentially emitting for) further upstream lines.
+    if ctx.send_failed {
+        return true;
+    }
+
     let line = line.trim();
     if line.is_empty() {
         return false;
@@ -231,7 +340,7 @@ pub(super) async fn process_openai_sse_line(
             .chars()
             .take(200)
             .collect::<String>();
-        let _ = send_sse(tx, builder.api_error(&message)).await;
+        send_tracked(ctx, tx, builder.api_error(&message)).await;
         ctx.error_terminated = true;
         ctx.stream_failed = true;
         return true;
@@ -298,6 +407,11 @@ pub(super) struct StreamContext {
     search_tc_index: Option<usize>,
     /// Per-index fragments, including arguments received before the tool name.
     pending_tool_calls: BTreeMap<usize, PendingToolCall>,
+    /// Exact sum of retained bytes across all pending native entries (ids,
+    /// names, and arguments). Reconciled against each entry's `accounted`
+    /// charge on every fragment so replacement-style snapshot merges stay
+    /// honest instead of over-counting toward the budget.
+    pending_native_bytes: usize,
     /// Accumulated thinking text across all chunks in this response turn.
     pub(super) accumulated_thinking: String,
     /// Rolling reasoning buffer used to detect compatibility tool markers that
@@ -319,6 +433,11 @@ pub(super) struct StreamContext {
     /// stream must end at that event: no `message_delta`/`message_stop` and
     /// no further content may follow it.
     pub(super) error_terminated: bool,
+    /// Whether an SSE send to the client channel failed (receiver dropped, or
+    /// stalled past the bounded send window so the channel overflowed). The
+    /// connection is dead: every later send becomes a no-op and the executor
+    /// tears the response down as cancelled instead of finalizing a clean end.
+    pub(super) send_failed: bool,
     /// Whether any `tool_use` content block has been emitted.
     pub(super) has_emitted_tool_use: bool,
     /// Whether a tool_use came from the native OpenAI tool_calls protocol.
@@ -390,6 +509,7 @@ impl StreamContext {
             search_tc_args: String::new(),
             search_tc_index: None,
             pending_tool_calls: BTreeMap::new(),
+            pending_native_bytes: 0,
             accumulated_thinking: String::new(),
             reasoning_stream_buffer: String::new(),
             reasoning_markdown_state: CompatMarkdownState::default(),
@@ -398,6 +518,7 @@ impl StreamContext {
             accumulated_text: String::new(),
             stream_failed: false,
             error_terminated: false,
+            send_failed: false,
             has_emitted_tool_use: false,
             has_emitted_native_tool_use: false,
             native_tool_calls_emitted: 0,
@@ -482,25 +603,33 @@ impl StreamContext {
         if self.intercepting_search {
             return;
         }
-        self.accumulated_thinking.push_str(&cleaned);
+        push_bounded(
+            &mut self.accumulated_thinking,
+            &cleaned,
+            MAX_ACCUMULATOR_BYTES,
+        );
 
         let mut remaining = cleaned.as_str();
         while !remaining.is_empty() {
+            if self.send_failed {
+                return;
+            }
             let (fragment, rest) = split_utf8_prefix(remaining, RENDER_DELTA_CHUNK_BYTES);
             remaining = rest;
 
             let (thinking_idx, thinking_is_new, closed_text) = tracker.ensure_thinking();
             if let Some(closed) = closed_text {
-                let _ = tx.send(crate::sse::emit_block_stop(closed)).await;
+                send_tracked(self, tx, crate::sse::emit_block_stop(closed)).await;
             }
             if thinking_is_new {
-                let _ = tx
-                    .send(builder.content_block_start_at(thinking_idx, "thinking", None, None))
-                    .await;
-            }
-            let _ = tx
-                .send(builder.thinking_delta(thinking_idx, fragment))
+                send_tracked(
+                    self,
+                    tx,
+                    builder.content_block_start_at(thinking_idx, "thinking", None, None),
+                )
                 .await;
+            }
+            send_tracked(self, tx, builder.thinking_delta(thinking_idx, fragment)).await;
             self.thinking_block_bytes = self.thinking_block_bytes.saturating_add(fragment.len());
             trace!(
                 block_index = thinking_idx,
@@ -509,7 +638,7 @@ impl StreamContext {
             );
             if self.thinking_block_bytes >= THINKING_RENDER_CHUNK_BYTES {
                 if let Some(closed) = tracker.close_thinking() {
-                    let _ = tx.send(crate::sse::emit_block_stop(closed)).await;
+                    send_tracked(self, tx, crate::sse::emit_block_stop(closed)).await;
                     trace!(
                         block_index = closed,
                         bytes = self.thinking_block_bytes,
@@ -574,6 +703,25 @@ impl StreamContext {
                     parse_compat_tool_requests_with_consumed(&self.reasoning_stream_buffer)
                 {
                     if self.defer_encoded_fallback_until_native_finalized {
+                        // The parsed marker parks at position zero while native
+                        // fragments finalize; without a bound, every later chunk
+                        // grows the retained buffer without limit. Apply the same
+                        // oversized-discard treatment as malformed markers.
+                        if self.reasoning_stream_buffer.len() > MAX_COMPAT_TOOL_BUFFER_SIZE {
+                            warn!(
+                                bytes = self.reasoning_stream_buffer.len(),
+                                "Parked compatibility marker exceeded the buffer limit during native deferral; discarding"
+                            );
+                            self.reasoning_stream_buffer.clear();
+                            self.discarding_reasoning_compat = true;
+                            self.emit_thinking_fragment(
+                                "[Oversized tool request omitted]",
+                                tracker,
+                                tx,
+                                builder,
+                            )
+                            .await;
+                        }
                         return;
                     }
                     let raw_candidate = self.reasoning_stream_buffer.clone();
@@ -672,26 +820,32 @@ impl StreamContext {
         }
 
         self.text_markdown_state.advance(&cleaned);
-        self.accumulated_text.push_str(&cleaned);
+        push_bounded(&mut self.accumulated_text, &cleaned, MAX_ACCUMULATOR_BYTES);
         if self.intercepting_search {
             return;
         }
         if let Some(idx) = tracker.close_thinking() {
-            let _ = tx.send(crate::sse::emit_block_stop(idx)).await;
+            send_tracked(self, tx, crate::sse::emit_block_stop(idx)).await;
         }
         self.thinking_block_bytes = 0;
         let (text_idx, text_is_new, _closed) = tracker.ensure_text();
         if text_is_new {
-            let _ = tx
-                .send(builder.content_block_start_at(text_idx, "text", None, None))
-                .await;
+            send_tracked(
+                self,
+                tx,
+                builder.content_block_start_at(text_idx, "text", None, None),
+            )
+            .await;
         }
 
         let mut remaining = cleaned.as_str();
         while !remaining.is_empty() {
+            if self.send_failed {
+                return;
+            }
             let (fragment, rest) = split_utf8_prefix(remaining, RENDER_DELTA_CHUNK_BYTES);
             remaining = rest;
-            let _ = tx.send(builder.text_delta_at(text_idx, fragment)).await;
+            send_tracked(self, tx, builder.text_delta_at(text_idx, fragment)).await;
             trace!(
                 block_index = text_idx,
                 bytes = fragment.len(),
@@ -813,11 +967,11 @@ impl StreamContext {
         }
 
         if let Some(idx) = tracker.close_thinking() {
-            let _ = tx.send(crate::sse::emit_block_stop(idx)).await;
+            send_tracked(self, tx, crate::sse::emit_block_stop(idx)).await;
         }
         self.thinking_block_bytes = 0;
         if let Some(idx) = tracker.close_text() {
-            let _ = tx.send(crate::sse::emit_block_stop(idx)).await;
+            send_tracked(self, tx, crate::sse::emit_block_stop(idx)).await;
         }
 
         let call_idx = tracker.next_index();
@@ -829,18 +983,24 @@ impl StreamContext {
                 .as_millis(),
             call_idx
         );
-        let _ = tx
-            .send(builder.content_block_start_at(
+        send_tracked(
+            self,
+            tx,
+            builder.content_block_start_at(
                 call_idx,
                 "tool_use",
                 Some(&tool_id),
                 Some(correct_name),
-            ))
-            .await;
-        let _ = tx
-            .send(builder.input_json_delta(call_idx, &arguments_json))
-            .await;
-        let _ = tx.send(crate::sse::emit_block_stop(call_idx)).await;
+            ),
+        )
+        .await;
+        send_tracked(
+            self,
+            tx,
+            builder.input_json_delta(call_idx, &arguments_json),
+        )
+        .await;
+        send_tracked(self, tx, crate::sse::emit_block_stop(call_idx)).await;
         self.has_emitted_tool_use = true;
         self.final_stop_reason = "tool_use".to_string();
     }
@@ -1004,7 +1164,26 @@ impl StreamContext {
                                 // A safe execution preamble followed by an
                                 // incomplete marker may be split across SSE
                                 // chunks. Keep both buffered until the candidate
-                                // becomes complete or EOF decides it is malformed.
+                                // becomes complete or EOF decides it is
+                                // malformed — but never past the same bound the
+                                // malformed-marker path enforces, or a hostile
+                                // upstream grows memory without limit and ends
+                                // in an unbounded replay at EOF.
+                                if self.text_stream_buffer.len() > MAX_COMPAT_TOOL_BUFFER_SIZE {
+                                    warn!(
+                                        bytes = self.text_stream_buffer.len(),
+                                        "Preamble-held marker candidate exceeded the buffer limit; discarding"
+                                    );
+                                    self.text_stream_buffer.clear();
+                                    self.discarding_text_compat = true;
+                                    self.emit_text_fragment(
+                                        "[Oversized tool request omitted]",
+                                        tracker,
+                                        tx,
+                                        builder,
+                                    )
+                                    .await;
+                                }
                                 return;
                             }
                         }
@@ -1030,6 +1209,23 @@ impl StreamContext {
                     parse_compat_tool_requests_with_consumed(&self.text_stream_buffer)
                 {
                     if self.defer_encoded_fallback_until_native_finalized {
+                        // Same parked-marker bound as the reasoning channel:
+                        // retention during native deferral must stay capped.
+                        if self.text_stream_buffer.len() > MAX_COMPAT_TOOL_BUFFER_SIZE {
+                            warn!(
+                                bytes = self.text_stream_buffer.len(),
+                                "Parked text compatibility marker exceeded the buffer limit during native deferral; discarding"
+                            );
+                            self.text_stream_buffer.clear();
+                            self.discarding_text_compat = true;
+                            self.emit_text_fragment(
+                                "[Oversized tool request omitted]",
+                                tracker,
+                                tx,
+                                builder,
+                            )
+                            .await;
+                        }
                         return;
                     }
                     let raw_candidate = self.text_stream_buffer.clone();
@@ -1117,24 +1313,57 @@ impl StreamContext {
             return;
         }
         for tc in tool_calls {
+            // Bound total retained bytes before creating or extending entries:
+            // a hostile upstream must not balloon memory through either huge
+            // fragments or millions of tiny indices before finalization.
+            let index_known = self.pending_tool_calls.contains_key(&tc.index);
+            if !index_known && self.pending_native_bytes >= MAX_NATIVE_PENDING_BYTES {
+                continue;
+            }
             let pending = self.pending_tool_calls.entry(tc.index).or_default();
             if let Some(id) = &tc.id {
-                merge_streamed_identifier(&mut pending.id, id);
+                merge_bounded_identifier(&mut pending.id, id, MAX_NATIVE_TOOL_IDENTIFIER_BYTES);
             }
             if let Some(name) = tc
                 .function
                 .as_ref()
                 .and_then(|function| function.name.as_ref())
             {
-                merge_streamed_identifier(&mut pending.name, name);
+                merge_bounded_identifier(&mut pending.name, name, MAX_NATIVE_TOOL_IDENTIFIER_BYTES);
             }
             if let Some(arguments) = tc
                 .function
                 .as_ref()
                 .and_then(|function| function.arguments.as_ref())
             {
-                merge_streamed_arguments(&mut pending.arguments, arguments);
+                let global_room = MAX_NATIVE_PENDING_BYTES
+                    .saturating_sub(self.pending_native_bytes)
+                    + pending.accounted;
+                let cap = MAX_NATIVE_TOOL_ARGUMENT_BYTES
+                    .min(pending.arguments.len().saturating_add(global_room));
+                let (added, truncated) =
+                    merge_bounded_arguments(&mut pending.arguments, arguments, cap);
+                if truncated {
+                    if !pending.truncated {
+                        warn!(
+                            tool_index = tc.index,
+                            retained = added,
+                            "Native tool-call arguments exceeded the retention bound; marking the call truncated"
+                        );
+                    }
+                    pending.truncated = true;
+                }
             }
+            // Reconcile the exact global total against this entry's charge so
+            // replacement-style snapshot merges adjust for shrunk entries.
+            let entry_bytes = pending.id.as_ref().map_or(0, |value| value.len())
+                + pending.name.as_ref().map_or(0, |value| value.len())
+                + pending.arguments.len();
+            self.pending_native_bytes = self
+                .pending_native_bytes
+                .saturating_sub(pending.accounted)
+                .saturating_add(entry_bytes);
+            pending.accounted = entry_bytes;
         }
     }
 
@@ -1171,6 +1400,18 @@ impl StreamContext {
                 }
                 return;
             };
+            if call.truncated {
+                warn!(
+                    tool = correct_name,
+                    source_index,
+                    "Native tool call hit the argument retention bound; treating as malformed"
+                );
+                if !self.has_emitted_tool_use {
+                    self.compat_retry_requested = true;
+                    self.final_stop_reason = "end_turn".to_string();
+                }
+                return;
+            }
             let Ok(arguments) = serde_json::from_str::<serde_json::Value>(&call.arguments) else {
                 warn!(
                     tool = correct_name,
@@ -1274,11 +1515,11 @@ impl StreamContext {
         }
 
         if let Some(idx) = tracker.close_thinking() {
-            let _ = tx.send(crate::sse::emit_block_stop(idx)).await;
+            send_tracked(self, tx, crate::sse::emit_block_stop(idx)).await;
         }
         self.thinking_block_bytes = 0;
         if let Some(idx) = tracker.close_text() {
-            let _ = tx.send(crate::sse::emit_block_stop(idx)).await;
+            send_tracked(self, tx, crate::sse::emit_block_stop(idx)).await;
         }
 
         if !resolved.is_empty() {
@@ -1298,20 +1539,21 @@ impl StreamContext {
             let args_json = serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".into());
             let (block_idx, _, _) =
                 tracker.open_tool_use(source_index, id.clone(), correct_name.clone());
-            let _ = tx
-                .send(builder.content_block_start_at(
+            send_tracked(
+                self,
+                tx,
+                builder.content_block_start_at(
                     block_idx,
                     "tool_use",
                     Some(&id),
                     Some(&correct_name),
-                ))
-                .await;
-            let _ = tx
-                .send(builder.input_json_delta(block_idx, &args_json))
-                .await;
+                ),
+            )
+            .await;
+            send_tracked(self, tx, builder.input_json_delta(block_idx, &args_json)).await;
             if let Some((closed_idx, _, _)) = tracker.close_tool_use(source_index) {
                 debug_assert_eq!(closed_idx, block_idx);
-                let _ = tx.send(crate::sse::emit_block_stop(closed_idx)).await;
+                send_tracked(self, tx, crate::sse::emit_block_stop(closed_idx)).await;
             }
             self.has_emitted_tool_use = true;
         }
@@ -1448,6 +1690,39 @@ impl StreamContext {
                     .await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+impl StreamContext {
+    /// Total native tool-call argument bytes currently retained (test only).
+    pub(super) fn test_native_arguments_bytes(&self) -> usize {
+        self.pending_tool_calls
+            .values()
+            .map(|call| call.arguments.len())
+            .sum()
+    }
+
+    /// Bytes retained in the rolling reasoning compatibility buffer (test only).
+    pub(super) fn test_reasoning_buffer_bytes(&self) -> usize {
+        self.reasoning_stream_buffer.len()
+    }
+
+    /// Bytes retained in the rolling text compatibility buffer (test only).
+    pub(super) fn test_text_buffer_bytes(&self) -> usize {
+        self.text_stream_buffer.len()
+    }
+
+    /// Whether reasoning-side compat parsing entered fail-closed discard mode
+    /// (test only).
+    pub(super) fn test_discarding_reasoning(&self) -> bool {
+        self.discarding_reasoning_compat
+    }
+
+    /// Whether text-side compat parsing entered fail-closed discard mode
+    /// (test only).
+    pub(super) fn test_discarding_text(&self) -> bool {
+        self.discarding_text_compat
     }
 }
 

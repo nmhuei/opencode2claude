@@ -15,9 +15,7 @@ pub const LABEL_GAP: usize = 3;
 pub const BRAND_SYMBOL: &str = "◆";
 
 pub fn terminal_width() -> usize {
-    std::env::var("COLUMNS")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
+    crate::config::terminal_columns()
         .filter(|width| (MIN_TERMINAL_WIDTH..=MAX_TERMINAL_WIDTH).contains(width))
         .unwrap_or(DEFAULT_TERMINAL_WIDTH)
 }

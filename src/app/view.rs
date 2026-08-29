@@ -413,10 +413,7 @@ pub(super) async fn cmd_print_status(
     config: &BridgeConfig,
 ) {
     if fmt == OutputFormat::Quiet {
-        match status {
-            SupervisorStatus::Running { .. } => println!("running"),
-            SupervisorStatus::Stopped => println!("stopped"),
-        }
+        println!("{}", status.quiet_label());
         return;
     }
 
@@ -448,6 +445,13 @@ pub(super) async fn cmd_print_status(
                 "●".green().bold(),
                 headline
             );
+            if !managed {
+                print_warning(&format!(
+                    "Untracked gateway: no supervisor PID file matches this instance; \
+                     the health probe answered on port {port}. This may be a different \
+                     bridge on the configured port."
+                ));
+            }
 
             print_section("Connection");
             println!(
@@ -683,7 +687,10 @@ impl ServerStatusInfo {
                 message: if managed {
                     None
                 } else {
-                    Some("running but not tracked by supervisor PID file".to_string())
+                    Some(format!(
+                        "running but not tracked by supervisor PID file \
+                         (health probe answered on port {port})"
+                    ))
                 },
             },
             Ok(SupervisorStatus::Stopped) => Self {
@@ -844,10 +851,7 @@ pub(super) fn cmd_print_config() {
             ),
             (
                 "Retries",
-                format!(
-                    "{} network · {} provider",
-                    config.retry.max_network_attempts, config.retry.max_provider_attempts
-                ),
+                format!("{} network attempts", config.retry.max_network_attempts),
             ),
         ])
     );

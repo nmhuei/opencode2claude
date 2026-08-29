@@ -191,6 +191,13 @@ pub fn map_anthropic_to_openai_with_policy(
                                 if let Some(thinking) =
                                     block.thinking.as_ref().or(block.text.as_ref())
                                 {
+                                    // Newline separator: fragments must never
+                                    // fuse across block boundaries into marker
+                                    // text (e.g. `<｜DSML｜` + `tool_calls>`)
+                                    // inside replayed reasoning content.
+                                    if !reasoning_content.is_empty() {
+                                        reasoning_content.push('\n');
+                                    }
                                     reasoning_content.push_str(thinking);
                                 }
                             }
@@ -219,6 +226,16 @@ pub fn map_anthropic_to_openai_with_policy(
                             }
                             _ => {}
                         }
+                    }
+                    // An assistant turn whose blocks were all unconvertible
+                    // (e.g. `redacted_thinking`) must not reach upstream as a
+                    // content-less message: OpenAI-compatible providers reject
+                    // it with an opaque 400 that fails the whole conversation.
+                    let assistant_turn_has_payload = !assistant_text.is_empty()
+                        || !reasoning_content.is_empty()
+                        || !tool_calls.is_empty();
+                    if !assistant_turn_has_payload {
+                        continue;
                     }
                     openai_messages.push(OpenAiMessage {
                         role: "assistant".to_string(),

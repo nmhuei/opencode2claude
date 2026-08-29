@@ -19,36 +19,29 @@ opencode2api uses a two-tier proxy pool:
 
 ## Configuration
 
-```
-BRIDGE_PRIMARY_PROXIES=socks5://127.0.0.1:40001,socks5://127.0.0.1:40002,socks5://127.0.0.1:40003
-BRIDGE_WARM_STANDBY_PROXIES=socks5://127.0.0.1:40004,socks5://127.0.0.1:40005
+Primary and warm-standby pools are resolved from configuration rather than a fixed node count:
+
+```text
+BRIDGE_PRIMARY_PROXIES=socks5h://127.0.0.1:40001,socks5h://127.0.0.1:40002
+BRIDGE_WARM_STANDBY_PROXIES=socks5h://127.0.0.1:40004
+BRIDGE_ACTIVE_PROXY_COUNT=2
 ```
 
-The proxy pool is fixed at **3 primary** ports (40001–40003) and **2 warm-standby** ports (40004–40005). These sizes are hardcoded in `proxy_pool.rs` and are not user-configurable. The routing policy (`primary-with-warm-standby`) is also hardcoded.
+`BRIDGE_ACTIVE_PROXY_COUNT` limits how many configured primaries are in the normal serving set; extra configured primaries remain present but routing-disabled. Protected role is still identified by the reserved standby ports (40004–40005) for lifecycle safety.
 
 ## Routing Policy
 
-### Primary-First, Rendezvous Hashing
+### Primary-first round robin with burst coalescing
 
-1. Each API key (routing key) is hashed via Rendezvous (highest random weight) to a deterministic primary proxy index
-2. Normal traffic always uses the assigned primary proxy while it is healthy
-3. If the selected primary is unhealthy/cooldown/dead, traffic fails over to WarmStandby
-4. **Affected-agent-only remap**: failure of one primary does NOT remap agents assigned to healthy primaries
+1. Fresh normal traffic is selected only from routing-enabled, healthy, closed-circuit, non-duplicate, non-rate-limited, non-draining primaries with fresh identity when identity verification is required.
+2. The pool advances across eligible primaries with a round-robin counter while concurrent bursts may reuse the same active primary to avoid unnecessary churn.
+3. Warm standbys are considered only after there is no eligible primary; they remain protected from destructive lifecycle operations.
+4. A draining node receives no new normal or half-open probe route, but existing request leases are allowed to finish.
+5. Hybrid mode may fall back to direct only for startup/transport availability according to the hybrid egress policy; strict proxy mode remains fail closed.
 
-### Selection Flow
+### Operator drain
 
-```
-request → hash(key) → rendezvous primary
-  ├─ primary healthy? → return primary
-  └─ primary unhealthy? → rendezvous warm-standby
-     ├─ warm-standby healthy? → return warm-standby
-     └─ warm-standby unhealthy? → degraded (any available proxy)
-```
-
-### Sticky Determinism
-
-- Same API key → same primary proxy every time (deterministic via Rendezvous hashing)
-- Proxy URLs are stable — changing the pool requires configuration change (which re-hashes)
+Authenticated management/dashboard controls can drain a managed primary before maintenance. Drain is orthogonal to health: it does not mark the node unhealthy and does not destroy or restart the container. Once active leases reach zero, the operator may safely restart/rotate it. Undrain only removes the routing gate; all health/circuit/identity checks still apply.
 
 ## Cooldown & Recovery Policy
 
@@ -87,8 +80,8 @@ After cooldown, a proxy recovers via:
 
 - Ports 40004–40005 are protected infrastructure — `is_protected_proxy_port()` guards all destructive Docker operations
 - `ensure_not_protected(port)` returns an error for ports 40004–40005, preventing restart/purge/stop
-- WarmStandby proxies are excluded from normal routing: `select_proxy_for_key()` never returns a WarmStandby
-  proxy unless the rendezvous-assigned primary is unhealthy
+- WarmStandby proxies are excluded from normal routing while any eligible primary remains; they are failover-only and protected from destructive mutation.
+- Draining managed primaries are excluded from fresh normal and probe routing until explicitly undrained or a successful managed recovery clears the drain.
 - Deprecated static port 40010 is removed
 
 ## Docker Proxy Setup
@@ -105,19 +98,8 @@ source start.sh
 - Verified in parallel after startup (15 attempts × 2s each)
 - Failed proxies are retried automatically (restart container, re-verify)
 
-## Health Check Integration
+## Health and management telemetry
 
-The `/health` endpoint exposes proxy pool telemetry:
+Public `/health` remains intentionally minimal. Detailed proxy topology, drain state, active leases, identity freshness, duplicate ownership and recovery state are available from authenticated dashboard/management surfaces (`/api/dashboard/proxies`, `/api/v1/proxies`) and readiness/status endpoints expose only the bounded egress evidence needed by operators.
 
-```json
-{
-  "proxy_pool": {
-    "policy": "primary-with-warm-standby",
-    "primary": { "ports": [40001,40002,40003], "total": 3, "healthy": 3, ... },
-    "warm_standby": { "ports": [40004,40005], "total": 2, "healthy": 2, "protected": true },
-    "nodes": [...]
-  }
-}
-```
-
-See [health-status.md](health-status.md) for full schema and telemetry policy.
+See [health-status.md](health-status.md) and [management-api.md](management-api.md) for the current contracts.

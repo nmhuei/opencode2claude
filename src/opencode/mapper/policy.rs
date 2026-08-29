@@ -1,5 +1,6 @@
 //! Model- and request-shape policy for upstream request mapping.
 
+use super::capabilities::{model_capabilities, ModelFamily, StructuredOutputBehavior};
 use super::helpers::extract_system_prompt;
 use crate::handlers::{ContentVal, MessagesRequest};
 use crate::opencode::types::OpenAiThinkingConfig;
@@ -8,22 +9,18 @@ use serde_json::{json, Value};
 pub(super) const DEFAULT_MIN_REASONING_STREAM_TOKENS: u32 = 1024;
 
 pub fn is_deepseek_v4_model(model: &str) -> bool {
-    let name = model.to_ascii_lowercase();
-    name.contains("deepseek-v4-flash") || name.contains("deepseek-v4-pro")
+    matches!(
+        model_capabilities(model).family,
+        ModelFamily::DeepSeekV4 | ModelFamily::DeepSeekV4FlashFree
+    )
 }
 
 pub fn is_deepseek_v4_flash_free_model(model: &str) -> bool {
-    model
-        .to_ascii_lowercase()
-        .contains("deepseek-v4-flash-free")
+    model_capabilities(model).family == ModelFamily::DeepSeekV4FlashFree
 }
 
 pub(super) fn is_reasoning_heavy_model(model: &str) -> bool {
-    let name = model.to_ascii_lowercase();
-    is_deepseek_v4_model(&name)
-        || (name.contains("deepseek") && (name.contains("r1") || name.contains("reasoner")))
-        || name.contains("reasoning")
-        || name.contains("-r1")
+    model_capabilities(model).reasoning_heavy()
 }
 
 pub fn is_compact_request(payload: &MessagesRequest) -> bool {
@@ -131,19 +128,19 @@ pub(super) fn normalize_response_format(
     let format = payload.output_config.as_ref()?.format.as_ref()?;
     let format_type = format.get("type").and_then(Value::as_str)?;
 
-    // The free DFLASH backend rejects every response_format variant as
-    // grammar-constrained decoding. The schema cannot be forwarded upstream;
-    // [`dropped_schema_system_instruction`] preserves it in the system prompt
-    // instead.
-    if is_deepseek_v4_flash_free_model(mapped_model) {
+    let capabilities = model_capabilities(mapped_model);
+    // Free DFLASH cannot receive its schema in response_format; the companion
+    // prompt helper preserves it instead. Other DeepSeek V4 variants use JSON
+    // object mode for schema-shaped requests.
+    if capabilities.structured_output == StructuredOutputBehavior::PromptSchema {
         return None;
     }
 
     match format_type {
         "json_object" => Some(json!({"type": "json_object"})),
-        "json_schema" if is_deepseek_v4_model(mapped_model) => {
-            // DeepSeek Chat Completions documents JSON object mode, while Claude's
-            // structured-output request carries a JSON schema.
+        "json_schema"
+            if capabilities.structured_output == StructuredOutputBehavior::JsonObjectOnly =>
+        {
             Some(json!({"type": "json_object"}))
         }
         "json_schema" => {

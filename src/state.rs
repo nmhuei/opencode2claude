@@ -5,6 +5,7 @@ use crate::audit::AuditLog;
 use crate::config::BridgeConfig;
 use crate::dashboard::DashboardEvent;
 use crate::docker::{ContainerRuntime, DockerCliRuntime};
+use crate::handlers::ShellDelegations;
 use crate::history::HistoryStore;
 use crate::infrastructure::file_store::{AtomicFileStore, FileStore};
 use crate::infrastructure::warp::{DisabledWarpController, WarpController};
@@ -55,11 +56,21 @@ pub struct AppState {
     pub audit_log: Arc<AuditLog>,
     /// Persistent request, prompt, reasoning and response history.
     pub history: Arc<HistoryStore>,
+    /// Single-use tickets binding echoed local-shell results to bridge-issued delegations.
+    pub shell_delegations: Arc<ShellDelegations>,
     /// Broadcast channel for dashboard SSE events.
     pub event_tx: broadcast::Sender<DashboardEvent>,
     /// Unix timestamp (seconds) when the server started.
     pub started_at: Arc<AtomicU64>,
 }
+
+/// Upper bound on the TCP/TLS connect phase of the shared HTTP client.
+///
+/// The client backs direct-route upstream traffic, daemon health checks and
+/// the search fallback chain. Without this bound a blackholed host holds each
+/// task until the 600s total timeout expires, piling hung tasks against the
+/// rate limiter; the total timeout alone must not be the connect guard.
+pub(crate) const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl AppState {
     /// Create a new AppState from the given configuration.
@@ -110,6 +121,7 @@ impl AppState {
         let config = Arc::new(config);
         let http_client = Client::builder()
             .timeout(Duration::from_secs(600))
+            .connect_timeout(HTTP_CONNECT_TIMEOUT)
             .pool_max_idle_per_host(10)
             .build()
             .expect("Failed to create HTTP client");
@@ -142,18 +154,15 @@ impl AppState {
             all_urls.extend(urls.iter().cloned());
         }
 
-        let proxy_subsystem = Arc::new(RwLock::new(match config.egress.mode {
-            crate::config::EgressMode::Direct => ProxySubsystemStatus::disabled(),
-            crate::config::EgressMode::Proxy | crate::config::EgressMode::Hybrid => {
-                ProxySubsystemStatus::starting()
-            }
-        }));
-
-        let proxy_pool = if matches!(
+        let egress_uses_pool = matches!(
             config.egress.mode,
             crate::config::EgressMode::Proxy | crate::config::EgressMode::Hybrid
-        ) && !all_urls.is_empty()
-        {
+        );
+
+        // Whether a usable pool actually materialized. Unparseable URLs are
+        // silently dropped by the pool constructor, so this is judged on the
+        // resulting pool rather than the raw URL list.
+        let (proxy_pool, proxy_subsystem) = if egress_uses_pool && !all_urls.is_empty() {
             let mut pool = ProxyPool::new_with_egress_policy(
                 &all_urls,
                 config.egress.active_proxy_count,
@@ -161,9 +170,15 @@ impl AppState {
                 config.egress.identity_ttl,
             );
             pool.set_max_restart_attempts(config.egress.max_restart_attempts);
-            // Spawn background tasks for pool management
+
             if !pool.proxies.is_empty() {
                 let pool_arc = Arc::new(RwLock::new(pool));
+
+                // Subsystem lifecycle starts as Starting only when a
+                // reconciler will actually run; workers below own it from
+                // here on.
+                let proxy_subsystem = Arc::new(RwLock::new(ProxySubsystemStatus::starting()));
+
                 let health_pool = pool_arc.clone();
                 let health_interval = config.egress.health_interval;
                 workers.spawn_critical("proxy-health", move |context| async move {
@@ -207,7 +222,11 @@ impl AppState {
                     info!("Proxy pool exit-identity monitor registered.");
                 }
 
-                if config.egress.mode == crate::config::EgressMode::Hybrid {
+                // Every proxy-backed egress mode (pure proxy and hybrid)
+                // needs the reconciler driving ProxySubsystemStatus; without
+                // it the snapshot stays Starting forever and readiness
+                // reporters would have to guess from pool heuristics.
+                if egress_uses_pool {
                     let reconcile_pool = pool_arc.clone();
                     let reconcile_subsystem = proxy_subsystem.clone();
                     let reconcile_runtime = container_runtime.clone();
@@ -226,15 +245,25 @@ impl AppState {
                         )
                         .await
                     });
-                    info!("Hybrid proxy reconciler registered.");
+                    info!("Proxy subsystem reconciler registered.");
                 }
 
-                pool_arc
+                (pool_arc, proxy_subsystem)
             } else {
-                Arc::new(RwLock::new(pool))
+                tracing::warn!(
+                    configured_urls = all_urls.len(),
+                    "no configured proxy URL could be loaded; proxy egress starts disabled"
+                );
+                (
+                    Arc::new(RwLock::new(pool)),
+                    Arc::new(RwLock::new(ProxySubsystemStatus::disabled())),
+                )
             }
         } else {
-            Arc::new(RwLock::new(ProxyPool::default()))
+            (
+                Arc::new(RwLock::new(ProxyPool::default())),
+                Arc::new(RwLock::new(ProxySubsystemStatus::disabled())),
+            )
         };
 
         // Broadcast channel for dashboard SSE (capacity 256)
@@ -263,6 +292,7 @@ impl AppState {
             metrics,
             audit_log,
             history,
+            shell_delegations: Arc::new(ShellDelegations::new()),
             event_tx,
             started_at,
         }
@@ -386,6 +416,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn proxy_mode_drives_subsystem_lifecycle_via_reconcile_worker() {
+        // Pure-proxy deployments must not leave ProxySubsystemStatus stuck in
+        // Starting forever: the same reconciler that drives the lifecycle in
+        // hybrid mode has to run here too. Identity endpoints are cleared so
+        // no worker ever probes an external service from this test.
+        let mut config = BridgeConfig::default();
+        config.egress.mode = crate::config::EgressMode::Proxy;
+        config.primary_proxies = Some(vec!["socks5h://127.0.0.1:40001".to_string()]);
+        config.warm_standby_proxies = Some(vec!["socks5h://127.0.0.1:40004".to_string()]);
+        config.egress.active_proxy_count = 1;
+        config.egress.identity_endpoints = Vec::new();
+
+        let state = AppState::new_with_container_runtime(config, Arc::new(FailingRuntime));
+        assert_eq!(state.proxy_pool.read().await.proxies.len(), 2);
+        assert!(!state.proxy_subsystem.read().await.is_ready());
+
+        let names = state
+            .workers
+            .snapshot()
+            .workers
+            .into_iter()
+            .map(|worker| worker.name)
+            .collect::<std::collections::HashSet<_>>();
+        for expected in ["proxy-health", "proxy-restart", "proxy-reconcile"] {
+            assert!(names.contains(expected), "missing worker {expected}");
+        }
+
+        // With the container runtime unavailable the very first reconcile
+        // cycle must degrade the subsystem instead of leaving it Starting.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if state.proxy_subsystem.read().await.snapshot().phase
+                == crate::proxy_pool::ProxySubsystemPhase::Degraded
+            {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "pure-proxy subsystem stayed out of the reconciled lifecycle"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let snapshot = state.proxy_subsystem.read().await.snapshot();
+        assert_eq!(
+            snapshot.phase,
+            crate::proxy_pool::ProxySubsystemPhase::Degraded
+        );
+        assert!(snapshot.last_error.is_some());
+
+        state
+            .workers
+            .shutdown(Duration::from_millis(500))
+            .await
+            .expect("reconcile worker must stay cancellable in pure-proxy mode");
+    }
+
+    #[tokio::test]
     async fn direct_mode_does_not_register_proxy_pool_or_workers() {
         let mut config = BridgeConfig::default();
         config.egress.mode = crate::config::EgressMode::Direct;
@@ -404,6 +491,66 @@ mod tests {
                 .iter()
                 .all(|worker| !worker.name.starts_with("proxy-")),
             "direct mode must not register proxy health/restart/identity workers"
+        );
+    }
+
+    #[tokio::test]
+    async fn hybrid_mode_without_proxies_reports_disabled_subsystem() {
+        // The shipped default posture is Hybrid egress with no proxy URLs at
+        // all. No pool exists and no reconciler will ever run, so advertising
+        // "Starting" forever would be a lie; the subsystem must report
+        // Disabled exactly like Direct mode does.
+        let config = BridgeConfig::default();
+        assert_eq!(config.egress.mode, crate::config::EgressMode::Hybrid);
+        assert!(config.primary_proxies.is_none());
+
+        let state = AppState::new(config);
+        let snapshot = state.proxy_subsystem.read().await.snapshot();
+        assert_eq!(
+            snapshot.phase,
+            crate::proxy_pool::ProxySubsystemPhase::Disabled,
+            "hybrid mode with an empty proxy pool must not stay in Starting forever"
+        );
+    }
+
+    #[tokio::test]
+    async fn hybrid_mode_with_only_unparseable_proxies_disables_subsystem() {
+        // Proxy URLs that fail to parse are silently dropped by the pool
+        // constructor. The spawn gate must judge on the resulting pool, not
+        // on the raw URL list, or the subsystem sticks in Starting while no
+        // worker ever runs.
+        let mut config = BridgeConfig::default();
+        config.egress.mode = crate::config::EgressMode::Hybrid;
+        config.primary_proxies = Some(vec!["this is not a proxy url".to_string()]);
+
+        let state = AppState::new_with_container_runtime(config, Arc::new(FailingRuntime));
+        assert!(state.proxy_pool.read().await.proxies.is_empty());
+        let snapshot = state.proxy_subsystem.read().await.snapshot();
+        assert_eq!(
+            snapshot.phase,
+            crate::proxy_pool::ProxySubsystemPhase::Disabled,
+            "a pool that parsed to zero proxies must disable the subsystem instead of sticking in Starting"
+        );
+        let workers = state.workers.snapshot();
+        assert!(
+            workers
+                .workers
+                .iter()
+                .all(|worker| !worker.name.starts_with("proxy-")),
+            "no proxy worker may register for a pool with zero usable proxies"
+        );
+    }
+
+    #[test]
+    fn http_client_bounds_connect_phase() {
+        // The shared client backs direct-route upstream traffic, daemon
+        // health checks and the search chain. A blackholed TCP connect must
+        // be cut by the connect timeout long before the 600s total timeout,
+        // or hung tasks pile up against the rate limiter.
+        assert_eq!(
+            HTTP_CONNECT_TIMEOUT,
+            Duration::from_secs(10),
+            "shared HTTP client connect phase must stay bounded"
         );
     }
 

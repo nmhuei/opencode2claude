@@ -32,15 +32,42 @@ BINARIES=(opencode2api opencode2api-serve)
 ALIASES=(oc2api o2a)
 STALE_BINARIES=(opencode2claude oc2api o2a)
 
+RELEASE_DIR="${CARGO_TARGET_DIR:-target}/release"
+RELEASE_DIR="${RELEASE_DIR%/}"
+
+# ── Binary freshness guard ──
+require_fresh_binary() {
+    local bin="$1"
+    local bin_path="${RELEASE_DIR}/${bin}"
+    if [ ! -x "$bin_path" ]; then
+        err "Missing freshly built binary: $bin_path"
+        err "CARGO_TARGET_DIR='${CARGO_TARGET_DIR:-<unset>}' may redirect cargo artifacts away from ./target."
+        err "Run 'cargo build --release' here and confirm $bin was updated, then retry."
+        exit 1
+    fi
+    local newer=""
+    newer="$(find src -type f -newer "$bin_path" -print -quit)"
+    if [ -n "$newer" ]; then
+        err "Sources are newer than binary: $newer is newer than $bin_path"
+        err "CARGO_TARGET_DIR='${CARGO_TARGET_DIR:-<unset>}' may redirect cargo artifacts away from ./target."
+        err "Run 'cargo build --release' here to refresh the binary, then retry."
+        exit 1
+    fi
+}
+
+for bin in "${BINARIES[@]}"; do
+    require_fresh_binary "$bin"
+done
+
 # Cargo does not delete old binary artifacts after target names are removed.
 # If target/release is in PATH, stale artifacts can shadow the installed symlinks.
 for stale in "${STALE_BINARIES[@]}"; do
-    rm -f "target/release/${stale}" "target/debug/${stale}"
+    rm -f "${RELEASE_DIR}/${stale}"
 done
 
 for bin in "${BINARIES[@]}"; do
-    if [ ! -f "target/release/${bin}" ]; then
-        err "Compilation failed. Target binary not found: ${bin}"
+    if [ ! -f "${RELEASE_DIR}/${bin}" ]; then
+        err "Compilation failed. Target binary not found: ${RELEASE_DIR}/${bin}"
         exit 1
     fi
 done
@@ -68,8 +95,7 @@ mkdir -p "$INSTALL_DIR"
 if [ "$USE_SUDO" = true ]; then
     if command -v sudo >/dev/null 2>&1; then
         for bin in "${BINARIES[@]}"; do
-            sudo cp "target/release/${bin}" "$INSTALL_DIR/"
-            sudo chmod +x "$INSTALL_DIR/${bin}"
+            sudo install -m 755 "${RELEASE_DIR}/${bin}" "$INSTALL_DIR/"
         done
         for alias in "${ALIASES[@]}"; do
             sudo rm -f "$INSTALL_DIR/${alias}"
@@ -81,8 +107,7 @@ if [ "$USE_SUDO" = true ]; then
     fi
 else
     for bin in "${BINARIES[@]}"; do
-        cp "target/release/${bin}" "$INSTALL_DIR/"
-        chmod +x "$INSTALL_DIR/${bin}"
+        install -m 755 "${RELEASE_DIR}/${bin}" "$INSTALL_DIR/"
     done
     for alias in "${ALIASES[@]}"; do
         rm -f "$INSTALL_DIR/${alias}"

@@ -157,4 +157,24 @@ mod tests {
     fn empty_fixture_returns_no_structured_results() {
         assert!(parse_html("<html>empty</html>", &SearchPolicy::default()).is_empty());
     }
+
+    #[test]
+    fn hostile_html_never_panics_or_loops() {
+        let policy = SearchPolicy::default();
+        let padded_multibyte = format!("ế{}ế", "result__body".repeat(50));
+        let hostile = [
+            "result__body",
+            "result__body result__body",
+            "<a class=\"result__a\"",       // unterminated anchor
+            "<a class=\"result__a\" href=", // href without value
+            "<div class=\"result__body\"><a class=\"result__a\" href=\"x\">tiếng",
+            "result__snippet</a>",
+            "<a class=\"result__snippet\">no close",
+            padded_multibyte.as_str(),
+        ];
+        for input in hostile {
+            let results = parse_html(input, &policy);
+            assert!(results.len() <= policy.max_results);
+        }
+    }
 }

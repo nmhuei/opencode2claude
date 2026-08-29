@@ -1,6 +1,7 @@
 use super::policy::{
-    bounded_backoff, build_model_retry_list, classify_status, client_retry_after,
-    is_rate_limit_body, parse_retry_after, FailureClass,
+    bounded_backoff, build_model_retry_list, clamp_provider_retry_after, classify_status,
+    client_retry_after, is_rate_limit_body, parse_retry_after, FailureClass,
+    MAX_RESPECTED_RETRY_AFTER,
 };
 use crate::config::RetryConfig;
 use std::time::{Duration, SystemTime};
@@ -92,4 +93,39 @@ fn backoff_is_bounded_and_deterministic() {
     let first = bounded_backoff(&retry, 10, 3);
     assert_eq!(first, bounded_backoff(&retry, 10, 3));
     assert!(first <= Duration::from_secs(5));
+}
+
+#[test]
+fn backoff_jitter_respects_max_backoff_cap() {
+    let mut retry = retry_config();
+    retry.base_backoff = Duration::from_secs(1);
+    retry.max_backoff = Duration::from_secs(4);
+    for attempt in 0..=24_u32 {
+        for seed in 0..64_u64 {
+            let delay = bounded_backoff(&retry, attempt, seed);
+            assert!(
+                delay <= retry.max_backoff,
+                "attempt {attempt} seed {seed} produced {delay:?} > max {:?}",
+                retry.max_backoff
+            );
+        }
+    }
+
+    // Below-cap attempts must still vary with the jitter seed.
+    assert_ne!(bounded_backoff(&retry, 0, 0), bounded_backoff(&retry, 0, 1));
+}
+
+#[test]
+fn provider_retry_after_is_clamped_for_instant_arithmetic_safety() {
+    // A hostile or broken upstream may send an arbitrary Retry-After. The raw
+    // value must never reach `Instant + duration`, which panics on overflow.
+    assert_eq!(
+        clamp_provider_retry_after(Duration::from_secs(u64::MAX)),
+        MAX_RESPECTED_RETRY_AFTER
+    );
+    // Realistic multi-hour quota windows pass through untouched.
+    assert_eq!(
+        clamp_provider_retry_after(Duration::from_secs(47_897)),
+        Duration::from_secs(47_897)
+    );
 }

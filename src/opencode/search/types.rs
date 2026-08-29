@@ -99,6 +99,7 @@ pub enum SearchErrorKind {
     ResponseTooLarge,
     MalformedResponse,
     NoResults,
+    BudgetExhausted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -143,6 +144,7 @@ impl fmt::Display for SearchErrorKind {
             Self::ResponseTooLarge => "response too large",
             Self::MalformedResponse => "malformed response",
             Self::NoResults => "no results",
+            Self::BudgetExhausted => "budget exhausted",
         })
     }
 }
@@ -155,6 +157,12 @@ pub struct SearchPolicy {
     pub max_snippet_chars: usize,
     pub max_response_bytes: usize,
     pub request_timeout: Duration,
+    /// Wall-clock budget for one full fallback-chain walk. Caps the serial
+    /// worst case (providers x request_timeout); per-provider timeouts stay
+    /// independent. Providers skipped by the deadline are left unrecorded in
+    /// metrics; an in-flight provider cut at the deadline fails with
+    /// `SearchErrorKind::BudgetExhausted`.
+    pub chain_budget: Duration,
     pub allow_private_searxng: bool,
 }
 
@@ -165,6 +173,9 @@ impl Default for SearchPolicy {
             max_snippet_chars: 500,
             max_response_bytes: 1024 * 1024,
             request_timeout: Duration::from_secs(15),
+            // Above a single default provider timeout (15s) but far below the
+            // unbounded serial walk (~6 x 15s).
+            chain_budget: Duration::from_secs(25),
             allow_private_searxng: false,
         }
     }

@@ -49,7 +49,6 @@ const KNOWN_ROOT_KEYS: &[&str] = &[
     "model_fallbacks",
     "enable_default_fallbacks",
     "max_network_attempts",
-    "max_provider_attempts",
     "retry_base_backoff_ms",
     "retry_max_backoff_ms",
     "egress_mode",

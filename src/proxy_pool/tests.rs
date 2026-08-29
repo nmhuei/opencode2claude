@@ -373,6 +373,58 @@ fn snapshot_exposes_independent_state_dimensions() {
 }
 
 #[test]
+fn draining_primary_stops_new_routes_while_existing_lease_finishes() {
+    let mut pool = ProxyPool::new(&make_test_urls(2));
+    let lease = pool.begin_lease(0).expect("existing request lease");
+
+    assert_eq!(pool.begin_drain(0).expect("begin drain"), 1);
+    assert!(pool.proxies[0].draining);
+    assert_eq!(pool.proxies[0].active_request_count(), 1);
+
+    let (_, _, selected) = pool
+        .select_proxy_for_key("fresh-request")
+        .expect("second primary remains routable");
+    assert_eq!(selected, 1, "draining primary must receive no fresh route");
+
+    assert!(
+        pool.begin_manual_restart(0).is_err(),
+        "restart remains lease-safe until the old request finishes"
+    );
+    drop(lease);
+    pool.begin_manual_restart(0)
+        .expect("drained zero-lease node can restart");
+    pool.mark_healthy(0);
+    assert!(!pool.proxies[0].draining, "successful recovery ends drain");
+}
+
+#[test]
+fn draining_only_route_is_neither_ready_nor_pending() {
+    let mut pool = ProxyPool::new(&make_test_urls(1));
+    assert!(pool.egress_ready(0, std::time::Duration::from_secs(300)));
+    pool.begin_drain(0).expect("drain primary");
+    assert!(!pool.egress_ready(0, std::time::Duration::from_secs(300)));
+    assert!(
+        !pool.route_availability_pending(),
+        "operator drain is intentional unavailability, not a route that requests should wait on"
+    );
+}
+
+#[test]
+fn drain_cancel_is_non_destructive_and_protected_nodes_reject_drain() {
+    let mut pool = five_node_pool();
+    let health_before = pool.proxies[0].health;
+    let circuit_before = pool.proxies[0].circuit;
+    pool.begin_drain(0).expect("managed primary drain");
+    pool.cancel_drain(0).expect("cancel managed drain");
+    assert!(!pool.proxies[0].draining);
+    assert_eq!(pool.proxies[0].health, health_before);
+    assert_eq!(pool.proxies[0].circuit, circuit_before);
+
+    let error = pool.begin_drain(3).expect_err("standby is protected");
+    assert!(error.contains("protected"));
+}
+
+#[test]
 fn restart_queue_drain_is_atomic() {
     let mut pool = ProxyPool::new(&make_test_urls(3));
     pool.restart_queue.extend([0, 1]);
@@ -399,6 +451,63 @@ fn helper_contracts_are_stable() {
     assert!(is_managed_proxy_port(40001));
     assert!(is_protected_proxy_port(40004));
     assert!(ensure_not_protected(40004).is_err());
+}
+
+#[test]
+fn warm_standby_stays_idle_while_another_primary_remains_routable() {
+    let mut pool = five_node_pool();
+    // Node 0 suffers a hard transport failure (open circuit); node 1 stays
+    // healthy. Verified standbys sit ready but must not receive traffic while
+    // any routable primary exists.
+    pool.proxies[0].health = HealthState::Unhealthy;
+    pool.proxies[0].circuit = CircuitState::Open {
+        until: Instant::now() + Duration::from_secs(300),
+    };
+    for index in [3_usize, 4] {
+        pool.proxies[index].exit_identity = Some(identity("1.1.1.1"));
+    }
+
+    for _ in 0..12 {
+        let selected = pool
+            .select_proxy_for_key("failover-scope")
+            .expect("a healthy primary remains routable")
+            .2;
+        assert_ne!(selected, 0, "failed primary must be excluded");
+        assert_eq!(
+            pool.proxies[selected].role,
+            EgressRole::Primary,
+            "warm standby must stay idle while a primary is routable"
+        );
+    }
+}
+
+#[test]
+fn transport_failure_during_half_open_recovery_discards_progress_and_reopens() {
+    let mut pool = ProxyPool::new(&make_test_urls(1));
+    pool.proxies[0].circuit = CircuitState::Open {
+        until: Instant::now() - Duration::from_secs(1),
+    };
+    pool.proxies[0].cooldown_until = Some(Instant::now() - Duration::from_secs(1));
+    pool.proxies[0].health = HealthState::Degraded;
+    assert_eq!(pool.recover_expired_cooldowns(), 1);
+    assert_eq!(pool.proxies[0].circuit, CircuitState::HalfOpen);
+
+    // One probe success is not enough to close the circuit...
+    pool.record_success(0);
+    assert_eq!(pool.proxies[0].consecutive_successes, 1);
+    assert_eq!(pool.proxies[0].circuit, CircuitState::HalfOpen);
+
+    // ...and a new transport failure resets recovery progress per node.
+    pool.record_failure(0);
+    assert_eq!(pool.proxies[0].consecutive_successes, 0);
+    assert_eq!(pool.proxies[0].consecutive_failures, 1);
+    assert_eq!(pool.proxies[0].health, HealthState::Degraded);
+
+    // Reaching the threshold again reopens the circuit and requeues restart.
+    pool.record_failure(0);
+    assert_eq!(pool.proxies[0].health, HealthState::Unhealthy);
+    assert!(matches!(pool.proxies[0].circuit, CircuitState::Open { .. }));
+    assert_eq!(pool.restart_queue, vec![0]);
 }
 
 #[test]

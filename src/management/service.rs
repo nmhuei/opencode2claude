@@ -2,7 +2,10 @@
 
 use crate::dashboard::DashboardEvent;
 use crate::docker::ProxySpec;
-use crate::proxy_pool::{is_managed_proxy_port, is_protected_proxy_port, ProxyPoolStats};
+use crate::proxy_pool::{
+    is_managed_proxy_port, is_protected_proxy_port, ProxyPool, ProxyPoolStats,
+    ProxySubsystemSnapshot,
+};
 use crate::state::AppState;
 use axum::http::StatusCode;
 use serde::Serialize;
@@ -34,9 +37,28 @@ pub struct SafeConfigSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct EgressOperationalSnapshot {
+    pub mode: &'static str,
+    pub gateway_ready: bool,
+    pub active_route: &'static str,
+    pub minimum_unique_exit_ips: usize,
+    pub unique_verified_exits: usize,
+    pub proxy_subsystem: ProxySubsystemSnapshot,
+    pub proxy_pool: ProxyPoolStats,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ProxyRestartResult {
     pub port: u16,
     pub action: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProxyDrainResult {
+    pub port: u16,
+    pub action: &'static str,
+    pub draining: bool,
+    pub active_requests: usize,
 }
 
 #[derive(Debug)]
@@ -68,6 +90,46 @@ pub async fn proxy_snapshot(state: &AppState) -> ProxyPoolStats {
     let mut pool = state.proxy_pool.write().await;
     pool.recover_expired_cooldowns();
     pool.snapshot()
+}
+
+pub async fn egress_operational_snapshot(state: &AppState) -> EgressOperationalSnapshot {
+    // Keep lock ordering aligned with readiness/routing: subsystem first, then
+    // pool, never nested across await points.
+    let proxy_subsystem = state.proxy_subsystem.read().await.snapshot();
+    let mut pool = state.proxy_pool.write().await;
+    pool.recover_expired_cooldowns();
+    let unique_verified_exits =
+        pool.verified_unique_exit_count_fresh(state.config.egress.identity_ttl);
+    let proxy_routable = pool.egress_ready(
+        state.config.egress.minimum_unique_exit_ips,
+        state.config.egress.identity_ttl,
+    );
+    let proxy_pool = pool.snapshot();
+    drop(pool);
+
+    let (mode, gateway_ready, active_route) = match state.config.egress.mode {
+        crate::config::EgressMode::Direct => ("direct", true, "direct"),
+        crate::config::EgressMode::Proxy => ("proxy", proxy_routable, "proxy"),
+        crate::config::EgressMode::Hybrid => (
+            "hybrid",
+            true,
+            if proxy_subsystem.ready && proxy_routable {
+                "proxy"
+            } else {
+                "direct"
+            },
+        ),
+    };
+
+    EgressOperationalSnapshot {
+        mode,
+        gateway_ready,
+        active_route,
+        minimum_unique_exit_ips: state.config.egress.minimum_unique_exit_ips,
+        unique_verified_exits,
+        proxy_subsystem,
+        proxy_pool,
+    }
 }
 
 pub async fn safe_config_snapshot(state: &AppState) -> SafeConfigSnapshot {
@@ -140,6 +202,45 @@ pub async fn restart_managed_proxy(
     })
 }
 
+pub async fn set_managed_proxy_drain(
+    state: &AppState,
+    port: u16,
+    draining: bool,
+) -> Result<ProxyDrainResult, ManagementError> {
+    let mut pool = state.proxy_pool.write().await;
+    let index = managed_proxy_index(&pool, port)?;
+    let active_requests = if draining {
+        pool.begin_drain(index).map_err(|message| {
+            ManagementError::new(StatusCode::CONFLICT, "proxy_drain_failed", message)
+        })?
+    } else {
+        pool.cancel_drain(index).map_err(|message| {
+            ManagementError::new(StatusCode::CONFLICT, "proxy_undrain_failed", message)
+        })?;
+        pool.proxies[index].active_request_count()
+    };
+    drop(pool);
+
+    let status = if draining {
+        "draining"
+    } else {
+        "drain_cancelled"
+    };
+    let _ = state.event_tx.send(DashboardEvent::ProxyStatus {
+        port,
+        status: status.to_string(),
+        timestamp: unix_timestamp(),
+    });
+    info!(port, active_requests, draining, "proxy drain state changed");
+
+    Ok(ProxyDrainResult {
+        port,
+        action: if draining { "drain" } else { "undrain" },
+        draining,
+        active_requests,
+    })
+}
+
 pub fn redact_proxy_url(value: &str) -> String {
     let Some(scheme_end) = value.find("://") else {
         return value.to_string();
@@ -152,12 +253,12 @@ pub fn redact_proxy_url(value: &str) -> String {
     format!("{}***{}", &value[..authority_start], &value[at..])
 }
 
-async fn prepare_restart_target(state: &AppState, port: u16) -> Result<usize, ManagementError> {
+fn managed_proxy_index(pool: &ProxyPool, port: u16) -> Result<usize, ManagementError> {
     if is_protected_proxy_port(port) {
         return Err(ManagementError::new(
             StatusCode::FORBIDDEN,
             "protected_proxy",
-            format!("Proxy port {port} is protected and cannot be restarted"),
+            format!("Proxy port {port} is protected and cannot be modified"),
         ));
     }
 
@@ -171,9 +272,7 @@ async fn prepare_restart_target(state: &AppState, port: u16) -> Result<usize, Ma
         ));
     }
 
-    let mut pool = state.proxy_pool.write().await;
-    let index = pool
-        .proxies
+    pool.proxies
         .iter()
         .position(|entry| entry.port == port)
         .ok_or_else(|| {
@@ -182,7 +281,12 @@ async fn prepare_restart_target(state: &AppState, port: u16) -> Result<usize, Ma
                 "proxy_not_found",
                 format!("Proxy port {port} is not present in the active configuration"),
             )
-        })?;
+        })
+}
+
+async fn prepare_restart_target(state: &AppState, port: u16) -> Result<usize, ManagementError> {
+    let mut pool = state.proxy_pool.write().await;
+    let index = managed_proxy_index(&pool, port)?;
     pool.begin_manual_restart(index)
         .map_err(|message| ManagementError::new(StatusCode::CONFLICT, "proxy_busy", message))?;
 
@@ -318,6 +422,48 @@ mod runtime_tests {
         assert_eq!(error.status, StatusCode::CONFLICT);
         assert!(runtime.recreated.lock().unwrap().is_empty());
         drop(lease);
+    }
+
+    #[tokio::test]
+    async fn management_drain_preserves_leases_and_is_reversible() {
+        let runtime = Arc::new(FakeRuntime::default());
+        let state = state(runtime.clone());
+        let lease = state.proxy_pool.read().await.begin_lease(0).expect("lease");
+
+        let drained = set_managed_proxy_drain(&state, 40001, true)
+            .await
+            .expect("drain result");
+        assert!(drained.draining);
+        assert_eq!(drained.active_requests, 1);
+        {
+            let pool = state.proxy_pool.read().await;
+            assert!(pool.proxies[0].draining);
+            assert_eq!(pool.proxies[0].active_request_count(), 1);
+        }
+        assert!(runtime.recreated.lock().unwrap().is_empty());
+
+        let restored = set_managed_proxy_drain(&state, 40001, false)
+            .await
+            .expect("undrain result");
+        assert!(!restored.draining);
+        assert_eq!(restored.active_requests, 1);
+        assert!(!state.proxy_pool.read().await.proxies[0].draining);
+        drop(lease);
+    }
+
+    #[tokio::test]
+    async fn management_drain_rejects_protected_standby() {
+        let runtime = Arc::new(FakeRuntime::default());
+        let mut config = BridgeConfig::default();
+        config.egress.mode = EgressMode::Proxy;
+        config.primary_proxies = None;
+        config.warm_standby_proxies = Some(vec!["socks5h://127.0.0.1:40004".to_string()]);
+        config.egress.identity_endpoints.clear();
+        let state = AppState::new_with_container_runtime(config, runtime);
+        let error = set_managed_proxy_drain(&state, 40004, true)
+            .await
+            .expect_err("protected node must fail");
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

@@ -26,24 +26,25 @@
 
 ## Snapshot hiện tại
 
-Cập nhật gần nhất: **2026-08-03**
+Cập nhật gần nhất: **2026-08-26**
 
 ### Repo và service
 
 ```text
 Repo:          /home/light/GitHub/opencode2claude
+Branch:        integration/branch-audit — HEAD 8619bee (2026-08-25); working tree ĐANG CÓ ~50 files
+               modified + 2 untracked chưa commit (chuỗi audit-fix 2026-08-26 — xem entry cuối file)
+Unpushed:      40 commits ahead origin/main / 38 ahead local main (chưa push, chưa merge)
 Service URL:   http://127.0.0.1:4000
 Dashboard:     http://127.0.0.1:4000/dashboard
-Binary:        /home/light/.local/bin/opencode2api-serve  (deployment thật — supervisor spawn sibling của controller)
+Binary:        /home/light/.local/bin/opencode2api-serve v0.5.0 (build khớp HEAD 8619bee, 2026-08-25 12:24)
 Controller:    /home/light/.local/bin/opencode2api
 Port:          4000
-PID snapshot:  123278   (serve chạy từ ~/.local/bin sau atomic restart 08:27 — binary mới chứa fix standby auto-start, md5 khớp target/release, marker đã verify)
+PID snapshot:  9918   (start 2026-08-26 07:21 +0700 — khởi động TRỰC TIẾP, không qua supervisor; .runtime/ không có PID file)
 Status:        running
-Managed:       true
-Model runtime: opencode/deepseek-v4-flash-free
-Proxy pool:    5/5 healthy — primaries 40001-40003 + standbys 40004-40005 online; verified unique exit IPs = 4
-Dashboard auth configured: true
-Client API auth snapshot:  false
+Managed:       false  (direct launch; log tại ~/.opencode2api/opencode2api.log)
+Model runtime: opencode/x-preview-f-free  (từ live traffic log)
+Proxy pool:    /health schema mới tối giản {"status":"ok","version":"0.5.0"} — không còn expose model/pool snapshot; port 4096 không có listener (monitor-only, benign)
 ```
 
 PID và uptime là snapshot tại thời điểm ghi; phải kiểm tra lại bằng:
@@ -55,14 +56,30 @@ ss -ltnp | grep '127.0.0.1:4000'
 
 ### Working tree
 
-- Chưa tạo commit cho chuỗi thay đổi dashboard/API/Claude Code hiện tại.
-- Working tree có rất nhiều thay đổi cũ ở backend, frontend, docs, scripts và verification.
-- Không được `git reset --hard`, checkout toàn repo hoặc xóa artifacts không rõ nguồn gốc.
-- Chỉ sửa file liên quan trực tiếp đến task và tạo backup trước thay đổi lớn.
+- Branch `integration/branch-audit`: chuỗi audit-fix 2026-08-26 để ~50 files modified + 2 untracked (`scripts/pty_matrix.py`, `src/opencode/forward/parity_tests.rs`) UNCOMMITTED — tuyệt đối không reset/checkout/stash tự ý.
+- 40 commit chỉ tồn tại local so với `origin/main`; chưa push, chưa merge về main.
+- 1 stash cũ trên main ("WIP on main before switching to integration/branch-audit"); ~20 nhánh cũ còn sót, gồm các nhánh workflow `worktree-*`.
+- Vẫn không được `git reset --hard`, checkout toàn repo hoặc xóa artifacts/stash/nhánh không rõ nguồn gốc.
 
 ### Quality gate gần nhất
 
-Kết quả gần nhất đã ghi nhận ngày 2026-07-22:
+Kết quả gần nhất: **2026-08-26** sau chuỗi audit-fix (entry cuối file):
+
+```text
+cargo fmt --check                          PASS
+cargo clippy --all-targets -- -D warnings  PASS (0 cảnh báo)
+cargo test --lib                           ~732 passed / 0 failed
+cargo test --test fast                     87/87
+cargo test --test integration              18/18 (tier mặc định, hết #[ignore]; ổn định ×3 lần chạy)
+tests/egress_identity_system.rs            1 ignored (live-WARP)
+Independent review                         GO — điều kiện commit: phải git-add src/opencode/forward/parity_tests.rs
+Toolchain                                  rustc/cargo 1.96.0
+```
+
+9 test fail của gate sáng sớm cùng ngày (681 passed / 9 FAILED: `test_default_config` + 8 auth-fast) đã được xử lý xong trong chuỗi audit-fix này; chi tiết ở entry cuối file.
+Không thuộc lớp parse/protocol → deployment gate không bị chạm; chu kỳ này KHÔNG deploy gì.
+
+Gate lịch sử ngày 2026-07-22:
 
 ```text
 git diff --check                          PASS
@@ -3684,3 +3701,325 @@ Quality gates:
 - Updated `src/application/client_config.rs` so newly generated Claude Code settings include both `model: claude-opus-5` and `ultracode: true`; added a regression assertion first, observed it fail, then implemented the setting and observed it pass.
 - Fresh real PTY verification in `/home/light/GitHub/opencode2claude`: startup displays `Opus 5 with xhigh effort`; status displays `effort: ultracode · xhigh effort + dynamic workflows for maximum thoroughness`; no unsupported-model or effort-override warning.
 - Fresh checks: targeted client-config test PASS, `cargo fmt --check` PASS, `git diff --check` PASS. No bridge restart or proxy mutation was needed; requests remain forced by the Claude integration policy to `opencode/deepseek-v4-flash-free`.
+
+---
+
+## 2026-08-26 — Full repository status refresh via 5-agent fan-out
+
+**Goal**
+
+- Refresh every status dimension of the repo (git, build/lint, tests, live service, docs currency) after ~3 weeks without a snapshot update. Research only: no source changes, no commit, no service restart.
+
+**Scope and files changed**
+
+```text
+REPO_WORKLOG.md   (snapshot refresh + this entry only)
+```
+
+**Method**
+
+- Five background subagents with disjoint scopes ran concurrently: (1) git state, (2) fmt/clippy/debug build, (3) `cargo test --locked` default tier, (4) live-service audit STRICTLY read-only (no process touched), (5) docs-vs-code drift check.
+
+**Findings**
+
+Git:
+- Branch `integration/branch-audit` at `8619bee` (2026-08-25); working tree clean; no in-progress merge/rebase/cherry-pick.
+- 40 commits ahead of `origin/main`, unpushed and unmerged; no upstream tracking configured for this branch; 1 old stash on main; ~20 stale branches incl. workflow `worktree-*` remnants.
+
+Build/lint (rustc/cargo 1.96.0):
+- `cargo fmt --check` PASS; `cargo clippy --all-targets -- -D warnings` PASS (0 diagnostics); debug build PASS.
+
+Tests (`cargo test --locked`, default tier):
+- 681 passed / 9 failed.
+- `src/config/tests.rs::test_default_config` fails: default config now ships a model; the test still asserts none.
+- 8 fast failures (TC029/TC030/TC034–TC038) are all auth-related 401s: tests expect anonymous/bad-payload requests to reach handlers when auth is disabled; current middleware rejects earlier. Consistent with recent default-auth/middleware changes — parse/protocol layer NOT implicated.
+- `tests/integration.rs` now runs in the default tier (18/18 pass, no longer `#[ignore]`) — contradicts CLAUDE.md's test-tier table. `tests/egress_identity_system.rs`: 1 ignored (live-WARP).
+
+Live service (read-only):
+- :4000 UP, PID 9918, v0.5.0, exe `/home/light/.local/bin/opencode2api-serve`, started 2026-08-26 07:21 +0700.
+- Deployed binary mtime 2026-08-25 12:24 matches HEAD `8619bee`; repo `target/release/opencode2api-serve` artifact STALE (mtime 2026-08-03).
+- Direct launch, NOT supervisor-managed: `.runtime/` contains only an empty `verify/` dir (no PID file); logs go to `~/.opencode2api/opencode2api.log`.
+- Live traffic healthy at audit time: streaming POSTs to `/v1/messages`, model `opencode/x-preview-f-free`, all 200s; no errors/panics/retries/rate-limits in log tail.
+- Port 4096 has no listener (monitor-only per docs — benign).
+- `/health` now returns minimal `{"status":"ok","version":"0.5.0"}` — model/proxy-pool snapshot fields are gone; CLAUDE.md still describes the old schema.
+
+Docs drift found (NOT fixed this cycle):
+- CLAUDE.md architecture section heavily stale: claims flat `src/server.rs`/`src/config.rs`/`src/handlers.rs` (actually directories) and `src/docker.rs` (removed); router lives at `src/server/routes.rs:11-55` with ~70 routes vs the documented 3; tests/ tree missing protocol_conformance, stream_retry_gates, retry_compat_livelock, egress_identity_system, parser_fuzz_smoke.
+- This snapshot previously said "updated 2026-08-03" while 2026-08-06 entries existed, and kept a stale "478 passed" gate vs 650 reported 2026-08-06 — both corrected above.
+- Verified accurate: version 0.5.0 (Cargo.toml = CHANGELOG), README endpoint table vs `src/rest_api.rs:17-25` + `routes.rs`, ~70 `BRIDGE_*` env vars in `src/config/loader.rs`, CLI subcommand set (`server/proxy/dashboard/doctor/session/shell-hook/api-key/completion/update/config-init` + hidden serve aliases).
+
+**Verification**
+
+```text
+git status --porcelain                                clean
+git rev-list --left-right --count origin/main...HEAD  0 behind / 40 ahead
+cargo fmt --check                                     PASS
+cargo clippy --all-targets -- -D warnings             PASS
+cargo build                                           PASS
+cargo test --locked                                   681 passed / 9 failed
+curl http://127.0.0.1:4000/health                     HTTP 200 {"status":"ok","version":"0.5.0"}
+```
+
+**Service snapshot**
+
+```text
+PID:    9918
+Port:   4000
+Model:  opencode/x-preview-f-free (from live traffic log)
+Status: running (direct launch, managed=false)
+```
+
+**Open items / limits**
+
+- Decide the fate of the 9 failing tests: update tests to current behavior (default model present, auth-first middleware) or change the defaults/middleware back. Not touched this cycle.
+- CLAUDE.md architecture/router/tests sections need a rewrite against actual code.
+- 40 local commits unpushed; branch not merged to main.
+- Repo `target/release` artifact stale relative to deployed binary (deployed == HEAD build).
+- No restart performed (no code change); any future deploy must pass the real-CLI PTY deployment gate per CLAUDE.md.
+
+---
+
+## 2026-08-26 — Backend logic audit & fix campaign (rolling 5-agent fan-out)
+
+**Trigger**
+
+- Standing rule của user: duy trì pool đúng 5 background subagent audit/debug LOGIC backend (bỏ qua UI/webui), ưu tiên startup logic; mỗi agent xong việc thì fan-out agent mới bù chỗ trống; cron giờ chạy reconcile đếm agent THẬT đang sống. Coordinator chỉ nhận lệnh user và điều phối — toàn bộ implementation do subagent. Mọi fix giữ UNCOMMITTED chờ user duyệt deploy.
+
+**Zones audited & fixed** (mỗi zone 1 agent, TDD fail-first khi sửa)
+
+- Shell echo forge (`src/handlers/shell.rs`): response `!` echo có thể bị forge chéo phiên → bounded ticket store issue/consume (MAX_ECHO_BYTES=64KiB, TTL 300s, capacity 256 evict-oldest); echo path đi qua `ensure_shell_allowed`.
+- Config chain (`src/config/**`, 5 defect): `primary_proxies` thắng legacy `proxies` cùng nguồn (+warn shadowing); `search_chain_budget_secs` env→TOML→default 25s, reject 0 kèm warn; dual defaults đồng bộ lockstep `max_response_bytes` 16→2MiB; public-bind guard: non-loopback bắt buộc auth_enabled, MIN_PUBLIC_BIND_TOKEN_LEN=12 cho cả hai token.
+- Retry test fixtures (root cause 9 test fail từ fb73f24): fixture thiếu `egress.active_proxy_count` (default 1 ⇒ chỉ proxies[0] routable ⇒ mark_rate_limited(0) → EgressUnavailable). Fix fixture + NoopContainerRuntime hermetic; không đổi production code (single-active-primary-with-spares là chủ ý).
+- Middleware/auth (`src/middleware.rs`): parse Bearer case-insensitive qua split_once; streaming path trước đó drop rate-limit permit → acquire_owned giữ permit xuyên suốt cả sync lẫn SSE; anonymous chỉ được khi auth chưa cấu hình VÀ client loopback.
+- Honest stop/restart lifecycle (`src/supervisor.rs`, `src/app/server.rs`): root cause SIGTERM'd process thành zombie unreaped khiến verify đọc `/proc/<pid>/exe` ENOENT rồi nhầm là PID reuse → same-slot-corpse classification + process_is_zombie; verified_signal re-check chống TOCTOU; exit code ngữ nghĩa 0 ok / 1 lỗi chung / 3 không tìm thấy / 4 REFUSED-unmanaged; `restart --unmanaged` opt-in nhận nuôi direct-launch instance.
+- Orphaned diff adoption (`src/handlers/openai.rs`, +110 dòng từ agent chết giữa chừng): permit moved into async_stream body + rate_limit tests; adopt nguyên vẹn thay vì viết lại.
+- Hybrid readiness (`src/handlers/metadata.rs`, `src/rest_api.rs`): `/api/v1/status` và `/health/ready` trước đó hardcode unique exits → derive từ live proxy pool snapshot; §11 readiness payload additive (checks.proxy, egress.active_route/direct/proxy).
+- Proxy reconciler lifecycle (`src/state.rs`, `src/proxy_pool/{reconcile,maintenance}.rs`): spawn gate cũ chỉ Proxy mode → widened `Proxy|Hybrid`; reconcile độc lập mode; maintenance in-flight signature dedup chống restart-storm seed.
+- Parse/protocol golden audit: KHÔNG đụng production parser — +27 goldens (55→82) khóa hành vi hiện tại. Behavior mơ hồ được pin as-is (không phải bug): tool_result.is_error dropped, top_k dropped, disable_parallel_tool_use ignored, compact substring heuristic, include_reasoning always-on.
+- DSML sanitizer (`src/opencode/sanitize.rs`): extract_attribute boundary guard; helper find_foreign_invoke_open; resync drop-and-resume quarantine marker malformed thay vì greedy merge.
+- Search subsystem (`src/opencode/search/**`, 10 files): SearXNG API key dead → wired Bearer; Debug impl redact secrets; header panic fixes; SearchPolicy.chain_budget 25s + BudgetExhausted kind; scraper redirect guard same-origin có carve-out port-disciplined (chặn loopback twin khác port); Yahoo metrics variant tách riêng.
+- Streaming liveness (`forward/stream/{context,execute}.rs`): 18 emit sites → send_sse tracked; dead-consumer teardown fail-fast (đừng ghi vô hạn vào channel đã đóng); accumulator cap 1MiB push_bounded; 'turns loop guards tại 8 control points.
+- History store + registry atomicity (`src/history/store.rs`, `src/api_key.rs`, `src/dashboard/control/api_keys.rs`): registry create/update/rotate/revoke/batch transactional qua stage()/commit() clone-swap; rotate giữ usage qua runtime.snapshot(); FaultStore fault-injection tests.
+- CLI coherence (`src/cli.rs`, `src/app/server.rs`): restart refusal fast-fail ngay từ đầu (exit 4) thay vì stop xong mới chết; refusal message single-source `SupervisorError::refusal_message`; ServerStatusArgs tách riêng, bỏ dead flags.
+- Tree-wide reconciliation sweep: quét stale references (tier `--ignored`), fmt toàn cây.
+
+**Verification (tại thời điểm ghi)**
+
+```text
+cargo fmt --check                          PASS
+cargo clippy --all-targets -D warnings     PASS (0)
+cargo test --lib                           ~732 passed / 0 failed
+cargo test --test fast                     87/87
+cargo test --test integration              18/18 (ổn định ×3)
+Independent review                         GO — điều kiện: git-add src/opencode/forward/parity_tests.rs
+                                           (file MỚI untracked; thiếu nó là mất 6 parity tests lúc commit)
+```
+
+**Cố tình để lại (follow-ups)**
+
+- PTY matrix authoritative run CHƯA chạy (harness `scripts/pty_matrix.py` đang build) → deploy vẫn gate theo CLAUDE.md.
+- §11/§12 observability extension; CLAUDE.md doc-drift (Rendezvous per-key → round-robin-with-burst-coalescing từ 8b8d9d4; integration tier hết #[ignore]/release-gate) chờ user duyệt trước khi sửa docs.
+- Debris repo root chờ user dọn tay: `./~` 2.8MB, `artifacts/` 605MB, `tmp/` 6.2MB, log rải rác, `.env.backup-*`.
+
+**Working-tree safety**
+
+- Toàn bộ thay đổi UNCOMMITTED trên `integration/branch-audit`; KHÔNG stage/commit gì trong chu kỳ này; production :4000 PID 9918 không bị đụng; deploy chỉ sau PTY matrix + lệnh user, restart phải atomic (build && install && start một lệnh duy nhất).
+
+
+---
+
+## 2026-08-27 00:31 +0700 — Fresh whole-repository audit after rolling backend campaign
+
+**Scope / safety**
+
+- Re-scanned the current `/home/light/GitHub/opencode2claude` working tree, current Git state, latest worklog, build/test gates, local service health, PTY harness evidence, TODO markers, untracked files, docs drift, and current blocker code paths.
+- Local-only verification. No remote service was contacted for challenge solving, no source implementation was changed in this audit, nothing was staged/committed, and production `:4000` was not restarted or redeployed.
+- This entry is the only repository mutation made by the audit itself.
+
+**Current Git snapshot**
+
+```text
+Branch: integration/branch-audit @ 8619bee
+origin/main...HEAD: 0 behind / 40 ahead (using existing local refs)
+Tracked modified files: 65
+Untracked files: 5
+Diff size before this worklog append: +13,655 / -804 lines
+Staged changes: none
+```
+
+Untracked files that must not be lost before any commit:
+
+```text
+scripts/pty_matrix.md
+scripts/pty_matrix.py
+src/opencode/forward/parity_tests.rs
+tests/stub_openai.py
+tests/stub_upstream.py
+```
+
+**Fresh quality gates on the current dirty tree**
+
+```text
+git diff --check                               PASS
+cargo fmt --check                              FAIL (format drift in several newly edited files)
+cargo clippy --locked --all-targets -D warnings FAIL (4 diagnostics)
+cargo test --locked                           FAIL in lib tier: 865 passed / 5 failed
+cargo test --locked --test fast                PASS 87/87
+cargo test --locked --test integration         PASS 18/18
+```
+
+Current clippy blockers:
+
+- `src/history/store.rs`: unused `AtomicU64` import (strong sign the runtime byte-trim wiring was started but not completed).
+- `src/infrastructure/process.rs`: one needless `return` and two single-pattern `match` lint failures around Linux pidfd / verified signal delivery.
+
+Current deterministic unit-test blockers and concrete code evidence:
+
+1. `config::tests::retired_max_provider_attempts_env_is_ignored`
+   - Test says `BRIDGE_MAX_PROVIDER_ATTEMPTS` is retired.
+   - `src/config/loader.rs` still explicitly reads `BRIDGE_MAX_PROVIDER_ATTEMPTS` and file `max_provider_attempts`, so runtime resolves `7` instead of default `2`.
+2. `handlers::messages::{rejects_tool_result_referencing_unknown_tool_use_id,rejects_tool_result_that_precedes_its_tool_use}`
+   - `validate_messages_request()` validates the shape/role of `tool_use` and `tool_result`, but currently never tracks prior `tool_use` ids or rejects orphan/forward `tool_result` references.
+3. `history::store::tests::runtime_completions_trigger_byte_cap_trim_without_restart`
+   - `cleanup()` correctly contains logical-byte eviction, but the background writer handles `HistoryCommand::Complete` via `complete_record()` only; no runtime cleanup call is wired after completions. Eight 256 KiB records therefore remain at ~2 MiB instead of converging to the configured cap.
+4. `opencode::retry::execute::tests::same_egress_rate_limit_success_preserves_transport_recovery_state`
+   - `clear_rate_limit_penalty_after_success()` calls `pool.mark_healthy(index)` and removes the restart queue entry, which clears transport circuit/cooldown state too broadly.
+   - `ProxyPool::clear_rate_limit_recovery(index)` already exists with the intended narrow semantics and should be used/reconciled instead of full health reset.
+
+**PTY / deploy-gate state**
+
+- `scripts/pty_matrix.py` + policy stubs now exist locally and historical local-only evidence shows each S1–S8 scenario has reached PASS individually (S1/S4 smoke passed together; S2, S3, S5, S6, S7, S8 each have passing runs).
+- There is still no authoritative single full `all` matrix pass against a quiescent, gate-green tree. The harness documentation explicitly says the final run must rebuild from a quiescent tree.
+- Because current fmt/clippy/unit gates are red, PTY full-matrix and deployment remain blocked. Do not deploy/restart parse/protocol changes yet.
+
+**Local runtime snapshot**
+
+```text
+127.0.0.1:4000 LISTEN
+PID 9918 opencode2api-serve
+GET /health -> {"status":"ok","version":"0.5.0"}
+```
+
+Production was not touched during this audit.
+
+**Documentation / hygiene status**
+
+- `CLAUDE.md` architecture, router, test-tier, and several design-decision sections remain materially stale versus the split module tree and current test behavior. It still documents flat `server.rs/config.rs/handlers.rs`, removed `docker.rs`, a 3-route router, ignored integration tests, and old proxy/routing semantics.
+- Tracked source contains no actionable TODO/FIXME/HACK/XXX markers outside a documentation sentence saying a prior plan had none; unfinished work is represented by tests/diffs rather than TODO comments.
+- Local debris is larger than the previous snapshot: `artifacts/` ~883 MiB, `tmp/` ~6.2 MiB, `./~` ~2.8 MiB, `target/` ~5.9 GiB. Leave cleanup to an explicit user-directed housekeeping step.
+
+**Next actions — strict order**
+
+P0 — restore a green local tree before any PTY/deploy:
+
+1. Finish the retired `max_provider_attempts` removal end-to-end (loader/file/types/fixtures as appropriate) and rerun focused config tests.
+2. Add single-pass prior-tool-id tracking in `validate_messages_request()` so orphan and forward `tool_result` references fail while documented duplicate-id semantics remain stable.
+3. Wire bounded runtime history byte-cap cleanup into the serialized writer/direct-completion path; remove/finish the abandoned `AtomicU64` watermark idea; keep cleanup amortized rather than full-table work on every tiny write.
+4. Change same-egress rate-limit success to clear rate-limit quarantine only, preserving transport circuit/cooldown/restart state; use the existing narrow proxy-pool helper.
+5. Run `cargo fmt`, fix the pidfd clippy nits without weakening verified-signal semantics, then rerun `git diff --check`, fmt, clippy, full `cargo test --locked`, fast, and integration.
+
+P1 — deployment gate after P0 is fully green:
+
+6. Freeze/quiesce the tree, ensure all five untracked policy/test files are intentionally included, rebuild debug bridge, then run the authoritative local-only `python3 scripts/pty_matrix.py run --scenarios all` once as one complete matrix.
+7. Review matrix artifacts and only then consider the required atomic build+install+start deployment command if the user explicitly asks to deploy.
+
+P2 — repository closure after runtime correctness:
+
+8. Rewrite stale `CLAUDE.md` architecture/router/testing/config/routing sections against current code.
+9. Reconcile the 40 local commits with the intended upstream branch strategy and decide commit/staging boundaries for the large backend campaign.
+10. Housekeeping (`artifacts`, `target`, `tmp`, stray `./~`, backup/log debris) only as an explicit separate cleanup task.
+
+
+---
+
+## 2026-08-27 01:03 +0700 — P0 closure + authoritative local PTY gate
+
+**Scope / safety**
+
+- Continued the uncommitted backend completion campaign entirely in `/home/light/GitHub/opencode2claude`.
+- Production `127.0.0.1:4000` / PID 9918 was not restarted, deployed, killed, or otherwise mutated; no remote upstream validation was used.
+- Preserved the existing dirty working tree; no reset/clean/stage/commit was performed.
+
+**Closed regressions**
+
+1. Retired the inert `max_provider_attempts` setting end-to-end: removed the runtime/TOML/config-apply/view/template/docs surface and struct field while preserving migration stripping/tests for legacy TOML documents and ignoring stale env input.
+2. Added linear Anthropic tool-history referential validation: ordinary `tool_result` blocks must reference a prior `tool_use`; duplicate tool-use IDs retain first-reference compatibility. Live bridge-issued local-shell delegation tickets are accepted as external synthetic referents for compact client-side/deferred result echoes; forged/expired/replayed tickets receive no exemption.
+3. Wired history byte-cap cleanup into both the serialized writer and queue-full direct-completion path using one shared byte watermark and current live history settings. Cleanup remains amortized (64 KiB–1 MiB threshold depending on configured DB cap) rather than scanning the whole table for every small request; failed cleanup restores pressure for retry.
+4. Same-egress provider-rate-limit success now calls the narrow `clear_rate_limit_recovery()` helper instead of `mark_healthy()`, preserving independent transport circuit/cooldown/restart state.
+5. Completed pidfd/process lint cleanup without weakening verified-signal semantics; stabilized the same-slot-zombie regression fixture so identity is captured before the child exits.
+
+**Fresh deterministic verification**
+
+```text
+git diff --check                                      PASS
+cargo fmt --all -- --check                            PASS
+cargo clippy --locked --all-targets -- -D warnings   PASS
+cargo test --locked                                   PASS
+  lib/unit                                             870/870
+  fast                                                 87/87
+  integration                                          18/18
+  parser fuzz                                          2/2
+  protocol conformance                                 46/46
+  retry compat livelock                                1/1
+  stream retry gates                                   2/2
+  live WARP identity system                            1 intentionally ignored
+```
+
+**Authoritative real-Claude-Code PTY gate**
+
+Built the current debug tree and ran one complete isolated local-stub matrix:
+
+```text
+python3 scripts/pty_matrix.py run --scenarios all
+S1 two_consecutive                         PASS
+S2 agent_tool_call                         PASS
+S3 streaming_tool_call                     PASS
+S4 shell_command                           PASS
+S5 ctrlc_midstream                         PASS
+S6 upstream_error_retry                    PASS
+S7 ten_turns                               PASS
+S8 midstream_error_terminates_cleanly      PASS
+Summary                                    8/8 PASS
+Artifact: artifacts/pty-matrix/20260827-010232-summary.json
+```
+
+The harness used only isolated loopback stub/side-bridge processes and left production `:4000` untouched.
+
+**Backlog correction discovered during follow-on audit**
+
+- Per-key admission quotas are already implemented, not missing: `ApiKeyPolicy` has `max_concurrent_requests`, `requests_per_minute`, and `daily_request_quota`; `ApiKeyRuntime::admit()` enforces all three and tracks requests/rejections/window usage. Do not re-implement this roadmap item.
+
+**Next completion targets**
+
+- Re-scan operational proxy controls before adding anything; implement only genuinely absent functions (drain/verify/quarantine/topology controls if still missing).
+- Finish any §11/§12 hybrid status/dashboard surfaces that remain incomplete.
+- Reconcile optional History V2 work (search/encryption) against current implementation before coding.
+- Rewrite stale `CLAUDE.md`/plan status only after current runtime feature gaps are closed.
+
+## 2026-08-27 01:52 +0700 — infrastructure boundary closure + final local gates
+
+- Re-audited current dirty tree before editing; preserved all existing user/WIP changes and did not stage/reset/clean anything.
+- Closed Full Repository Completion Plan infrastructure-boundary gap: bare Claude Code launch no longer constructs `std::process::Command` in `src/app/mod.rs`; foreground child execution now goes through `src/infrastructure/process.rs::run_foreground`, preserving inherited terminal streams and resolved environment mutation semantics.
+- Tightened `scripts/check_infrastructure_boundary.py` so production process execution remains forbidden outside `src/infrastructure/`, while explicit `#[cfg(test)] mod tests` fixture subprocesses are not misclassified as production architecture violations.
+- `python3 scripts/check_infrastructure_boundary.py`: PASS.
+- Full deterministic `bash scripts/tier-a.sh`: PASS, including feature matrix 81/81, version/docs/release/config/infrastructure/secret gates, fmt/check/clippy, 882/882 lib tests, 87/87 fast, 18/18 integration, 2/2 parser fuzz, 46/46 protocol, retry/stream gates, build, and CLI E2E 41/41. One real-WARP identity system test remains intentionally ignored because it requires local WARP + Internet and was not run.
+- Parser hot-path release benchmark: SSE buffer 94.08x, tool lookup 2.52x, bracket scan 1.43x versus baseline implementation in the benchmark harness.
+- Re-ran authoritative real Claude Code v2.1.246 PTY matrix strictly against ephemeral localhost bridge + `tests/stub_openai.py`; harness non-loopback egress guard remained armed. Final `artifacts/pty-matrix/20260827-015223-summary.json`: S1–S8 = 8/8 PASS. Production PID 9918 on :4000 was not touched.
+- Final `git diff --check`: PASS. No production TODO/FIXME/todo!/unimplemented! found by repository scan; remaining TODO text is release/checklist prose only.
+
+## 2026-08-29 19:15 +0700 — Free model auto-detection, live prober, dynamic 80% autocompact context tuning & CLI model management
+
+- Implemented `ModelProfile` and updated OpenCode Zen free models catalog in `src/application/models.rs` (`mimo-v2.5-free`, `nemotron-3-ultra-free`, `nemotron-3.5-lightning-free`, `big-pickle`, `hy3-free`, `laguna-s-2.1-free`, `ling-3.0-flash-fin-free`, etc.).
+- Implemented dynamic 80% autocompact calculation (`CLAUDE_CODE_AUTO_COMPACT_WINDOW = context_window * 80 / 100`) and Claude Code tuning variable generator in `src/application/integration.rs`.
+- Implemented upstream free model fetcher, status parser, and live availability prober in `src/application/prober.rs` (`probe_single_model`, `fetch_and_probe_free_models`, `detect_best_free_model`).
+- Added CLI commands in `src/cli.rs` and `src/app/models.rs`:
+  - `opencode2api list [--probe] [--json]`: formatted table showing models, context size, 80% autocompact token budget, thinking support, and live probe status.
+  - `opencode2api model set <model>`: validates and persists active model to TOML config and `.env`.
+  - `opencode2api model [status]`: displays active model profile and calculated parameters.
+- Updated bare `opencode2api` launcher in `src/app/mod.rs` to dynamically inject optimal model-specific environment variables into Claude Code.
+- Fixed `install-local.sh` target directory path resolution for `CARGO_TARGET_DIR`.
+- Quality gates:
+  - `cargo fmt --check`: PASS
+  - `cargo clippy -- -D warnings`: PASS (0 warnings)
+  - `cargo test --locked`: PASS (890 lib tests, 87 fast, 18 integration, 46 protocol conformance, 2 parser fuzz, 2 stream retry, 1 retry livelock = ALL PASS).
+  - Local installation verified: `~/.local/bin/opencode2api` updated and functional.

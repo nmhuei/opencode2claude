@@ -7,6 +7,7 @@
 use crate::config::{BridgeConfig, TomlConfig};
 use crate::infrastructure::file_store::{AtomicFileStore, FileStore};
 use crate::management::auth::token_eq;
+use crate::opencode::mapper::map_model_name;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -196,6 +197,35 @@ impl ApiKeyPolicy {
         }
     }
 
+    /// Resolve the effective model for this key's policy.
+    ///
+    /// Selection precedence is unchanged: when overrides are allowed the
+    /// client-requested name wins, otherwise the key's `default_model`, then
+    /// the bridge-global configured model, then `fallback`.
+    ///
+    /// # Allowlist namespace (resolved ids)
+    ///
+    /// `allowed_models` is matched in the RESOLVED model-id namespace: both
+    /// the selected name and every allowlist entry are run through
+    /// [`crate::opencode::mapper::map_model_name`] — the exact mapping later
+    /// applied at the forwarding seam (`opencode/…` prefix stripping,
+    /// `-free` aliasing, `claude-*` family collapse) — before comparison.
+    /// Consequences, pinned by tests:
+    ///
+    /// * an entry written as a resolved id (`deepseek-v4-flash-free`) admits
+    ///   every wire spelling that normalizes onto it (`deepseek-v4-flash`,
+    ///   `opencode/deepseek-v4-flash`);
+    /// * legacy entries written in wire form keep working and additionally
+    ///   admit aliases within the same resolved class. This can only widen:
+    ///   identical strings always normalize identically, so no previously
+    ///   admitted pair can become rejected;
+    /// * an empty/unset allowlist still means "every model allowed";
+    /// * entries are whole-token matches after normalization — there is no
+    ///   wildcard syntax;
+    /// * the returned `String` deliberately stays the client-selected name:
+    ///   the wire→resolved rewrite itself still happens downstream at the
+    ///   forwarding seam (`map_model_name`), exactly as before. The rewrite
+    ///   is idempotent on already-resolved ids.
     pub fn resolve_model(
         &self,
         requested: Option<&str>,
@@ -212,11 +242,14 @@ impl ApiKeyPolicy {
             self.default_model.as_deref().or(global).unwrap_or(fallback)
         };
 
+        // Judge the verdict in the resolved namespace so an admin writing an
+        // intuitive allowlist never silently breaks a key over spelling: the
+        // forwarder maps names with `map_model_name`, so the gate must too.
         if !self.allowed_models.is_empty()
             && !self
                 .allowed_models
                 .iter()
-                .any(|allowed| allowed == selected)
+                .any(|allowed| map_model_name(allowed) == map_model_name(selected))
         {
             return Err(ApiKeyPolicyError::ModelNotAllowed(selected.to_string()));
         }
@@ -262,7 +295,7 @@ impl ApiKeyPolicy {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
 pub enum ApiKeyPolicyError {
     #[error("model '{0}' is not allowed for this API key")]
     ModelNotAllowed(String),
@@ -510,6 +543,30 @@ impl ApiKeyRegistry {
             .map_err(ApiKeyError::Write)
     }
 
+    /// Produce an isolated staging copy of the registry.
+    ///
+    /// Mutating dashboard handlers apply their change to the staging copy,
+    /// persist it atomically, and only then [`Self::commit`] it into shared
+    /// memory. If persistence fails, the live registry is never touched, so an
+    /// error response can never leave memory and disk disagreeing.
+    pub fn stage(&self) -> Self {
+        Self {
+            path: self.path.clone(),
+            file: self.file.clone(),
+            runtimes: self.runtimes.clone(),
+        }
+    }
+
+    /// Replace shared in-memory state with a staging copy that has already
+    /// been persisted successfully.
+    ///
+    /// Runtime usage counters live behind `Arc`s, so entries the staged
+    /// mutation did not replace keep counting seamlessly across the commit.
+    pub fn commit(&mut self, staged: Self) {
+        self.file = staged.file;
+        self.runtimes = staged.runtimes;
+    }
+
     pub fn list(&self) -> Vec<ApiKeyView> {
         let now = unix_timestamp();
         self.file
@@ -633,6 +690,9 @@ impl ApiKeyRegistry {
             .iter()
             .position(|record| record.id == id)
             .ok_or(ApiKeyError::NotFound)?;
+        // Preserve usage counters exactly like `update` does: rotating a
+        // secret must never reset a daily quota or rate-limit window.
+        let previous_usage = self.runtimes.get(id).map(|runtime| runtime.snapshot());
         let secret = crate::infrastructure::random::secure_random_hex(secret_bytes)
             .map_err(|error| ApiKeyError::Random(error.to_string()))?;
         let token = format!("{DEFAULT_KEY_PREFIX}{id}.{secret}");
@@ -651,7 +711,7 @@ impl ApiKeyRegistry {
         let runtime_policy = record.policy.clone();
         self.runtimes.insert(
             id.to_string(),
-            Arc::new(ApiKeyRuntime::new(&runtime_policy, None)),
+            Arc::new(ApiKeyRuntime::new(&runtime_policy, previous_usage)),
         );
         let record = self.file.keys[index].clone();
         Ok((self.view_for(&record, index, unix_timestamp()), token))
@@ -955,6 +1015,13 @@ fn import_legacy_records(config: &BridgeConfig, file: &mut ApiKeyRegistryFile) {
         return;
     };
     for (index, token) in tokens.iter().enumerate() {
+        // Empty/whitespace-only configured tokens must never become records:
+        // SHA256("") would otherwise authenticate the empty credential on
+        // every match_secret/verify caller (middleware filters it upstream,
+        // but dashboard verify and future callers would still be exposed).
+        if token.expose().trim().is_empty() {
+            continue;
+        }
         let digest = hash_token(token.expose());
         if suppressed.contains(digest.as_str()) || existing_hashes.contains(&digest) {
             continue;
@@ -1099,13 +1166,35 @@ pub fn save_auth_tokens(
     generated: &[String],
     replace: bool,
 ) -> Result<(), ApiKeyError> {
-    update_file(path, |existing| {
+    save_auth_tokens_with_store(path, generated, replace, &AtomicFileStore)
+}
+
+/// Like [`save_auth_tokens`] but routed through an injected file store so the
+/// legacy TOML write shares the caller's transactional fault domain.
+pub fn save_auth_tokens_with_store(
+    path: &Path,
+    generated: &[String],
+    replace: bool,
+    store: &dyn FileStore,
+) -> Result<(), ApiKeyError> {
+    update_file_with_store(path, store, |existing| {
         merge_auth_tokens(existing, generated, replace)
     })
 }
 
 pub fn revoke_auth_tokens(path: &Path, indices: &[usize]) -> Result<(), ApiKeyError> {
-    update_file(path, |existing| remove_auth_tokens(existing, indices))
+    revoke_auth_tokens_with_store(path, indices, &AtomicFileStore)
+}
+
+/// Like [`revoke_auth_tokens`] but routed through an injected file store.
+pub fn revoke_auth_tokens_with_store(
+    path: &Path,
+    indices: &[usize],
+    store: &dyn FileStore,
+) -> Result<(), ApiKeyError> {
+    update_file_with_store(path, store, |existing| {
+        remove_auth_tokens(existing, indices)
+    })
 }
 
 pub fn load_auth_tokens(path: &Path) -> Result<Vec<String>, ApiKeyError> {
@@ -1132,11 +1221,14 @@ pub fn key_inventory(tokens: &[String], active_key: Option<&str>) -> Vec<ApiKeyM
         .collect()
 }
 
-fn update_file<F>(path: &Path, operation: F) -> Result<(), ApiKeyError>
+fn update_file_with_store<F>(
+    path: &Path,
+    store: &dyn FileStore,
+    operation: F,
+) -> Result<(), ApiKeyError>
 where
     F: FnOnce(&str) -> Result<String, ApiKeyError>,
 {
-    let store = AtomicFileStore;
     let existing = match store.read(path) {
         Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
         Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
@@ -1324,6 +1416,95 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[tokio::test]
+    async fn rotate_preserves_runtime_usage_counters() {
+        let root = temp_path("rotate-usage");
+        fs::create_dir_all(&root).unwrap();
+        let config_path = root.join("config.toml");
+        let config = BridgeConfig {
+            auth_tokens: None,
+            management: ManagementConfig {
+                config_path: config_path.clone(),
+                ..BridgeConfig::default().management
+            },
+            ..Default::default()
+        };
+        let store = AtomicFileStore;
+        let mut registry = ApiKeyRegistry::load(&config, &store).unwrap();
+        let (view, secret) = registry
+            .create(
+                "Rotate Usage".to_string(),
+                None,
+                "production".to_string(),
+                None,
+                ApiKeyPolicy::default(),
+                16,
+            )
+            .unwrap();
+        for _ in 0..3 {
+            registry
+                .match_secret(&secret, "/v1/messages")
+                .unwrap()
+                .admit()
+                .await
+                .unwrap();
+        }
+        let before = registry.get(&view.id).expect("key exists");
+        assert_eq!(before.usage.requests, 3);
+        let (rotated, _replacement) = registry.rotate(&view.id, 16).unwrap();
+        assert_eq!(
+            rotated.usage.requests, 3,
+            "rotation keeps lifetime requests"
+        );
+        assert_eq!(
+            rotated.usage.minute_requests, 3,
+            "rotation keeps minute window"
+        );
+        assert_eq!(
+            rotated.usage.daily_requests, 3,
+            "rotation keeps daily quota progress"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn empty_legacy_tokens_are_never_imported_or_authenticatable() {
+        let root = temp_path("empty-legacy");
+        fs::create_dir_all(&root).unwrap();
+        let config_path = root.join("config.toml");
+        let config = BridgeConfig {
+            auth_tokens: Some(vec![
+                crate::config::SecretString::from(""),
+                crate::config::SecretString::from("   "),
+                crate::config::SecretString::from("sk-oc2-real-legacy-token"),
+            ]),
+            management: ManagementConfig {
+                config_path: config_path.clone(),
+                ..BridgeConfig::default().management
+            },
+            ..Default::default()
+        };
+        let store = AtomicFileStore;
+        let registry = ApiKeyRegistry::load(&config, &store).unwrap();
+        assert!(
+            registry.match_secret("", "/v1/messages").is_err(),
+            "empty token must never authenticate"
+        );
+        assert!(
+            registry.match_secret("   ", "/v1/messages").is_err(),
+            "whitespace-only token must never authenticate"
+        );
+        registry
+            .match_secret("sk-oc2-real-legacy-token", "/v1/messages")
+            .expect("non-empty legacy tokens still import and authenticate");
+        assert_eq!(
+            registry.list().len(),
+            1,
+            "only the non-empty legacy token becomes a record"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn policy_rejects_disallowed_model_and_clamps_when_configured() {
         let mut policy = ApiKeyPolicy {
@@ -1339,6 +1520,158 @@ mod tests {
         assert_eq!(
             policy.enforce_output_tokens(Some(9000)).unwrap(),
             Some(4096)
+        );
+    }
+
+    // --- Allowlist namespace (resolved-id semantics) -----------------------
+    //
+    // Allowlist matching must happen in the same namespace the forwarder
+    // ultimately speaks: both the selected name and every allowlist entry go
+    // through `map_model_name` before comparison. These tests pin that
+    // contract at the policy layer; the OpenAI-entry end-to-end counterpart
+    // lives next to `handle_chat_completions_inner`.
+
+    fn allowlist_policy(entries: &[&str]) -> ApiKeyPolicy {
+        let mut policy = ApiKeyPolicy {
+            allowed_models: entries.iter().map(|value| (*value).to_string()).collect(),
+            ..Default::default()
+        };
+        policy.normalize();
+        policy
+    }
+
+    #[test]
+    fn allowlisted_resolved_id_accepts_wire_name_request() {
+        // The sibling-audit scenario: the key allows the RESOLVED id, the
+        // client sends a WIRE name that normalizes exactly onto it. This must
+        // be accepted, never rejected.
+        let policy = allowlist_policy(&["deepseek-v4-flash-free"]);
+        policy
+            .resolve_model(Some("deepseek-v4-flash"), None, "fallback")
+            .expect("wire name resolving onto the allowlisted id must be accepted");
+        policy
+            .resolve_model(Some("opencode/deepseek-v4-flash"), None, "fallback")
+            .expect("prefixed spelling of the same resolved class must be accepted");
+    }
+
+    #[test]
+    fn allowlist_entry_in_wire_form_matches_its_resolved_class() {
+        // Inverse-direction pin: an entry written in wire form keeps working
+        // and admits every spelling in the same resolved class. Normalize-
+        // both can widen within a class but can never newly reject —
+        // identical strings always normalize identically.
+        let policy = allowlist_policy(&["deepseek-v4-flash"]);
+        policy
+            .resolve_model(Some("deepseek-v4-flash"), None, "fallback")
+            .expect("identical strings stay admitted");
+        policy
+            .resolve_model(Some("deepseek-v4-flash-free"), None, "fallback")
+            .expect("resolved id of the entry's class must be admitted");
+        policy
+            .resolve_model(Some("opencode/deepseek-v4-flash"), None, "fallback")
+            .expect("prefixed spelling of the same class must be admitted");
+    }
+
+    #[test]
+    fn claude_alias_family_resolves_into_allowlisted_preview_id() {
+        // Every claude-* alias collapses onto x-preview-f-free, so an
+        // intuitive "allow the preview model" list admits them all.
+        let policy = allowlist_policy(&["x-preview-f-free"]);
+        for wire in [
+            "claude-opus-5",
+            "claude-3-5-sonnet",
+            "sonnet[1m]",
+            "ox-alpha",
+            "x-preview",
+            "x-preview-f",
+        ] {
+            policy
+                .resolve_model(Some(wire), None, "fallback")
+                .unwrap_or_else(|_| panic!("alias {wire} must resolve into the allowed class"));
+        }
+        // ...while a genuinely different model stays rejected, with the
+        // client-sent name carried in the error for debuggability.
+        assert!(matches!(
+            policy.resolve_model(Some("gpt-4o"), None, "fallback"),
+            Err(ApiKeyPolicyError::ModelNotAllowed(name)) if name == "gpt-4o",
+        ));
+    }
+
+    #[test]
+    fn fallback_constant_is_judged_in_resolved_namespace() {
+        // With no requested/default/global model, selection falls back to
+        // DEFAULT_MODEL ("claude-3-5-sonnet" — itself a wire name). A key
+        // allowing the id it resolves onto must admit the modelless request.
+        let policy = allowlist_policy(&["x-preview-f-free"]);
+        policy
+            .resolve_model(None, None, crate::config::DEFAULT_MODEL)
+            .expect("the DEFAULT_MODEL fallback resolves onto the allowed class");
+    }
+
+    #[test]
+    fn empty_allowlist_and_selection_precedence_stay_unchanged() {
+        // Empty/unset allowlist = every model allowed (wire names included).
+        let open_policy = ApiKeyPolicy::default();
+        open_policy
+            .resolve_model(Some("gpt-4o"), None, crate::config::DEFAULT_MODEL)
+            .expect("empty allowlist must remain permissive");
+
+        // Configured-key default beats the request when overrides are off;
+        // the winning name is judged in the resolved namespace.
+        let pinned = allowlist_policy(&["nemotron-3-ultra-free"]);
+        let pinned = ApiKeyPolicy {
+            default_model: Some("opencode/nemotron-3-ultra-free".to_string()),
+            allow_model_override: false,
+            ..pinned
+        };
+        pinned
+            .resolve_model(Some("gpt-4o"), None, crate::config::DEFAULT_MODEL)
+            .expect("override-disabled selection uses the key default, not the request");
+
+        // Overrides on: the requested name wins and is still enforced.
+        let overridden = ApiKeyPolicy {
+            default_model: Some("opencode/nemotron-3-ultra-free".to_string()),
+            allow_model_override: true,
+            ..pinned
+        };
+        assert!(matches!(
+            overridden.resolve_model(Some("gpt-4o"), None, crate::config::DEFAULT_MODEL),
+            Err(ApiKeyPolicyError::ModelNotAllowed(_))
+        ));
+    }
+
+    #[test]
+    fn both_protocol_entries_render_identical_verdicts() {
+        // Parity pin: /v1/messages (handlers/messages.rs) and
+        // /v1/chat/completions (handlers/openai.rs) derive their argument in
+        // protocol-specific shapes but delegate to this very function, so the
+        // verdicts must agree byte-for-byte. The extraction expressions below
+        // mirror each call site literally.
+        let policy = allowlist_policy(&["opencode/deepseek-v4-flash-free"]);
+
+        // Anthropic shape: `payload.model.as_deref()` over Option<String>.
+        let anthropic_payload_model: Option<String> = Some("deepseek-v4-flash".to_string());
+        let anthropic = policy.resolve_model(
+            anthropic_payload_model.as_deref(),
+            None,
+            crate::config::DEFAULT_MODEL,
+        );
+
+        // OpenAI shape: trimmed-empty collapses to None over String.
+        let openai_payload_model = "deepseek-v4-flash".to_string();
+        let openai = policy.resolve_model(
+            (!openai_payload_model.trim().is_empty()).then_some(openai_payload_model.as_str()),
+            None,
+            crate::config::DEFAULT_MODEL,
+        );
+
+        assert!(
+            anthropic.is_ok(),
+            "wire name must clear the resolved-id allowlist"
+        );
+        assert_eq!(
+            anthropic, openai,
+            "both entries must agree on the identical request"
         );
     }
 }

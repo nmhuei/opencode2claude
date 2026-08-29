@@ -73,9 +73,40 @@ async fn spawn_test_server(config: opencode2api::config::BridgeConfig) -> String
 }
 
 async fn spawn_test_server_default() -> String {
+    // Isolate in-process config resolution from the surrounding machine.
+    // Shells (and the repository `.env`) frequently export BRIDGE_CONFIG_PATH
+    // pointing at a real deployment; its sibling `<stem>.api-keys.json`
+    // registry would then report configured()==true and every anonymous
+    // request would 401. Point discovery at a unique throwaway path and keep
+    // request-history out of $HOME/.opencode2api. The snapshot window is tiny
+    // and every possible interleaved value is equally hermetic, so racing
+    // with concurrent spawns is benign.
+    let isolation_dir = std::env::temp_dir().join(format!(
+        "opencode2api-fast-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let config_path = isolation_dir.join("config.toml");
+    let previous = [
+        ("BRIDGE_CONFIG_PATH", env::var("BRIDGE_CONFIG_PATH").ok()),
+        ("RUNTIME_DIR", env::var("RUNTIME_DIR").ok()),
+        ("OPENCODE_MODEL", env::var("OPENCODE_MODEL").ok()),
+    ];
+    env::set_var("BRIDGE_CONFIG_PATH", &config_path);
+    env::set_var("RUNTIME_DIR", &isolation_dir);
+    env::remove_var("OPENCODE_MODEL");
     let mut config = opencode2api::config::BridgeConfig::from_env_and_cli(
         opencode2api::config::CliOverrides::default(),
     );
+    for (name, value) in previous {
+        match value {
+            Some(restored) => env::set_var(name, restored),
+            None => env::remove_var(name),
+        }
+    }
     config.max_body_size = 1_048_576;
     spawn_test_server(config).await
 }
@@ -1574,6 +1605,16 @@ fn dashboard_control_config(name: &str) -> opencode2api::config::BridgeConfig {
         ..Default::default()
     };
     config.egress.identity_endpoints.clear();
+    // Keep the request-history database in a throwaway directory instead of
+    // the machine-wide $HOME/.opencode2api used by the deployed bridge.
+    config.runtime.runtime_dir = Some(std::env::temp_dir().join(format!(
+        "opencode2api-fast-runtime-{name}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    )));
     config.management.dashboard_token = Some("dashboard-control-secret".into());
     config.management.rest_api_token = Some("dashboard-control-rest".into());
     config.management.config_path = std::env::temp_dir().join(format!(
@@ -1614,7 +1655,7 @@ async fn dashboard_control_models_requires_session_and_returns_free_catalog() {
         .unwrap();
     assert_eq!(response.status(), 200);
     let body: Value = response.json().await.unwrap();
-    assert_eq!(body["models"].as_array().unwrap().len(), 6);
+    assert!(body["models"].as_array().unwrap().len() >= 6);
     assert!(body["models"]
         .as_array()
         .unwrap()

@@ -51,11 +51,21 @@ pub struct MetricsSnapshot {
     pub proxy_restart_attempts: u64,
     pub proxy_restart_successes: u64,
     pub proxy_restart_failures: u64,
+    pub egress_direct_requests: u64,
+    pub egress_proxy_requests: u64,
+    pub egress_hybrid_fallbacks: u64,
+    pub proxy_bootstrap_attempts: u64,
+    pub proxy_bootstrap_successes: u64,
+    pub proxy_bootstrap_failures: u64,
+    pub proxy_state_transitions: u64,
+    pub proxy_route_probe_failures: u64,
+    pub proxy_duplicate_exit_events: u64,
     pub search_tavily: SearchProviderMetricsSnapshot,
     pub search_exa: SearchProviderMetricsSnapshot,
     pub search_serper: SearchProviderMetricsSnapshot,
     pub search_searxng: SearchProviderMetricsSnapshot,
     pub search_duckduckgo: SearchProviderMetricsSnapshot,
+    pub search_yahoo: SearchProviderMetricsSnapshot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +76,20 @@ pub enum RetryMetricClass {
     ProviderClient,
     ProviderServer,
     MalformedResponse,
+}
+
+/// Egress transport a committed route selection served over (spec §12).
+///
+/// `DirectHybridFallback` marks availability-driven direct service of a hybrid
+/// request that preferred proxy egress; it increments both
+/// `egress_hybrid_fallbacks` and `egress_direct_requests`, because every
+/// fallback is served by direct egress while not every direct request is a
+/// fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EgressRouteMetricClass {
+    Direct,
+    Proxy,
+    DirectHybridFallback,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +109,7 @@ pub enum SearchMetricProvider {
     Serper,
     SearXng,
     DuckDuckGo,
+    Yahoo,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,11 +187,21 @@ pub struct Metrics {
     proxy_restart_attempts: AtomicU64,
     proxy_restart_successes: AtomicU64,
     proxy_restart_failures: AtomicU64,
+    egress_direct_requests: AtomicU64,
+    egress_proxy_requests: AtomicU64,
+    egress_hybrid_fallbacks: AtomicU64,
+    proxy_bootstrap_attempts: AtomicU64,
+    proxy_bootstrap_successes: AtomicU64,
+    proxy_bootstrap_failures: AtomicU64,
+    proxy_state_transitions: AtomicU64,
+    proxy_route_probe_failures: AtomicU64,
+    proxy_duplicate_exit_events: AtomicU64,
     search_tavily: SearchProviderCounters,
     search_exa: SearchProviderCounters,
     search_serper: SearchProviderCounters,
     search_searxng: SearchProviderCounters,
     search_duckduckgo: SearchProviderCounters,
+    search_yahoo: SearchProviderCounters,
 }
 
 impl Metrics {
@@ -203,11 +238,21 @@ impl Metrics {
             proxy_restart_attempts: self.proxy_restart_attempts.load(Ordering::Relaxed),
             proxy_restart_successes: self.proxy_restart_successes.load(Ordering::Relaxed),
             proxy_restart_failures: self.proxy_restart_failures.load(Ordering::Relaxed),
+            egress_direct_requests: self.egress_direct_requests.load(Ordering::Relaxed),
+            egress_proxy_requests: self.egress_proxy_requests.load(Ordering::Relaxed),
+            egress_hybrid_fallbacks: self.egress_hybrid_fallbacks.load(Ordering::Relaxed),
+            proxy_bootstrap_attempts: self.proxy_bootstrap_attempts.load(Ordering::Relaxed),
+            proxy_bootstrap_successes: self.proxy_bootstrap_successes.load(Ordering::Relaxed),
+            proxy_bootstrap_failures: self.proxy_bootstrap_failures.load(Ordering::Relaxed),
+            proxy_state_transitions: self.proxy_state_transitions.load(Ordering::Relaxed),
+            proxy_route_probe_failures: self.proxy_route_probe_failures.load(Ordering::Relaxed),
+            proxy_duplicate_exit_events: self.proxy_duplicate_exit_events.load(Ordering::Relaxed),
             search_tavily: self.search_tavily.snapshot(),
             search_exa: self.search_exa.snapshot(),
             search_serper: self.search_serper.snapshot(),
             search_searxng: self.search_searxng.snapshot(),
             search_duckduckgo: self.search_duckduckgo.snapshot(),
+            search_yahoo: self.search_yahoo.snapshot(),
         }
     }
 
@@ -266,6 +311,59 @@ impl Metrics {
         self.proxy_restart_failures.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Records one committed route-selection decision. Call at the point the
+    /// route is chosen (spec §12), never per chunk, and never for a retained
+    /// rate-limit route that reuses an already-counted decision.
+    pub fn record_egress_route(&self, class: EgressRouteMetricClass) {
+        match class {
+            EgressRouteMetricClass::Direct => {
+                self.egress_direct_requests.fetch_add(1, Ordering::Relaxed);
+            }
+            EgressRouteMetricClass::Proxy => {
+                self.egress_proxy_requests.fetch_add(1, Ordering::Relaxed);
+            }
+            EgressRouteMetricClass::DirectHybridFallback => {
+                // The fallback marker rides on top of the direct transport
+                // counter: every fallback is served by direct egress.
+                self.egress_direct_requests.fetch_add(1, Ordering::Relaxed);
+                self.egress_hybrid_fallbacks.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Bootstrap lifecycle counters (spec §12). Wiring lives with the proxy
+    /// subsystem bootstrap worker that owns each decision point.
+    pub fn record_proxy_bootstrap_attempt(&self) {
+        self.proxy_bootstrap_attempts
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_proxy_bootstrap_success(&self) {
+        self.proxy_bootstrap_successes
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_proxy_bootstrap_failure(&self) {
+        self.proxy_bootstrap_failures
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Proxy subsystem phase transitions (spec §12). Wire from the subsystem
+    /// state machine so bounded logging and counting share one decision point.
+    pub fn record_proxy_state_transition(&self) {
+        self.proxy_state_transitions.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_proxy_route_probe_failure(&self) {
+        self.proxy_route_probe_failures
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_proxy_duplicate_exit_event(&self) {
+        self.proxy_duplicate_exit_events
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn record_search(&self, provider: SearchMetricProvider, outcome: SearchMetricOutcome) {
         match provider {
             SearchMetricProvider::Tavily => self.search_tavily.record(outcome),
@@ -273,6 +371,7 @@ impl Metrics {
             SearchMetricProvider::Serper => self.search_serper.record(outcome),
             SearchMetricProvider::SearXng => self.search_searxng.record(outcome),
             SearchMetricProvider::DuckDuckGo => self.search_duckduckgo.record(outcome),
+            SearchMetricProvider::Yahoo => self.search_yahoo.record(outcome),
         }
     }
 
@@ -468,6 +567,23 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use axum::routing::get;
+
+    #[test]
+    fn search_provider_metrics_are_attributed_per_provider() {
+        let metrics = Metrics::default();
+        metrics.record_search(
+            SearchMetricProvider::DuckDuckGo,
+            SearchMetricOutcome::NoResults,
+        );
+        metrics.record_search(SearchMetricProvider::Yahoo, SearchMetricOutcome::Success);
+        metrics.record_search(SearchMetricProvider::Yahoo, SearchMetricOutcome::Failure);
+        let snapshot = metrics.snapshot();
+        // Yahoo must no longer masquerade as DuckDuckGo.
+        assert_eq!(snapshot.search_yahoo.successes, 1);
+        assert_eq!(snapshot.search_yahoo.failures, 1);
+        assert_eq!(snapshot.search_duckduckgo.no_results, 1);
+        assert_eq!(snapshot.search_duckduckgo.successes, 0);
+    }
     use axum::Router;
     use tower::ServiceExt;
 
@@ -542,6 +658,90 @@ mod tests {
         assert_eq!(snapshot.proxy_restart_attempts, 1);
         assert_eq!(snapshot.proxy_restart_failures, 1);
         assert_eq!(snapshot.search_exa.successes, 1);
+    }
+
+    #[test]
+    fn egress_route_metrics_count_each_decision_exactly_once() {
+        let metrics = Metrics::default();
+        assert_eq!(metrics.snapshot().egress_direct_requests, 0);
+        assert_eq!(metrics.snapshot().egress_proxy_requests, 0);
+        assert_eq!(metrics.snapshot().egress_hybrid_fallbacks, 0);
+
+        metrics.record_egress_route(EgressRouteMetricClass::Direct);
+        metrics.record_egress_route(EgressRouteMetricClass::Direct);
+        metrics.record_egress_route(EgressRouteMetricClass::Proxy);
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.egress_direct_requests, 2);
+        assert_eq!(snapshot.egress_proxy_requests, 1);
+        assert_eq!(snapshot.egress_hybrid_fallbacks, 0);
+
+        // One hybrid fallback decision bumps the fallback marker exactly once
+        // while still counting the direct transport it was served over.
+        metrics.record_egress_route(EgressRouteMetricClass::DirectHybridFallback);
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.egress_direct_requests, 3);
+        assert_eq!(snapshot.egress_proxy_requests, 1);
+        assert_eq!(snapshot.egress_hybrid_fallbacks, 1);
+    }
+
+    #[test]
+    fn proxy_subsystem_lifecycle_counters_default_to_zero_and_record_once() {
+        let metrics = Metrics::default();
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.proxy_bootstrap_attempts, 0);
+        assert_eq!(snapshot.proxy_bootstrap_successes, 0);
+        assert_eq!(snapshot.proxy_bootstrap_failures, 0);
+        assert_eq!(snapshot.proxy_state_transitions, 0);
+        assert_eq!(snapshot.proxy_route_probe_failures, 0);
+        assert_eq!(snapshot.proxy_duplicate_exit_events, 0);
+
+        metrics.record_proxy_bootstrap_attempt();
+        metrics.record_proxy_bootstrap_success();
+        metrics.record_proxy_bootstrap_failure();
+        metrics.record_proxy_state_transition();
+        metrics.record_proxy_route_probe_failure();
+        metrics.record_proxy_duplicate_exit_event();
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.proxy_bootstrap_attempts, 1);
+        assert_eq!(snapshot.proxy_bootstrap_successes, 1);
+        assert_eq!(snapshot.proxy_bootstrap_failures, 1);
+        assert_eq!(snapshot.proxy_state_transitions, 1);
+        assert_eq!(snapshot.proxy_route_probe_failures, 1);
+        assert_eq!(snapshot.proxy_duplicate_exit_events, 1);
+        // Lifecycle counters never bleed into the per-request egress counters.
+        assert_eq!(snapshot.egress_direct_requests, 0);
+        assert_eq!(snapshot.egress_proxy_requests, 0);
+        assert_eq!(snapshot.egress_hybrid_fallbacks, 0);
+    }
+
+    #[test]
+    fn metrics_snapshot_serializes_every_spec_section12_metric_field() {
+        let metrics = Metrics::default();
+        metrics.record_egress_route(EgressRouteMetricClass::DirectHybridFallback);
+        metrics.record_egress_route(EgressRouteMetricClass::Proxy);
+        metrics.record_proxy_state_transition();
+
+        let encoded = serde_json::to_value(metrics.snapshot()).unwrap();
+        for key in [
+            "egress_direct_requests",
+            "egress_proxy_requests",
+            "egress_hybrid_fallbacks",
+            "proxy_bootstrap_attempts",
+            "proxy_bootstrap_successes",
+            "proxy_bootstrap_failures",
+            "proxy_state_transitions",
+            "proxy_route_probe_failures",
+            "proxy_duplicate_exit_events",
+        ] {
+            assert!(
+                encoded.get(key).is_some_and(serde_json::Value::is_u64),
+                "missing or non-numeric §12 metric key: {key}"
+            );
+        }
+        assert_eq!(encoded["egress_direct_requests"], 1);
+        assert_eq!(encoded["egress_proxy_requests"], 1);
+        assert_eq!(encoded["egress_hybrid_fallbacks"], 1);
+        assert_eq!(encoded["proxy_state_transitions"], 1);
     }
 
     #[tokio::test]

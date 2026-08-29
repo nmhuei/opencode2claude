@@ -57,7 +57,6 @@ async fn persistent_reasoning_compat_400_terminates_bounded() {
         retry: opencode2api::config::RetryConfig {
             upstream_base_url: format!("http://{address}"),
             max_network_attempts: 1,
-            max_provider_attempts: 1,
             base_backoff: Duration::ZERO,
             ..defaults.retry
         },

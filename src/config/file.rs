@@ -52,15 +52,16 @@ pub struct TomlConfig {
     pub search_max_snippet_chars: Option<usize>,
     pub search_max_response_bytes: Option<usize>,
     pub search_timeout_secs: Option<u64>,
+    pub search_chain_budget_secs: Option<u64>,
     pub allow_private_searxng: Option<bool>,
     pub tavily_url: Option<String>,
     pub exa_url: Option<String>,
     pub serper_url: Option<String>,
     pub duckduckgo_url: Option<String>,
     pub yahoo_url: Option<String>,
-    pub proxies: Option<Vec<String>>,
-    pub primary_proxies: Option<Vec<String>>,
-    pub warm_standby_proxies: Option<Vec<String>>,
+    pub proxies: Option<StringList>,
+    pub primary_proxies: Option<StringList>,
+    pub warm_standby_proxies: Option<StringList>,
 
     // Management/authentication.
     pub dashboard_admin_token: Option<String>,
@@ -73,10 +74,9 @@ pub struct TomlConfig {
     pub max_sse_line_bytes: Option<usize>,
     pub max_sync_response_bytes: Option<usize>,
     pub upstream_base_url: Option<String>,
-    pub model_fallbacks: Option<Vec<String>>,
+    pub model_fallbacks: Option<StringList>,
     pub enable_default_fallbacks: Option<bool>,
     pub max_network_attempts: Option<usize>,
-    pub max_provider_attempts: Option<u32>,
     pub retry_base_backoff_ms: Option<u64>,
     pub retry_max_backoff_ms: Option<u64>,
 
@@ -85,7 +85,7 @@ pub struct TomlConfig {
     pub active_proxy_count: Option<usize>,
     pub require_verified_exit_ip: Option<bool>,
     pub minimum_unique_exit_ips: Option<usize>,
-    pub identity_endpoints: Option<Vec<String>>,
+    pub identity_endpoints: Option<StringList>,
     pub identity_ttl_secs: Option<u64>,
     pub proxy_health_interval_secs: Option<u64>,
     pub proxy_restart_interval_secs: Option<u64>,
@@ -131,9 +131,36 @@ pub struct TomlConfig {
 }
 
 impl TomlConfig {
+    /// Load and migrate a TOML configuration document.
+    ///
+    /// A missing file is normal (configuration is optional), but a file that
+    /// exists yet fails migration or parsing is rejected WHOLESALE — never
+    /// partially applied. Because the caller treats `None` as "no overrides",
+    /// every such rejection must be logged: otherwise a single typo silently
+    /// discards auth tokens, proxy topology, and bind settings for the whole
+    /// process lifetime.
     pub fn from_file(path: &str) -> Option<Self> {
-        let content = std::fs::read_to_string(path).ok()?;
-        let (migrated, _report) = super::migration::migrate_document(&content).ok()?;
-        toml::from_str(&migrated).ok()
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(error) => {
+                tracing::warn!("ignoring unreadable config file '{path}': {error}");
+                return None;
+            }
+        };
+        let migrated = match super::migration::migrate_document(&content) {
+            Ok((migrated, _report)) => migrated,
+            Err(error) => {
+                tracing::warn!("ignoring invalid config file '{path}': {error}");
+                return None;
+            }
+        };
+        match toml::from_str(&migrated) {
+            Ok(parsed) => Some(parsed),
+            Err(error) => {
+                tracing::warn!("ignoring unparseable config file '{path}': {error}");
+                None
+            }
+        }
     }
 }

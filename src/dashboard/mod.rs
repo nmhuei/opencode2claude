@@ -21,14 +21,14 @@ pub use control::{
     handler_proxy_logs, handler_proxy_plan, handler_proxy_purge, handler_proxy_restart_all,
     handler_revoke_keys, handler_rotate_api_key, handler_select_model, handler_server_logs,
     handler_server_restart, handler_server_stop, handler_update_api_key, handler_update_apply,
-    handler_update_check, handler_verify_api_key,
+    handler_update_check, handler_verify_api_key, no_store_middleware,
 };
 pub use events::{
     handler_events, handler_test_stream_get, handler_test_stream_post, run_heartbeat,
     DashboardEvent,
 };
 pub use overview::{
-    handler_config, handler_dashboard_diagnostics, handler_proxies, handler_proxy_restart,
-    handler_rest_status,
+    handler_config, handler_dashboard_diagnostics, handler_proxies, handler_proxy_drain,
+    handler_proxy_restart, handler_proxy_undrain, handler_rest_status,
 };
 pub use time::{unix_timestamp, uptime_string};

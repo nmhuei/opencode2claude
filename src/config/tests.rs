@@ -16,6 +16,27 @@ fn test_default_config() {
     env::remove_var("OPENCODE_MODEL");
     env::remove_var("BRIDGE_SHELL_POLICY");
     env::remove_var("BRIDGE_AUTH_TOKEN");
+    // Developer shells and the repository `.env` often export machine-wide
+    // values below; without clearing them "default" silently inherits a real
+    // deployment TOML (BRIDGE_CONFIG_PATH) or proxy topology overrides.
+    let previous = [
+        ("BRIDGE_CONFIG_PATH", env::var("BRIDGE_CONFIG_PATH").ok()),
+        (
+            "BRIDGE_PRIMARY_PROXIES",
+            env::var("BRIDGE_PRIMARY_PROXIES").ok(),
+        ),
+        (
+            "BRIDGE_WARM_STANDBY_PROXIES",
+            env::var("BRIDGE_WARM_STANDBY_PROXIES").ok(),
+        ),
+        (
+            "BRIDGE_ACTIVE_PROXY_COUNT",
+            env::var("BRIDGE_ACTIVE_PROXY_COUNT").ok(),
+        ),
+    ];
+    for (name, _) in &previous {
+        env::remove_var(name);
+    }
 
     let config = BridgeConfig::from_env_and_cli(CliOverrides::default());
     assert_eq!(config.bridge_port, DEFAULT_BRIDGE_PORT);
@@ -37,6 +58,14 @@ fn test_default_config() {
         matches!(config.shell_policy, ShellPolicy::Disabled),
         "default shell policy must be Disabled for security reasons"
     );
+
+    // Restore the caller's environment.
+    for (name, value) in previous {
+        match value {
+            Some(restored) => env::set_var(name, restored),
+            None => env::remove_var(name),
+        }
+    }
 }
 
 #[test]
@@ -48,7 +77,6 @@ fn agent_team_defaults_have_high_capacity_without_global_concurrency_cap() {
     assert_eq!(config.channel_capacity, 2048);
     assert_eq!(config.max_search_loops, 20);
     assert_eq!(config.retry.max_network_attempts, 8);
-    assert_eq!(config.retry.max_provider_attempts, 2);
     assert_eq!(config.retry.base_backoff, std::time::Duration::from_secs(1));
     assert_eq!(config.retry.max_backoff, std::time::Duration::from_secs(30));
     assert_eq!(config.egress.max_restart_attempts, 6);
@@ -76,7 +104,9 @@ fn agent_team_defaults_have_high_capacity_without_global_concurrency_cap() {
     assert_eq!(config.history.max_database_bytes, 16 * 1024 * 1024 * 1024);
     assert_eq!(config.history.max_request_bytes, 8 * 1024 * 1024);
     assert_eq!(config.history.max_reasoning_bytes, 16 * 1024 * 1024);
-    assert_eq!(config.history.max_response_bytes, 16 * 1024 * 1024);
+    // Unified with the loader's effective default (2 MiB); the two
+    // constructions paths must not disagree.
+    assert_eq!(config.history.max_response_bytes, 2 * 1024 * 1024);
     assert_eq!(config.history.max_tool_payload_bytes, 4 * 1024 * 1024);
     assert_eq!(config.history.max_record_bytes, 48 * 1024 * 1024);
     assert_eq!(config.history.queue_capacity, 8192);
@@ -351,7 +381,7 @@ fn test_security_public_bind_with_auth_allowed() {
     let config = BridgeConfig {
         host: "0.0.0.0".parse().unwrap(),
         shell_policy: ShellPolicy::Disabled,
-        auth_tokens: Some(vec!["sk-valid".into()]),
+        auth_tokens: Some(vec!["sk-valid-token-12345".into()]),
         management: ManagementConfig {
             dashboard_token: Some("super-secret-admin-token-12345".into()),
             ..BridgeConfig::default().management
@@ -373,7 +403,7 @@ fn test_security_public_bind_with_unrestricted_shell_rejected() {
     let config = BridgeConfig {
         host: "0.0.0.0".parse().unwrap(),
         shell_policy: ShellPolicy::Unrestricted,
-        auth_tokens: Some(vec!["sk-valid".into()]),
+        auth_tokens: Some(vec!["sk-valid-token-12345".into()]),
         management: ManagementConfig {
             dashboard_token: Some("super-secret-admin-token-12345".into()),
             ..BridgeConfig::default().management
@@ -509,6 +539,120 @@ fn test_auth_tokens_accept_toml_array() {
 }
 
 #[test]
+fn toml_list_keys_accept_csv_string_form() {
+    // A CSV string must not poison the whole document: with these keys typed
+    // as plain `Vec<String>`, one string-form value made `from_file` drop
+    // every setting in the file silently.
+    let parsed: TomlConfig = toml::from_str(
+        r#"
+proxies = "socks5://127.0.0.1:49005, socks5h://127.0.0.1:49006"
+primary_proxies = "socks5://127.0.0.1:49007"
+warm_standby_proxies = "socks5h://127.0.0.1:49008"
+model_fallbacks = "fb-a, fb-b"
+identity_endpoints = "https://a.example/cdn-cgi/trace, https://b.example/?format=json"
+"#,
+    )
+    .expect("CSV string form must be accepted for list-valued TOML keys");
+    assert_eq!(
+        parsed.proxies.map(StringList::into_vec),
+        Some(vec![
+            "socks5://127.0.0.1:49005".to_string(),
+            "socks5h://127.0.0.1:49006".to_string(),
+        ])
+    );
+    assert_eq!(
+        parsed.primary_proxies.map(StringList::into_vec),
+        Some(vec!["socks5://127.0.0.1:49007".to_string()])
+    );
+    assert_eq!(
+        parsed.warm_standby_proxies.map(StringList::into_vec),
+        Some(vec!["socks5h://127.0.0.1:49008".to_string()])
+    );
+    assert_eq!(
+        parsed.model_fallbacks.map(StringList::into_vec),
+        Some(vec!["fb-a".to_string(), "fb-b".to_string()])
+    );
+    assert_eq!(
+        parsed
+            .identity_endpoints
+            .map(StringList::into_vec)
+            .as_deref(),
+        Some(
+            [
+                "https://a.example/cdn-cgi/trace".to_string(),
+                "https://b.example/?format=json".to_string(),
+            ]
+            .as_slice()
+        )
+    );
+}
+
+#[test]
+fn csv_string_toml_proxy_keys_feed_the_loader_with_precedence_intact() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let previous = isolate_proxy_env();
+
+    let tmp = std::env::temp_dir().join("opencode2api_csv_string_proxies.toml");
+    std::fs::write(
+        &tmp,
+        r#"
+proxies = "socks5://127.0.0.1:49011"
+primary_proxies = "socks5://127.0.0.1:49012"
+warm_standby_proxies = "socks5h://127.0.0.1:49013"
+"#,
+    )
+    .unwrap();
+
+    let config = BridgeConfig::from_env_and_cli(CliOverrides {
+        config_path: Some(tmp.to_string_lossy().to_string()),
+        ..Default::default()
+    });
+    assert_eq!(
+        config.primary_proxies.as_deref(),
+        Some(["socks5h://127.0.0.1:49012".to_string()].as_slice()),
+        "string-form primary_proxies must beat string-form legacy proxies"
+    );
+    assert_eq!(
+        config.warm_standby_proxies.as_deref(),
+        Some(["socks5h://127.0.0.1:49013".to_string()].as_slice())
+    );
+    assert!(config.egress.proxies_explicitly_configured);
+
+    env::set_var("BRIDGE_WARM_STANDBY_PROXIES", "socks5h://127.0.0.1:49014");
+    let config = BridgeConfig::from_env_and_cli(CliOverrides {
+        config_path: Some(tmp.to_string_lossy().to_string()),
+        ..Default::default()
+    });
+    assert_eq!(
+        config.warm_standby_proxies.as_deref(),
+        Some(["socks5h://127.0.0.1:49014".to_string()].as_slice()),
+        "env must still beat CSV-string TOML"
+    );
+
+    restore_env(previous);
+    let _ = std::fs::remove_file(tmp);
+}
+
+#[test]
+fn malformed_toml_document_is_rejected_wholesale() {
+    // Pins the fail-safe semantics that the loader's diagnostics rely on:
+    // any migration conflict or type confusion rejects the WHOLE document,
+    // never a partial parse.
+    let tmp = std::env::temp_dir().join("opencode2api_malformed_toml.toml");
+
+    std::fs::write(&tmp, b"port = \"not-a-number\"\n").unwrap();
+    assert!(TomlConfig::from_file(tmp.to_string_lossy().as_ref()).is_none());
+
+    std::fs::write(&tmp, b"bridge_port = 4000\nport = 4001\n").unwrap();
+    assert!(TomlConfig::from_file(tmp.to_string_lossy().as_ref()).is_none());
+
+    std::fs::write(&tmp, b"schema_version = 99\n").unwrap();
+    assert!(TomlConfig::from_file(tmp.to_string_lossy().as_ref()).is_none());
+
+    let _ = std::fs::remove_file(tmp);
+}
+
+#[test]
 fn test_operational_policy_precedence_env_over_toml() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let tmp = std::env::temp_dir().join("opencode2api_policy_precedence.toml");
@@ -577,6 +721,112 @@ primary_proxies = ["socks5://127.0.0.1:40001"]
         "OPENCODE_MODEL_FALLBACKS",
     ] {
         env::remove_var(name);
+    }
+    let _ = std::fs::remove_file(tmp);
+}
+
+#[test]
+fn search_chain_budget_default_matches_search_policy() {
+    let config = BridgeConfig::default();
+    assert_eq!(
+        config.search.chain_budget,
+        std::time::Duration::from_secs(25),
+        "config default must stay in lockstep with SearchPolicy::default().chain_budget"
+    );
+}
+
+#[test]
+fn search_chain_budget_env_toml_precedence_and_invalid_fallback() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let name = "BRIDGE_SEARCH_CHAIN_BUDGET_SECS";
+    let previous = (
+        name,
+        env::var(name).ok(),
+        ("BRIDGE_CONFIG_PATH", env::var("BRIDGE_CONFIG_PATH").ok()),
+    );
+    env::remove_var(name);
+    env::remove_var("BRIDGE_CONFIG_PATH");
+
+    // Default (neither source configured).
+    let config = BridgeConfig::from_env_and_cli(CliOverrides::default());
+    assert_eq!(
+        config.search.chain_budget,
+        std::time::Duration::from_secs(25)
+    );
+
+    // TOML override applies when the environment is unset.
+    let tmp = std::env::temp_dir().join("opencode2api_search_chain_budget.toml");
+    let _ = std::fs::remove_file(&tmp);
+    std::fs::write(&tmp, b"search_chain_budget_secs = 33\n").unwrap();
+    let toml_overrides = CliOverrides {
+        config_path: Some(tmp.to_string_lossy().to_string()),
+        ..Default::default()
+    };
+    let config = BridgeConfig::from_env_and_cli(toml_overrides);
+    assert_eq!(
+        config.search.chain_budget,
+        std::time::Duration::from_secs(33)
+    );
+
+    // Environment beats TOML.
+    env::set_var(name, "41");
+    let toml_overrides = CliOverrides {
+        config_path: Some(tmp.to_string_lossy().to_string()),
+        ..Default::default()
+    };
+    let config = BridgeConfig::from_env_and_cli(toml_overrides);
+    assert_eq!(
+        config.search.chain_budget,
+        std::time::Duration::from_secs(41),
+        "env should override TOML"
+    );
+
+    // Invalid numeric text warns via env_parse and falls back to the default.
+    env::set_var(name, "not-a-number");
+    let config = BridgeConfig::from_env_and_cli(CliOverrides::default());
+    assert_eq!(
+        config.search.chain_budget,
+        std::time::Duration::from_secs(25)
+    );
+
+    // A zero budget would starve every provider; it must be rejected.
+    env::set_var(name, "0");
+    let config = BridgeConfig::from_env_and_cli(CliOverrides::default());
+    assert_eq!(
+        config.search.chain_budget,
+        std::time::Duration::from_secs(25),
+        "zero budget must fall back to the default"
+    );
+
+    // Same rejection applies to a zero coming from TOML.
+    env::remove_var(name);
+    std::fs::write(&tmp, b"search_chain_budget_secs = 0\n").unwrap();
+    let toml_overrides = CliOverrides {
+        config_path: Some(tmp.to_string_lossy().to_string()),
+        ..Default::default()
+    };
+    let config = BridgeConfig::from_env_and_cli(toml_overrides);
+    assert_eq!(
+        config.search.chain_budget,
+        std::time::Duration::from_secs(25),
+        "zero budget from TOML must also fall back to the default"
+    );
+
+    match previous {
+        (_, Some(restored), (config_name, config_value)) => {
+            env::set_var(name, restored);
+            match config_value {
+                Some(value) => env::set_var(config_name, value),
+                None => env::remove_var(config_name),
+            }
+        }
+        (_, None, (config_name, config_value)) => {
+            env::remove_var(name);
+            match config_value {
+                Some(value) => env::set_var(config_name, value),
+                None => env::remove_var(config_name),
+            }
+        }
     }
     let _ = std::fs::remove_file(tmp);
 }
@@ -652,4 +902,458 @@ fn test_cli_egress_mode_overrides_environment() {
         Some(value) => env::set_var("BRIDGE_EGRESS_MODE", value),
         None => env::remove_var("BRIDGE_EGRESS_MODE"),
     }
+}
+
+// ── Legacy `proxies` vs specific `primary_proxies` precedence ──
+
+fn isolate_proxy_env() -> Vec<(String, Option<String>)> {
+    let names = [
+        "BRIDGE_PRIMARY_PROXIES",
+        "BRIDGE_WARM_STANDBY_PROXIES",
+        "BRIDGE_PROXIES",
+        "BRIDGE_EGRESS_MODE",
+        "BRIDGE_CONFIG_PATH",
+    ];
+    let previous = names
+        .iter()
+        .map(|name| ((*name).to_string(), env::var(name).ok()))
+        .collect::<Vec<_>>();
+    for (name, _) in &previous {
+        env::remove_var(name);
+    }
+    previous
+}
+
+fn restore_env(previous: Vec<(String, Option<String>)>) {
+    for (name, value) in previous {
+        match value {
+            Some(value) => env::set_var(name, value),
+            None => env::remove_var(name),
+        }
+    }
+}
+
+#[test]
+fn toml_legacy_proxies_lose_to_primary_proxies_in_same_document() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let previous = isolate_proxy_env();
+
+    let tmp = std::env::temp_dir().join("opencode2api_proxy_specificity.toml");
+    std::fs::write(
+        &tmp,
+        r#"
+proxies = ["socks5://127.0.0.1:49001"]
+primary_proxies = ["socks5://127.0.0.1:49002"]
+"#,
+    )
+    .unwrap();
+
+    let config = BridgeConfig::from_env_and_cli(CliOverrides {
+        config_path: Some(tmp.to_string_lossy().to_string()),
+        ..Default::default()
+    });
+
+    assert_eq!(
+        config.primary_proxies.as_deref(),
+        Some(["socks5h://127.0.0.1:49002".to_string()].as_slice()),
+        "the specific primary_proxies key must beat the legacy proxies key in the same document"
+    );
+    assert!(config.egress.proxies_explicitly_configured);
+
+    restore_env(previous);
+    let _ = std::fs::remove_file(tmp);
+}
+
+#[test]
+fn toml_legacy_proxies_alone_still_configure_primary_pool() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let previous = isolate_proxy_env();
+
+    let tmp = std::env::temp_dir().join("opencode2api_legacy_only.toml");
+    std::fs::write(&tmp, r#"proxies = ["socks5://127.0.0.1:49003"]"#).unwrap();
+
+    let config = BridgeConfig::from_env_and_cli(CliOverrides {
+        config_path: Some(tmp.to_string_lossy().to_string()),
+        ..Default::default()
+    });
+
+    assert_eq!(
+        config.primary_proxies.as_deref(),
+        Some(["socks5h://127.0.0.1:49003".to_string()].as_slice()),
+        "a lone legacy proxies key must keep feeding the primary pool"
+    );
+
+    restore_env(previous);
+    let _ = std::fs::remove_file(tmp);
+}
+
+#[test]
+fn default_pool_is_not_flagged_as_explicit_configuration() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let previous = isolate_proxy_env();
+
+    let config = BridgeConfig::from_env_and_cli(CliOverrides::default());
+    assert!(config.primary_proxies.is_some());
+    assert!(
+        !config.egress.proxies_explicitly_configured,
+        "the built-in WARP fallback pool must not count as user configuration"
+    );
+
+    restore_env(previous);
+}
+
+// ── Host parse failure and malformed env fallthrough ──
+
+#[test]
+fn invalid_host_value_falls_back_to_loopback() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let previous_host = env::var("BRIDGE_HOST").ok();
+    env::remove_var("BRIDGE_HOST");
+
+    env::set_var("BRIDGE_HOST", "not-a-host");
+    let config = BridgeConfig::from_env_and_cli(CliOverrides::default());
+    assert_eq!(
+        config.host.to_string(),
+        DEFAULT_HOST,
+        "invalid BRIDGE_HOST must fall back to the loopback default"
+    );
+
+    // Same behavior when the bad value comes from TOML.
+    let tmp = std::env::temp_dir().join("opencode2api_bad_host.toml");
+    std::fs::write(&tmp, b"host = \"999.999.999.999\"\n").unwrap();
+    let config = BridgeConfig::from_env_and_cli(CliOverrides {
+        config_path: Some(tmp.to_string_lossy().to_string()),
+        ..Default::default()
+    });
+    assert_eq!(
+        config.host.to_string(),
+        DEFAULT_HOST,
+        "invalid TOML host must fall back to the loopback default"
+    );
+
+    match previous_host {
+        Some(value) => env::set_var("BRIDGE_HOST", value),
+        None => env::remove_var("BRIDGE_HOST"),
+    }
+    let _ = std::fs::remove_file(tmp);
+}
+
+#[test]
+fn malformed_numeric_env_falls_through_to_default() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let previous = env::var("BRIDGE_PORT").ok();
+    env::set_var("BRIDGE_PORT", "not-a-port");
+
+    let config = BridgeConfig::from_env_and_cli(CliOverrides::default());
+    assert_eq!(
+        config.bridge_port, DEFAULT_BRIDGE_PORT,
+        "malformed numeric env values must be ignored, not zero or panic"
+    );
+
+    match previous {
+        Some(value) => env::set_var("BRIDGE_PORT", value),
+        None => env::remove_var("BRIDGE_PORT"),
+    }
+}
+
+// ── Public-bind token gates ──
+
+#[test]
+fn rest_api_token_alone_rejected_on_public_bind() {
+    // REST_API_TOKEN never reaches the LLM-route admission registry, so a
+    // bind justified by it alone would serve /v1/messages and
+    // /v1/chat/completions unauthenticated. It must not satisfy the gate.
+    let config = BridgeConfig {
+        host: "0.0.0.0".parse().unwrap(),
+        shell_policy: ShellPolicy::Disabled,
+        auth_tokens: None,
+        management: ManagementConfig {
+            dashboard_token: Some("super-secret-admin-token-12345".into()),
+            rest_api_token: Some("rest-api-token-1234567890".into()),
+            ..BridgeConfig::default().management
+        },
+        ..Default::default()
+    };
+    let result = config.validate_security();
+    assert!(
+        result.is_err(),
+        "REST_API_TOKEN alone must NOT justify a public bind: {:?}",
+        config.validate_security().err()
+    );
+    let msg = result.unwrap_err();
+    assert!(
+        msg.contains("SECURITY VIOLATION") && msg.contains("BRIDGE_AUTH_TOKEN"),
+        "error must demand BRIDGE_AUTH_TOKEN: {msg}"
+    );
+    assert!(
+        msg.contains("REST_API_TOKEN"),
+        "error must explain why REST_API_TOKEN is insufficient: {msg}"
+    );
+}
+
+#[test]
+fn bridge_and_rest_api_tokens_together_pass_public_bind() {
+    let config = BridgeConfig {
+        host: "0.0.0.0".parse().unwrap(),
+        shell_policy: ShellPolicy::Disabled,
+        auth_tokens: Some(vec!["sk-valid-token-12345".into()]),
+        management: ManagementConfig {
+            dashboard_token: Some("super-secret-admin-token-12345".into()),
+            rest_api_token: Some("rest-api-token-1234567890".into()),
+            ..BridgeConfig::default().management
+        },
+        ..Default::default()
+    };
+    assert!(
+        config.validate_security().is_ok(),
+        "BRIDGE_AUTH_TOKEN + REST_API_TOKEN must pass on a public bind: {:?}",
+        config.validate_security().err()
+    );
+}
+
+#[test]
+fn loopback_bind_passes_with_either_token_alone() {
+    // Loopback keeps working with only a REST API token (local dev) …
+    let rest_only = BridgeConfig {
+        host: "127.0.0.1".parse().unwrap(),
+        shell_policy: ShellPolicy::Disabled,
+        auth_tokens: None,
+        management: ManagementConfig {
+            rest_api_token: Some("rest-api-token-1234567890".into()),
+            ..BridgeConfig::default().management
+        },
+        ..Default::default()
+    };
+    assert!(
+        rest_only.validate_security().is_ok(),
+        "loopback + REST_API_TOKEN alone must stay allowed"
+    );
+
+    // … and with only BRIDGE_AUTH_TOKEN.
+    let auth_only = BridgeConfig {
+        host: "127.0.0.1".parse().unwrap(),
+        shell_policy: ShellPolicy::Disabled,
+        auth_tokens: Some(vec!["sk-valid-token-12345".into()]),
+        ..Default::default()
+    };
+    assert!(
+        auth_only.validate_security().is_ok(),
+        "loopback + BRIDGE_AUTH_TOKEN alone must stay allowed: {:?}",
+        auth_only.validate_security().err()
+    );
+}
+
+#[test]
+fn short_bridge_auth_token_rejected_on_public_bind() {
+    let config = BridgeConfig {
+        host: "0.0.0.0".parse().unwrap(),
+        shell_policy: ShellPolicy::Disabled,
+        auth_tokens: Some(vec!["tiny".into(), "long-enough-token-123".into()]),
+        management: ManagementConfig {
+            dashboard_token: Some("super-secret-admin-token-12345".into()),
+            ..BridgeConfig::default().management
+        },
+        ..Default::default()
+    };
+    let result = config.validate_security();
+    assert!(
+        result.is_err(),
+        "a 1-char bridge token must fail validation"
+    );
+    let msg = result.unwrap_err();
+    assert!(
+        msg.contains("too weak") && msg.contains("BRIDGE_AUTH_TOKEN"),
+        "weak-token error must name BRIDGE_AUTH_TOKEN: {msg}"
+    );
+}
+
+#[test]
+fn empty_proxy_sources_do_not_count_as_explicit_configuration() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let previous = isolate_proxy_env();
+
+    // A comma-only list parses to zero proxies; it must NOT flip the
+    // explicit-configuration flag, or `egress_mode="proxy"` would accept the
+    // silently inherited built-in WARP pool that the gate exists to reject.
+    env::set_var("BRIDGE_PRIMARY_PROXIES", " , ,");
+    let config = BridgeConfig::from_env_and_cli(CliOverrides::default());
+    assert_eq!(
+        config.primary_proxies.as_deref(),
+        Some(["socks5h://127.0.0.1:40001".to_string()].as_slice()),
+        "comma-only primary list must keep the built-in default pool"
+    );
+    assert!(
+        !config.egress.proxies_explicitly_configured,
+        "comma-only BRIDGE_PRIMARY_PROXIES must not count as explicit configuration"
+    );
+    env::remove_var("BRIDGE_PRIMARY_PROXIES");
+
+    env::set_var("BRIDGE_PROXIES", ",");
+    let config = BridgeConfig::from_env_and_cli(CliOverrides::default());
+    assert!(
+        !config.egress.proxies_explicitly_configured,
+        "comma-only legacy BRIDGE_PROXIES must not count as explicit configuration"
+    );
+    env::remove_var("BRIDGE_PROXIES");
+
+    let tmp = std::env::temp_dir().join("opencode2api_empty_toml_proxies.toml");
+    std::fs::write(&tmp, "primary_proxies = []\n").unwrap();
+    let config = BridgeConfig::from_env_and_cli(CliOverrides {
+        config_path: Some(tmp.to_string_lossy().to_string()),
+        ..Default::default()
+    });
+    assert!(
+        !config.egress.proxies_explicitly_configured,
+        "an empty TOML proxy array must not count as explicit configuration"
+    );
+
+    restore_env(previous);
+    let _ = std::fs::remove_file(tmp);
+}
+
+// ── Explicit proxy-mode gate ──
+
+#[test]
+fn explicit_proxy_mode_without_explicit_proxies_rejected() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let previous = isolate_proxy_env();
+    env::set_var("BRIDGE_EGRESS_MODE", "proxy");
+
+    let config = BridgeConfig::from_env_and_cli(CliOverrides::default());
+    // The loader keeps materializing its built-in pool; only the gate changes.
+    assert!(config.primary_proxies.is_some());
+
+    let result = config.validate_security();
+    assert!(
+        result.is_err(),
+        "explicit proxy mode with only inherited defaults must be rejected"
+    );
+    let msg = result.unwrap_err();
+    assert!(
+        msg.contains("primary_proxies"),
+        "gate must point at the explicit proxy keys: {msg}"
+    );
+
+    restore_env(previous);
+}
+
+#[test]
+fn explicit_proxy_mode_with_explicit_proxies_accepted() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let previous = isolate_proxy_env();
+    env::set_var("BRIDGE_EGRESS_MODE", "proxy");
+    env::set_var("BRIDGE_PRIMARY_PROXIES", "socks5h://127.0.0.1:40009");
+
+    let config = BridgeConfig::from_env_and_cli(CliOverrides::default());
+    assert!(
+        config.validate_security().is_ok(),
+        "explicitly configured proxies must satisfy proxy mode: {:?}",
+        config.validate_security().err()
+    );
+
+    restore_env(previous);
+}
+
+#[test]
+fn proxy_mode_validation_tracks_explicit_configuration_flag() {
+    let mut config = BridgeConfig::default();
+    config.egress.mode = EgressMode::Proxy;
+    assert!(
+        config.validate_security().is_err(),
+        "Proxy mode over a silently inherited pool must fail validation"
+    );
+
+    // Flag alone is not enough for a hand-built config: the effective
+    // resolved list must also be non-empty.
+    config.egress.proxies_explicitly_configured = true;
+    assert!(
+        config.validate_security().is_err(),
+        "empty resolved pool must keep failing the effective-list check"
+    );
+
+    config.primary_proxies = Some(vec!["socks5h://127.0.0.1:40009".to_string()]);
+    assert!(
+        config.validate_security().is_ok(),
+        "Proxy mode over a deliberately configured pool must pass: {:?}",
+        config.validate_security().err()
+    );
+}
+
+// ── Retired `max_provider_attempts` knob ──
+//
+// The knob was born dead: loaded from env/TOML and displayed, but enforced
+// nowhere (the retry loop's only budget is max_network_attempts), while its
+// documented purpose ("retry budget for non-rate-limit provider client
+// errors") contradicts the deliberate fail-fast design of the retry loop.
+// It is retired from every operator-facing surface and from `RetryConfig`
+// itself. These tests pin backward compatibility: a stale environment value
+// has no effect, while a legacy TOML key is stripped before typed parsing.
+
+#[test]
+fn retired_max_provider_attempts_env_is_ignored() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let names = ["BRIDGE_MAX_PROVIDER_ATTEMPTS", "BRIDGE_CONFIG_PATH"];
+    let previous = names.map(|name| (name, env::var(name).ok()));
+    env::remove_var("BRIDGE_CONFIG_PATH");
+    env::set_var("BRIDGE_MAX_PROVIDER_ATTEMPTS", "7");
+
+    let config = BridgeConfig::from_env_and_cli(CliOverrides::default());
+    assert_eq!(
+        config.retry.max_network_attempts, 8,
+        "the retired BRIDGE_MAX_PROVIDER_ATTEMPTS surface must not perturb the active retry policy"
+    );
+
+    for (name, value) in previous {
+        match value {
+            Some(value) => env::set_var(name, value),
+            None => env::remove_var(name),
+        }
+    }
+}
+
+#[test]
+fn retired_max_provider_attempts_toml_key_is_stripped_before_parse() {
+    // Migration strips retired keys wholesale so hand-edited documents and
+    // management-apply payloads never trip unknown-key gates after the
+    // allowlist entry is removed.
+    let (document, _) =
+        super::migration::migrate_document("port = 6100\nmax_provider_attempts = 7\n")
+            .expect("a document carrying only the retired key must still migrate");
+    assert!(
+        !document.contains("max_provider_attempts"),
+        "retired key must be stripped during migration: {document}"
+    );
+    assert!(document.contains("port = 6100"));
+
+    // End-to-end: the key must not reach the resolved config.
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let names = [
+        "BRIDGE_MAX_PROVIDER_ATTEMPTS",
+        "BRIDGE_PORT",
+        "BRIDGE_CONFIG_PATH",
+    ];
+    let previous = names.map(|name| (name, env::var(name).ok()));
+    for (name, _) in &previous {
+        env::remove_var(name);
+    }
+
+    let tmp = std::env::temp_dir().join("opencode2api_retired_provider_attempts.toml");
+    std::fs::write(&tmp, "port = 6100\nmax_provider_attempts = 7\n").unwrap();
+    let config = BridgeConfig::from_env_and_cli(CliOverrides {
+        config_path: Some(tmp.to_string_lossy().to_string()),
+        ..Default::default()
+    });
+    assert_eq!(config.bridge_port, 6100, "surviving keys must still apply");
+    assert_eq!(
+        config.retry.max_network_attempts, 8,
+        "the retired TOML key must not perturb the active retry policy"
+    );
+
+    for (name, value) in previous {
+        match value {
+            Some(value) => env::set_var(name, value),
+            None => env::remove_var(name),
+        }
+    }
+    let _ = std::fs::remove_file(tmp);
 }

@@ -4,9 +4,9 @@ use crate::config::BridgeConfig;
 use serde::Serialize;
 
 pub const OX_ALPHA_MODEL: &str = "opencode/x-preview-f-free";
-pub const OX_ALPHA_CLAUDE_MODEL: &str = "sonnet[1m]";
+pub const OX_ALPHA_CLAUDE_MODEL: &str = "claude-opus-5";
 pub const OX_ALPHA_MAX_OUTPUT_TOKENS: &str = "128000";
-pub const OX_ALPHA_AUTO_COMPACT_WINDOW: &str = "870000";
+pub const OX_ALPHA_AUTO_COMPACT_WINDOW: &str = "450000";
 pub const OX_ALPHA_MAX_THINKING_TOKENS: &str = "120000";
 
 #[derive(Debug, Clone, Serialize)]
@@ -18,13 +18,18 @@ pub struct IntegrationEnvironment {
     pub shell_exports: Vec<String>,
 }
 
+/// Compile-time fallback credential for local loopback setups with no
+/// authentication configured anywhere. The auth middleware only honors it
+/// under those exact conditions; it never substitutes for a real credential.
+pub const FALLBACK_API_KEY: &str = "opencode-bridge";
+
 pub fn api_key(config: &BridgeConfig) -> &str {
     config
         .auth_tokens
         .as_ref()
         .and_then(|tokens| tokens.first())
         .map(|token| token.expose())
-        .unwrap_or("opencode-bridge")
+        .unwrap_or(FALLBACK_API_KEY)
 }
 
 pub fn base_url(config: &BridgeConfig) -> String {
@@ -50,12 +55,9 @@ pub fn process_environment(config: &BridgeConfig) -> Vec<(String, Option<String>
         ("OPENCODE_MODEL".to_string(), Some(effective_model.clone())),
     ];
 
-    if effective_model == OX_ALPHA_MODEL {
-        vars.extend(
-            ox_alpha_claude_code_vars()
-                .into_iter()
-                .map(|(key, value)| (key.to_string(), Some(value.to_string()))),
-        );
+    let profile = crate::application::models::resolve_model_profile(&effective_model);
+    for (k, v) in model_claude_code_vars(&profile) {
+        vars.push((k.to_string(), Some(v)));
     }
 
     vars
@@ -88,27 +90,48 @@ pub fn environment(config: &BridgeConfig) -> IntegrationEnvironment {
     }
 }
 
-fn ox_alpha_claude_code_vars() -> [(&'static str, &'static str); 9] {
-    [
-        ("ANTHROPIC_MODEL", OX_ALPHA_CLAUDE_MODEL),
-        ("CLAUDE_CODE_DISABLE_1M_CONTEXT", "0"),
-        ("CLAUDE_CODE_MAX_OUTPUT_TOKENS", OX_ALPHA_MAX_OUTPUT_TOKENS),
+pub fn model_claude_code_vars(
+    profile: &crate::application::models::ModelProfile,
+) -> Vec<(&'static str, String)> {
+    let auto_compact = profile.auto_compact_window().to_string();
+    let max_output = profile.max_output_tokens.to_string();
+    let disable_1m = if profile.context_window >= 1_000_000 {
+        "0"
+    } else {
+        "1"
+    };
+    let (disable_thinking, disable_adaptive, effort, effort_level) = if profile.supports_thinking {
+        ("0", "0", "1", "max")
+    } else {
+        ("1", "1", "0", "low")
+    };
+    let max_thinking = profile
+        .max_output_tokens
+        .saturating_sub(1024)
+        .min(120_000)
+        .to_string();
+
+    vec![
+        ("ANTHROPIC_MODEL", profile.anthropic_alias.to_string()),
+        ("CLAUDE_CODE_DISABLE_1M_CONTEXT", disable_1m.to_string()),
+        ("CLAUDE_CODE_MAX_OUTPUT_TOKENS", max_output),
+        ("CLAUDE_CODE_AUTO_COMPACT_WINDOW", auto_compact),
+        ("CLAUDE_CODE_DISABLE_THINKING", disable_thinking.to_string()),
         (
-            "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
-            OX_ALPHA_AUTO_COMPACT_WINDOW,
+            "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING",
+            disable_adaptive.to_string(),
         ),
-        ("CLAUDE_CODE_DISABLE_THINKING", "0"),
-        ("CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING", "0"),
-        ("CLAUDE_CODE_ALWAYS_ENABLE_EFFORT", "1"),
-        ("CLAUDE_CODE_EFFORT_LEVEL", "max"),
-        ("MAX_THINKING_TOKENS", OX_ALPHA_MAX_THINKING_TOKENS),
+        ("CLAUDE_CODE_ALWAYS_ENABLE_EFFORT", effort.to_string()),
+        ("CLAUDE_CODE_EFFORT_LEVEL", effort_level.to_string()),
+        ("MAX_THINKING_TOKENS", max_thinking),
     ]
 }
 
 pub fn ox_alpha_claude_code_exports() -> Vec<String> {
-    ox_alpha_claude_code_vars()
+    let profile = crate::application::models::resolve_model_profile(OX_ALPHA_MODEL);
+    model_claude_code_vars(&profile)
         .into_iter()
-        .map(|(key, value)| format!("export {key}={}", shell_quote(value)))
+        .map(|(key, value)| format!("export {key}={}", shell_quote(&value)))
         .collect()
 }
 
@@ -142,29 +165,26 @@ mod tests {
     }
 
     #[test]
-    fn ox_alpha_environment_exports_verified_claude_code_session_tuning() {
-        let config = BridgeConfig {
-            model: Some("opencode/x-preview-f-free".to_string()),
+    fn dynamic_environment_exports_80_percent_autocompact_window() {
+        let config_mimo = BridgeConfig {
+            model: Some("opencode/mimo-v2.5-free".to_string()),
             ..Default::default()
         };
+        let exports = environment(&config_mimo).shell_exports;
+        assert!(exports
+            .iter()
+            .any(|line| line == "export CLAUDE_CODE_AUTO_COMPACT_WINDOW='204800'"));
+        assert!(exports
+            .iter()
+            .any(|line| line == "export CLAUDE_CODE_MAX_OUTPUT_TOKENS='64000'"));
 
-        let exports = environment(&config).shell_exports;
-        for expected in [
-            "unset ANTHROPIC_AUTH_TOKEN",
-            "export ANTHROPIC_MODEL='sonnet[1m]'",
-            "export CLAUDE_CODE_DISABLE_1M_CONTEXT='0'",
-            "export CLAUDE_CODE_MAX_OUTPUT_TOKENS='128000'",
-            "export CLAUDE_CODE_AUTO_COMPACT_WINDOW='870000'",
-            "export CLAUDE_CODE_DISABLE_THINKING='0'",
-            "export CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING='0'",
-            "export CLAUDE_CODE_ALWAYS_ENABLE_EFFORT='1'",
-            "export CLAUDE_CODE_EFFORT_LEVEL='max'",
-            "export MAX_THINKING_TOKENS='120000'",
-        ] {
-            assert!(
-                exports.iter().any(|line| line == expected),
-                "missing {expected}"
-            );
-        }
+        let config_nemotron = BridgeConfig {
+            model: Some("opencode/nemotron-3-ultra-free".to_string()),
+            ..Default::default()
+        };
+        let exports_nemotron = environment(&config_nemotron).shell_exports;
+        assert!(exports_nemotron
+            .iter()
+            .any(|line| line == "export CLAUDE_CODE_AUTO_COMPACT_WINDOW='102400'"));
     }
 }

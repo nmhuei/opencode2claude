@@ -1,9 +1,11 @@
 //! Typed management API data-transfer objects and their OpenAPI schemas.
 
 use crate::audit::AuditEvent;
-use crate::management::service::{ProxyRestartResult, SafeConfigSnapshot};
+use crate::management::service::{
+    EgressOperationalSnapshot, ProxyDrainResult, ProxyRestartResult, SafeConfigSnapshot,
+};
 use crate::observability::MetricsSnapshot;
-use crate::proxy_pool::ProxyPoolStats;
+use crate::proxy_pool::{ProxyPoolStats, ProxySubsystemSnapshot};
 use crate::workers::WorkerSnapshot;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -24,8 +26,25 @@ pub struct BridgeSummary {
 pub struct EgressSummary {
     pub mode: String,
     pub ready: bool,
+    pub active_route: String,
+    pub minimum_unique_exit_ips: usize,
     pub unique_verified_exits: usize,
+    pub proxy_subsystem: ProxySubsystemSnapshot,
     pub proxy_pool: ProxyPoolStats,
+}
+
+impl From<EgressOperationalSnapshot> for EgressSummary {
+    fn from(snapshot: EgressOperationalSnapshot) -> Self {
+        Self {
+            mode: snapshot.mode.to_string(),
+            ready: snapshot.gateway_ready,
+            active_route: snapshot.active_route.to_string(),
+            minimum_unique_exit_ips: snapshot.minimum_unique_exit_ips,
+            unique_verified_exits: snapshot.unique_verified_exits,
+            proxy_subsystem: snapshot.proxy_subsystem,
+            proxy_pool: snapshot.proxy_pool,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -162,6 +181,12 @@ impl ApiSchema for ConfigResponse {
                 "bridge_port",
                 "opencode_port",
                 "shell_policy",
+                "max_body_size",
+                "stream_buffer_size",
+                "channel_capacity",
+                "max_search_loops",
+                "primary_proxies",
+                "warm_standby_proxies",
                 "features",
             ],
             json!({
@@ -194,6 +219,35 @@ impl ApiSchema for ProxyActionResponse {
         object_schema(
             &["status", "proxy"],
             json!({"status":{"type":"string"},"proxy":{"type":"object"}}),
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProxyDrainResponse {
+    pub status: String,
+    pub proxy: ProxyDrainResult,
+}
+
+impl ApiSchema for ProxyDrainResponse {
+    const NAME: &'static str = "ProxyDrainResponse";
+    fn schema() -> Value {
+        object_schema(
+            &["status", "proxy"],
+            json!({
+                "status":{"type":"string"},
+                "proxy":{
+                    "type":"object",
+                    "additionalProperties":false,
+                    "required":["port","action","draining","active_requests"],
+                    "properties":{
+                        "port":{"type":"integer","minimum":1,"maximum":65535},
+                        "action":{"type":"string","enum":["drain","undrain"]},
+                        "draining":{"type":"boolean"},
+                        "active_requests":{"type":"integer","minimum":0}
+                    }
+                }
+            }),
         )
     }
 }
@@ -343,6 +397,7 @@ pub fn schema_components() -> Value {
     insert_schema::<ProxiesResponse>(&mut schemas);
     insert_schema::<ConfigResponse>(&mut schemas);
     insert_schema::<ProxyActionResponse>(&mut schemas);
+    insert_schema::<ProxyDrainResponse>(&mut schemas);
     insert_schema::<MetricsResponse>(&mut schemas);
     insert_schema::<AuditEventsResponse>(&mut schemas);
     insert_schema::<ConfigDocumentRequest>(&mut schemas);
@@ -374,6 +429,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn config_schema_requires_every_non_optional_serialized_field() {
+        let schema = ConfigResponse::schema();
+        let required = schema["required"]
+            .as_array()
+            .expect("ConfigResponse required fields");
+        let required = required
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected = [
+            "host",
+            "bridge_port",
+            "opencode_port",
+            "shell_policy",
+            "max_body_size",
+            "stream_buffer_size",
+            "channel_capacity",
+            "max_search_loops",
+            "primary_proxies",
+            "warm_standby_proxies",
+            "features",
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(required, expected);
+        assert!(
+            !required.contains("model"),
+            "optional model must not be required"
+        );
+    }
+
+    #[test]
     fn component_registry_contains_every_public_dto() {
         let components = schema_components();
         for name in [
@@ -381,6 +468,7 @@ mod tests {
             ProxiesResponse::NAME,
             ConfigResponse::NAME,
             ProxyActionResponse::NAME,
+            ProxyDrainResponse::NAME,
             MetricsResponse::NAME,
             AuditEventsResponse::NAME,
             ConfigDocumentRequest::NAME,

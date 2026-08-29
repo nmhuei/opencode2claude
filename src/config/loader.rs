@@ -1,8 +1,8 @@
 //! Deterministic configuration resolution.
 
 use super::{
-    BridgeConfig, CliOverrides, EgressMode, HistoryCaptureMode, SecretString, TomlConfig,
-    DEFAULT_BRIDGE_PORT, DEFAULT_CHANNEL_CAPACITY, DEFAULT_HOST, DEFAULT_MAX_BODY_SIZE,
+    BridgeConfig, CliOverrides, EgressMode, HistoryCaptureMode, SecretString, StringList,
+    TomlConfig, DEFAULT_BRIDGE_PORT, DEFAULT_CHANNEL_CAPACITY, DEFAULT_HOST, DEFAULT_MAX_BODY_SIZE,
     DEFAULT_OPENCODE_PORT, DEFAULT_PRIMARY_PROXIES, DEFAULT_SHELL_ALLOWLIST,
     DEFAULT_STREAM_BUFFER_SIZE, DEFAULT_WARM_STANDBY_PROXIES,
 };
@@ -14,6 +14,51 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 use tracing::warn;
+
+/// Ambient process environment belongs to the configuration/bootstrap
+/// boundary even when it controls shell integration or presentation rather
+/// than BridgeConfig fields. Keeping these reads here makes process-dependent
+/// behavior auditable from one source boundary.
+pub(crate) fn ambient_home() -> Option<std::ffi::OsString> {
+    std::env::var_os("HOME")
+}
+
+pub(crate) fn ambient_zdotdir() -> Option<std::ffi::OsString> {
+    std::env::var_os("ZDOTDIR").filter(|value| !value.is_empty())
+}
+
+pub(crate) fn ambient_shell() -> String {
+    std::env::var("SHELL").unwrap_or_default()
+}
+
+pub(crate) fn terminal_columns() -> Option<usize> {
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+}
+
+pub(crate) fn load_dotenv() -> Option<std::path::PathBuf> {
+    if let Some(explicit) = std::env::var_os("BRIDGE_ENV_PATH") {
+        let path = std::path::PathBuf::from(explicit);
+        if path.is_file() && dotenvy::from_path(&path).is_ok() {
+            return Some(path);
+        }
+    }
+
+    if let Ok(path) = dotenvy::dotenv() {
+        return Some(path);
+    }
+
+    let executable = std::env::current_exe().ok()?;
+    for directory in executable.parent()?.ancestors() {
+        let candidate = directory.join(".env");
+        if candidate.is_file() && dotenvy::from_path(&candidate).is_ok() {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
 
 pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
     let mut resolved = BridgeConfig::default();
@@ -117,31 +162,63 @@ pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
         .or_else(|| file.as_ref().and_then(|cfg| cfg.max_search_loops))
         .unwrap_or(20);
 
-    let legacy_proxy_value = env_string("BRIDGE_PROXIES").or_else(|| {
-        file.as_ref()
-            .and_then(|cfg| cfg.proxies.as_ref().map(|items| items.join(",")))
-    });
-    resolved.proxies = parse_csv_optional(legacy_proxy_value.clone());
-    resolved.primary_proxies = parse_csv_optional(Some(
-        env_string("BRIDGE_PRIMARY_PROXIES")
-            .or(legacy_proxy_value)
+    // Legacy `proxies` vs specific `primary_proxies` resolution.
+    //
+    // Changelog (2026-08-26): within the SAME source the SPECIFIC key
+    // (`primary_proxies`) now wins over the legacy alias (`proxies`). This
+    // flips the previous behavior where the legacy key silently shadowed the
+    // newer, more specific one when both appeared in one TOML document.
+    // Cross-source precedence is unchanged: environment still beats TOML,
+    // and a lone legacy key keeps feeding the primary pool as before.
+    //
+    // Sources are compared AFTER parsing: a source that yields zero proxies
+    // (comma-only text, an empty array) configures nothing and must not flip
+    // the explicit-configuration flag that gates `egress_mode="proxy"`.
+    let env_primary_proxies = parse_csv_optional(env_string("BRIDGE_PRIMARY_PROXIES"));
+    let env_legacy_proxies = parse_csv_optional(env_string("BRIDGE_PROXIES"));
+    let toml_primary_proxies = file
+        .as_ref()
+        .and_then(|cfg| cfg.primary_proxies.clone())
+        .map(StringList::into_vec)
+        .and_then(normalized_list);
+    let toml_legacy_proxies = file
+        .as_ref()
+        .and_then(|cfg| cfg.proxies.clone())
+        .map(StringList::into_vec)
+        .and_then(normalized_list);
+    let toml_legacy_effective = match (&toml_primary_proxies, &toml_legacy_proxies) {
+        (Some(_), Some(_)) => {
+            warn!(
+                "TOML config declares both legacy 'proxies' and 'primary_proxies'; \
+                 preferring 'primary_proxies' and ignoring legacy 'proxies'"
+            );
+            None
+        }
+        (_, other) => other.clone(),
+    };
+    let proxies_explicitly_configured = env_primary_proxies.is_some()
+        || env_legacy_proxies.is_some()
+        || toml_primary_proxies.is_some()
+        || toml_legacy_proxies.is_some();
+    resolved.proxies = env_legacy_proxies.clone().or(toml_legacy_effective.clone());
+    resolved.primary_proxies = Some(
+        env_primary_proxies
+            .or(env_legacy_proxies)
+            .or(toml_primary_proxies)
+            .or(toml_legacy_effective)
+            .unwrap_or_else(|| parse_csv(DEFAULT_PRIMARY_PROXIES)),
+    );
+    resolved.egress.proxies_explicitly_configured = proxies_explicitly_configured;
+    resolved.warm_standby_proxies = Some(
+        parse_csv_optional(env_string("BRIDGE_WARM_STANDBY_PROXIES"))
             .or_else(|| {
                 file.as_ref()
-                    .and_then(|cfg| cfg.primary_proxies.as_ref().map(|items| items.join(",")))
+                    .and_then(|cfg| cfg.warm_standby_proxies.clone())
+                    .map(StringList::into_vec)
+                    .and_then(normalized_list)
             })
-            .unwrap_or_else(|| DEFAULT_PRIMARY_PROXIES.to_string()),
-    ));
-    resolved.warm_standby_proxies = parse_csv_optional(Some(
-        env_string("BRIDGE_WARM_STANDBY_PROXIES")
-            .or_else(|| {
-                file.as_ref().and_then(|cfg| {
-                    cfg.warm_standby_proxies
-                        .as_ref()
-                        .map(|items| items.join(","))
-                })
-            })
-            .unwrap_or_else(|| DEFAULT_WARM_STANDBY_PROXIES.to_string()),
-    ));
+            .unwrap_or_else(|| parse_csv(DEFAULT_WARM_STANDBY_PROXIES)),
+    );
 
     resolved.management.config_path = PathBuf::from(config_path);
     resolved.management.dashboard_token =
@@ -169,14 +246,19 @@ pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
     resolved.history.enabled = env_bool("BRIDGE_HISTORY_ENABLED")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.history_enabled))
         .unwrap_or(false);
-    resolved.history.capture_mode = env_string("BRIDGE_HISTORY_CAPTURE_MODE")
-        .or_else(|| {
-            file.as_ref()
-                .and_then(|cfg| cfg.history_capture_mode.clone())
-        })
-        .as_deref()
-        .and_then(HistoryCaptureMode::parse)
-        .unwrap_or(HistoryCaptureMode::Redacted);
+    resolved.history.capture_mode = match env_string("BRIDGE_HISTORY_CAPTURE_MODE").or_else(|| {
+        file.as_ref()
+            .and_then(|cfg| cfg.history_capture_mode.clone())
+    }) {
+        Some(value) => HistoryCaptureMode::parse(&value).unwrap_or_else(|| {
+            warn!(
+                "unknown history capture mode '{value}'; defaulting to redacted \
+                     (valid: off/disabled, metadata, redacted, full)"
+            );
+            HistoryCaptureMode::Redacted
+        }),
+        None => HistoryCaptureMode::Redacted,
+    };
     resolved.history.capture_inbound = env_bool("BRIDGE_HISTORY_CAPTURE_INBOUND")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.history_capture_inbound))
         .unwrap_or(true);
@@ -278,6 +360,26 @@ pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
             .or_else(|| file.as_ref().and_then(|cfg| cfg.search_timeout_secs))
             .unwrap_or(30),
     );
+    resolved.search.chain_budget = Duration::from_secs(
+        env_parse("BRIDGE_SEARCH_CHAIN_BUDGET_SECS")
+            .or_else(|| file.as_ref().and_then(|cfg| cfg.search_chain_budget_secs))
+            // A zero budget would starve every provider attempt before the
+            // first response can arrive; reject the configured value (env or
+            // TOML) with a warning and fall back to the default instead.
+            .filter(|secs| {
+                if *secs == 0 {
+                    warn!(
+                        "ignoring search chain budget of 0 seconds \
+                         (BRIDGE_SEARCH_CHAIN_BUDGET_SECS / TOML \
+                         'search_chain_budget_secs'); the value must be positive"
+                    );
+                    false
+                } else {
+                    true
+                }
+            })
+            .unwrap_or(25),
+    );
     resolved.search.allow_private_searxng = env_bool("BRIDGE_ALLOW_PRIVATE_SEARXNG")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.allow_private_searxng))
         .unwrap_or(false);
@@ -304,7 +406,11 @@ pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
         .to_string();
     resolved.retry.model_fallbacks = env_string("OPENCODE_MODEL_FALLBACKS")
         .map(|value| parse_csv(&value))
-        .or_else(|| file.as_ref().and_then(|cfg| cfg.model_fallbacks.clone()))
+        .or_else(|| {
+            file.as_ref()
+                .and_then(|cfg| cfg.model_fallbacks.clone())
+                .map(StringList::into_vec)
+        })
         .unwrap_or_default();
     resolved.retry.default_fallbacks_enabled = env_bool("OPENCODE_ENABLE_DEFAULT_FALLBACKS")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.enable_default_fallbacks))
@@ -312,9 +418,6 @@ pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
     resolved.retry.max_network_attempts = env_parse("BRIDGE_MAX_NETWORK_ATTEMPTS")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.max_network_attempts))
         .unwrap_or(8);
-    resolved.retry.max_provider_attempts = env_parse("BRIDGE_MAX_PROVIDER_ATTEMPTS")
-        .or_else(|| file.as_ref().and_then(|cfg| cfg.max_provider_attempts))
-        .unwrap_or(2);
     resolved.retry.base_backoff = Duration::from_millis(
         env_parse("BRIDGE_RETRY_BASE_BACKOFF_MS")
             .or_else(|| file.as_ref().and_then(|cfg| cfg.retry_base_backoff_ms))
@@ -330,8 +433,16 @@ pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
         .egress_mode
         .or_else(|| env_string("BRIDGE_EGRESS_MODE"))
         .or_else(|| file.as_ref().and_then(|cfg| cfg.egress_mode.clone()))
-        .as_deref()
-        .and_then(EgressMode::parse)
+        .map(|value| match EgressMode::parse(&value) {
+            Some(mode) => mode,
+            None => {
+                warn!(
+                    "unknown egress mode '{value}'; defaulting to hybrid \
+                     (valid: direct, proxy/warp, hybrid)"
+                );
+                EgressMode::Hybrid
+            }
+        })
         .unwrap_or(EgressMode::Hybrid);
     resolved.egress.active_proxy_count = env_parse("BRIDGE_ACTIVE_PROXY_COUNT")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.active_proxy_count))
@@ -344,7 +455,11 @@ pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
         .unwrap_or(1);
     resolved.egress.identity_endpoints = env_string("BRIDGE_IDENTITY_ENDPOINTS")
         .map(|value| parse_csv(&value))
-        .or_else(|| file.as_ref().and_then(|cfg| cfg.identity_endpoints.clone()))
+        .or_else(|| {
+            file.as_ref()
+                .and_then(|cfg| cfg.identity_endpoints.clone())
+                .map(StringList::into_vec)
+        })
         .unwrap_or_else(|| BridgeConfig::default().egress.identity_endpoints);
     resolved.egress.identity_ttl = Duration::from_secs(
         env_parse("BRIDGE_IDENTITY_TTL_SECS")
@@ -425,16 +540,25 @@ pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
 }
 
 fn resolve_host(cli_value: Option<String>, file_value: Option<String>) -> IpAddr {
-    cli_value
-        .or_else(|| env_string("BRIDGE_HOST"))
-        .or(file_value)
-        .unwrap_or_else(|| DEFAULT_HOST.to_string())
-        .parse()
-        .unwrap_or_else(|_| {
+    let candidates = [
+        cli_value.map(|value| ("the --host CLI flag", value)),
+        env_string("BRIDGE_HOST").map(|value| ("BRIDGE_HOST", value)),
+        file_value.map(|value| ("the TOML 'host' key", value)),
+    ];
+    let Some((source, value)) = candidates.into_iter().flatten().next() else {
+        return DEFAULT_HOST
+            .parse()
+            .expect("hardcoded default host must be valid");
+    };
+    match value.parse::<IpAddr>() {
+        Ok(host) => host,
+        Err(_) => {
+            warn!("ignoring invalid host '{value}' from {source}; falling back to {DEFAULT_HOST}");
             DEFAULT_HOST
                 .parse()
                 .expect("hardcoded default host must be valid")
-        })
+        }
+    }
 }
 
 fn resolve_shell_policy(raw_policy: String, allowlist: String) -> ShellPolicy {
@@ -479,21 +603,51 @@ fn env_parse<T>(name: &str) -> Option<T>
 where
     T: FromStr,
 {
-    env_string(name).and_then(|value| value.parse().ok())
+    let value = env_string(name)?;
+    match value.parse() {
+        Ok(parsed) => Some(parsed),
+        Err(_) => {
+            warn!("ignoring invalid value '{value}' for environment variable {name}");
+            None
+        }
+    }
 }
 
 fn env_bool(name: &str) -> Option<bool> {
-    env_string(name).and_then(|value| match value.to_ascii_lowercase().as_str() {
+    let value = env_string(name)?;
+    match value.to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Some(true),
         "0" | "false" | "no" | "off" => Some(false),
-        _ => None,
-    })
+        _ => {
+            warn!("ignoring invalid boolean '{value}' for environment variable {name}");
+            None
+        }
+    }
 }
 
 fn parse_csv_optional(value: Option<String>) -> Option<Vec<String>> {
     value
         .map(|raw| parse_csv(&raw))
         .filter(|items| !items.is_empty())
+}
+
+/// Reject list values that parse to nothing so they can never be mistaken
+/// for deliberate configuration (see `EgressConfig::proxies_explicitly_configured`).
+fn non_empty_list(items: Vec<String>) -> Option<Vec<String>> {
+    (!items.is_empty()).then_some(items)
+}
+
+/// Normalize a TOML proxy list exactly like the CSV path: trim, drop empty
+/// entries, and force remote-DNS socks5h. Keeping both paths identical is
+/// what preserves the historical `socks5://` → `socks5h://` behavior for
+/// array-form TOML proxy values.
+fn normalized_list(items: Vec<String>) -> Option<Vec<String>> {
+    let items = items
+        .into_iter()
+        .map(|item| super::normalize_proxy_url(item.trim()))
+        .filter(|item| !item.is_empty())
+        .collect::<Vec<_>>();
+    non_empty_list(items)
 }
 
 fn parse_csv(value: &str) -> Vec<String> {

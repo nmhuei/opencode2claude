@@ -14,6 +14,19 @@ use tracing::{debug, error, info, warn};
 const RATE_LIMIT_ROTATION_RETRY_SECS: u64 = 30;
 const MAX_CONCURRENT_PROXY_RECOVERIES: usize = 3;
 
+/// Hard ceiling applied when a caller-supplied rate-limit cooldown cannot be
+/// added to `Instant::now()` without overflowing.
+///
+/// Deliberately mirrors the retry policy's `MAX_RESPECTED_RETRY_AFTER`
+/// ceiling (`src/opencode/retry/policy.rs`): well-formed callers can never
+/// request a respected Retry-After beyond 30 days, so pool-side defensive
+/// saturation degrades hostile inputs to exactly the largest cooldown those
+/// callers may legitimately produce instead of inventing a second, divergent
+/// bound. The constant is duplicated rather than imported because the retry
+/// module is owned by a different change stream; if one side changes, this
+/// doc comment should be revisited.
+const MAX_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
 impl ProxyPool {
     pub fn record_success(&mut self, index: usize) {
         let Some(node) = self.proxies.get_mut(index) else {
@@ -75,7 +88,20 @@ impl ProxyPool {
         let Some(node) = self.proxies.get_mut(index) else {
             return;
         };
-        let requested_until = Instant::now() + duration;
+        // Defensive arithmetic: `Instant + Duration` panics on overflow, so a
+        // hostile or buggy caller forwarding an unclamped upstream Retry-After
+        // (e.g. u64::MAX seconds) would abort the whole serving task here even
+        // though the parse layer clamps its own values. Saturate to the
+        // documented MAX_RATE_LIMIT_COOLDOWN instead of silently no-op'ing;
+        // if even that fallback overflows (platform clock within 30 days of
+        // Instant wraparound — unreachable in practice), the deadline
+        // degenerates to `now`, which records quarantine bookkeeping with no
+        // active time gate rather than panicking.
+        let now = Instant::now();
+        let requested_until = match now.checked_add(duration) {
+            Some(until) => until,
+            None => now.checked_add(MAX_RATE_LIMIT_COOLDOWN).unwrap_or(now),
+        };
         let until = node
             .rate_limit_until
             .filter(|existing| *existing > requested_until)
@@ -95,7 +121,11 @@ impl ProxyPool {
         self.restart_queue.retain(|queued| *queued != index);
         warn!(
             node_id = %node.id,
-            cooldown_secs = duration.as_secs(),
+            requested_secs = duration.as_secs(),
+            effective_secs = until
+                .checked_duration_since(now)
+                .map(|left| left.as_secs())
+                .unwrap_or(0),
             quarantined_exit_ip = ?node.quarantined_exit_ip,
             "provider rate-limit cooldown recorded without changing proxy transport health"
         );
@@ -115,6 +145,36 @@ impl ProxyPool {
         );
     }
 
+    /// Stop assigning fresh traffic to a managed node while allowing existing
+    /// request leases to finish naturally. Draining is intentionally a routing
+    /// gate only: it does not falsify transport health or mutate the container.
+    pub fn begin_drain(&mut self, index: usize) -> Result<usize, String> {
+        let node = self
+            .proxies
+            .get_mut(index)
+            .ok_or_else(|| format!("unknown proxy index {index}"))?;
+        if node.lifecycle == LifecyclePolicy::Protected {
+            return Err(format!("node {} is protected", node.id));
+        }
+        node.draining = true;
+        Ok(node.active_request_count())
+    }
+
+    /// Re-enable fresh routing after an operator cancels a drain. Health,
+    /// circuit, quota and identity state remain authoritative; undrain never
+    /// makes an unhealthy node routable by itself.
+    pub fn cancel_drain(&mut self, index: usize) -> Result<(), String> {
+        let node = self
+            .proxies
+            .get_mut(index)
+            .ok_or_else(|| format!("unknown proxy index {index}"))?;
+        if node.lifecycle == LifecyclePolicy::Protected {
+            return Err(format!("node {} is protected", node.id));
+        }
+        node.draining = false;
+        Ok(())
+    }
+
     /// Reserve a managed node for an explicit dashboard restart. This removes
     /// the node from normal routing before Docker is touched, clears stale
     /// cooldown/identity state, and prevents the automatic restart worker from
@@ -126,6 +186,7 @@ impl ProxyPool {
             .proxies
             .get_mut(index)
             .ok_or_else(|| format!("unknown proxy index {index}"))?;
+        node.draining = true;
         node.health = HealthState::Recovering;
         node.circuit = CircuitState::HalfOpen;
         node.cooldown_until = None;
@@ -146,6 +207,7 @@ impl ProxyPool {
                 return;
             };
             let until = Instant::now() + Duration::from_secs(COOLDOWN_SECS);
+            node.draining = false;
             node.health = HealthState::Unhealthy;
             node.circuit = CircuitState::Open { until };
             node.cooldown_until = Some(until);
@@ -162,6 +224,30 @@ impl ProxyPool {
         if let Some(node) = self.proxies.get_mut(index) {
             mark_node_healthy(node);
         }
+    }
+
+    /// Narrow complement to [`ProxyPool::mark_healthy`] for same-egress retry
+    /// success after a provider rate limit: clear ONLY the rate-limit quota
+    /// and quarantine state of `index`.
+    ///
+    /// Open/half-open circuits, cooldown deadlines, failure/success counters,
+    /// health state, restart attempts, and the managed restart queue are all
+    /// deliberately preserved, so interleaved transport failures keep
+    /// recovering through the bounded half-open/`RECOVERY_SUCCESS_COUNT` path
+    /// instead of being wiped by a single successful retry.
+    pub fn clear_rate_limit_recovery(&mut self, index: usize) {
+        let Some(node) = self.proxies.get_mut(index) else {
+            return;
+        };
+        node.rate_limit_until = None;
+        node.quarantined_exit_ip = None;
+        if node.recovery_cause == Some(RecoveryCause::RateLimit) {
+            node.recovery_cause = None;
+        }
+        debug!(
+            node_id = %node.id,
+            "cleared provider rate-limit quarantine; transport health untouched"
+        );
     }
 
     /// Move expired open circuits into half-open. This does not claim the node
@@ -210,6 +296,7 @@ impl ProxyPool {
 }
 
 fn mark_node_healthy(node: &mut ProxyEntry) {
+    node.draining = false;
     node.health = HealthState::Healthy;
     node.circuit = CircuitState::Closed;
     node.cooldown_until = None;
@@ -427,6 +514,25 @@ async fn restart_container(
             debug!(node_id = %node.id, "discarding stale automatic restart queue entry");
             return;
         }
+        // An automatic restart leaves an exact in-flight signature on the node
+        // (Recovering/HalfOpen with a consumed attempt). A transport failure
+        // observed through probe traffic during that window re-queues the same
+        // index; processing it again would issue a second concurrent Docker
+        // restart of one container and double-charge the attempt budget. The
+        // exclusion mirrors `health_probe_targets`; if this attempt fails,
+        // `apply_restart_failure` requeues from the Unhealthy/Open state, and a
+        // successful attempt clears the signature via `mark_node_healthy`.
+        if node.health == HealthState::Recovering
+            && node.circuit == CircuitState::HalfOpen
+            && node.restart_attempts > 0
+        {
+            debug!(
+                node_id = %node.id,
+                restart_attempts = node.restart_attempts,
+                "dropping duplicate queue entry; automatic restart already in flight"
+            );
+            return;
+        }
         (
             node.port,
             node.container_name.clone(),
@@ -508,25 +614,47 @@ async fn restart_container(
                 let mut pool = pool.write().await;
                 accept_recovered_identity(&mut pool, index, identity)
             };
-            match accepted {
-                Ok(()) => {
-                    metrics.record_proxy_restart_success();
-                    info!(
-                        index,
-                        restart_attempt, "managed proxy recovered with a unique exit identity"
-                    );
-                }
-                Err(reason) => {
-                    metrics.record_proxy_restart_failure();
-                    warn!(index, restart_attempt, %reason, "managed proxy recovery identity was rejected");
-                    apply_restart_failure_shared(&pool, index, restart_attempt).await;
-                }
-            }
+            handle_recovered_identity(&pool, index, restart_attempt, accepted, &metrics).await;
         }
         Err(error) => {
             metrics.record_proxy_restart_failure();
             warn!(index, restart_attempt, %error, "managed proxy identity verification failed");
             apply_restart_failure_shared(&pool, index, restart_attempt).await;
+        }
+    }
+}
+
+/// Settle a restart worker's exit-identity acceptance verdict and record the
+/// corresponding restart-lifecycle metrics.
+///
+/// Every acceptance rejection is a duplicate-exit detection:
+/// `accept_recovered_identity` refuses only identities the pool already
+/// accounts for — an exit IP still quarantined under an active provider rate
+/// limit, or a verified exit owned by another actively routed primary.
+async fn handle_recovered_identity(
+    pool: &Arc<TokioRwLock<ProxyPool>>,
+    index: usize,
+    restart_attempt: u32,
+    accepted: Result<(), String>,
+    metrics: &Metrics,
+) {
+    match accepted {
+        Ok(()) => {
+            metrics.record_proxy_restart_success();
+            info!(
+                index,
+                restart_attempt, "managed proxy recovered with a unique exit identity"
+            );
+        }
+        Err(reason) => {
+            // Every acceptance rejection is a duplicate-exit detection: the
+            // recovered container came back on an exit identity the pool
+            // already accounts for (quarantined rate-limit exit or another
+            // routed primary's verified exit).
+            metrics.record_proxy_duplicate_exit_event();
+            metrics.record_proxy_restart_failure();
+            warn!(index, restart_attempt, %reason, "managed proxy recovery identity was rejected");
+            apply_restart_failure_shared(pool, index, restart_attempt).await;
         }
     }
 }
@@ -1035,6 +1163,127 @@ mod tests {
         assert_eq!(pool.proxies[0].circuit, CircuitState::HalfOpen);
         assert_eq!(pool.proxies[0].health, HealthState::Recovering);
     }
+
+    #[test]
+    fn hostile_retry_after_overflow_saturates_instead_of_panicking() {
+        let mut pool = pool();
+        pool.proxies[0].exit_identity = Some(identity("1.1.1.1"));
+        let before = Instant::now();
+
+        // u64::MAX seconds cannot be added to any Instant without overflow;
+        // this must degrade to the documented saturation ceiling, never panic.
+        pool.mark_rate_limited(0, Duration::from_secs(u64::MAX));
+
+        let node = &pool.proxies[0];
+        let until = node.rate_limit_until.expect("saturated quota deadline");
+        // Monotonic clock makes both bounds exact: the deadline is at least a
+        // full ceiling above the pre-call instant (saturation really applied,
+        // not a silent no-op) and never more than one ceiling above any
+        // post-call reading.
+        assert!(
+            until >= before + MAX_RATE_LIMIT_COOLDOWN,
+            "saturated cooldown {:?} shorter than documented maximum {:?}",
+            until - before,
+            MAX_RATE_LIMIT_COOLDOWN
+        );
+        assert!(
+            until <= Instant::now() + MAX_RATE_LIMIT_COOLDOWN,
+            "deadline exceeds documented maximum {:?}",
+            MAX_RATE_LIMIT_COOLDOWN
+        );
+        // Quarantine bookkeeping must survive the saturation path.
+        assert_eq!(node.quarantined_exit_ip.as_deref(), Some("1.1.1.1"));
+        assert_eq!(node.recovery_cause, Some(RecoveryCause::RateLimit));
+    }
+
+    #[test]
+    fn adaptive_rate_limit_cooldown_doubles_then_caps() {
+        // Index 0 carries the 100% jitter multiplier, so expected deadlines are
+        // exactly base = 60s * 2^min(retry, 3) and Instant arithmetic makes the
+        // window assertion exact (monotonic clock, no wall-clock skew).
+        let mut pool = pool();
+        for retry in [0_u32, 1, 2, 3, 10] {
+            let before = Instant::now();
+            pool.mark_rate_limited_adaptive(0, retry);
+            let until = pool.proxies[0].rate_limit_until.expect("quota deadline");
+            let want = Duration::from_secs(60 * (1_u64 << retry.min(3)));
+            assert!(
+                until >= before + want,
+                "retry {retry}: deadline {:?} shorter than base {want:?}",
+                until - before
+            );
+            assert!(
+                until <= Instant::now() + want,
+                "retry {retry}: deadline exceeds the capped base {want:?}"
+            );
+            // Reset so each iteration measures its own requested duration.
+            pool.proxies[0].rate_limit_until = None;
+            pool.proxies[0].quarantined_exit_ip = None;
+        }
+    }
+
+    #[test]
+    fn clear_rate_limit_recovery_leaves_transport_circuit_counters_and_queue_intact() {
+        let mut pool = pool();
+        pool.proxies[0].exit_identity = Some(identity("1.1.1.1"));
+
+        // Own retained 429 first...
+        pool.mark_rate_limited(0, Duration::from_secs(3_600));
+        // ...then two foreign transport failures interleave...
+        pool.record_failure(0);
+        pool.record_failure(0);
+
+        // Interleaved pre-state: transport circuit open and restart queued
+        // while the rate-limit deadline stays retained.
+        assert_eq!(pool.restart_queue, vec![0]);
+        assert!(matches!(pool.proxies[0].circuit, CircuitState::Open { .. }));
+        assert_eq!(pool.proxies[0].consecutive_failures, FAILURE_THRESHOLD);
+        assert!(pool.proxies[0].rate_limit_until.is_some());
+        assert_eq!(
+            pool.proxies[0].recovery_cause,
+            Some(RecoveryCause::RateLimit)
+        );
+        let cooldown = pool.proxies[0].cooldown_until;
+
+        // ...then own success clears ONLY the rate-limit side of the ledger.
+        pool.clear_rate_limit_recovery(0);
+
+        let node = &pool.proxies[0];
+        assert!(node.rate_limit_until.is_none());
+        assert!(node.quarantined_exit_ip.is_none());
+        assert_eq!(node.recovery_cause, None);
+        // Transport health untouched: the open circuit must keep recovering
+        // through half-open probes and RECOVERY_SUCCESS_COUNT successes.
+        assert!(matches!(node.circuit, CircuitState::Open { .. }));
+        assert_eq!(node.cooldown_until, cooldown);
+        assert_eq!(node.health, HealthState::Unhealthy);
+        assert_eq!(node.consecutive_failures, FAILURE_THRESHOLD);
+        // The queued container restart must survive the same-egress success.
+        assert_eq!(pool.restart_queue, vec![0]);
+    }
+
+    #[test]
+    fn clear_rate_limit_recovery_does_not_touch_transport_recovery_state() {
+        let mut pool = pool();
+        pool.record_failure(0); // Degraded + Transport cause below threshold
+
+        pool.clear_rate_limit_recovery(0);
+
+        let node = &pool.proxies[0];
+        assert_eq!(node.recovery_cause, Some(RecoveryCause::Transport));
+        assert_eq!(node.health, HealthState::Degraded);
+        assert_eq!(node.consecutive_failures, 1);
+    }
+
+    #[test]
+    fn clear_rate_limit_recovery_ignores_unknown_index() {
+        let mut pool = pool();
+        pool.clear_rate_limit_recovery(pool.proxies.len() + 7); // must not panic
+        assert!(pool
+            .proxies
+            .iter()
+            .all(|node| node.rate_limit_until.is_none()));
+    }
 }
 
 #[cfg(test)]
@@ -1043,7 +1292,134 @@ mod metrics_tests {
     use crate::docker::{ContainerState, ContainerSummary, DockerError, DockerResult};
     use crate::workers::WorkerRegistry;
     use async_trait::async_trait;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Notify;
+
+    #[derive(Debug)]
+    struct CountingRuntime {
+        restart_calls: Arc<AtomicUsize>,
+        recreate_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ContainerRuntime for CountingRuntime {
+        async fn daemon_version(&self) -> DockerResult<String> {
+            Ok("test".to_string())
+        }
+        async fn inspect(&self, _spec: &ProxySpec) -> DockerResult<ContainerState> {
+            Ok(ContainerState {
+                exists: true,
+                running: true,
+                has_expected_volume: true,
+            })
+        }
+        async fn create_missing(&self, _spec: &ProxySpec) -> DockerResult<()> {
+            Ok(())
+        }
+        async fn recreate_managed(&self, _spec: &ProxySpec) -> DockerResult<()> {
+            self.recreate_calls.fetch_add(1, Ordering::SeqCst);
+            Err(DockerError::CommandFailed(
+                "intentional recreate".to_string(),
+            ))
+        }
+        async fn remove_managed(&self, _spec: &ProxySpec) -> DockerResult<()> {
+            Ok(())
+        }
+        async fn restart_managed(&self, _spec: &ProxySpec) -> DockerResult<()> {
+            self.restart_calls.fetch_add(1, Ordering::SeqCst);
+            Err(DockerError::CommandFailed(
+                "intentional restart failure".to_string(),
+            ))
+        }
+        async fn stop_managed(&self, _spec: &ProxySpec) -> DockerResult<()> {
+            Ok(())
+        }
+        async fn start_managed(&self, _spec: &ProxySpec) -> DockerResult<()> {
+            Ok(())
+        }
+        async fn logs(&self, _spec: &ProxySpec, _tail: usize) -> DockerResult<String> {
+            Ok(String::new())
+        }
+        async fn list(&self, _specs: &[ProxySpec]) -> DockerResult<Vec<ContainerSummary>> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn counting_runtime() -> Arc<CountingRuntime> {
+        Arc::new(CountingRuntime {
+            restart_calls: Arc::new(AtomicUsize::new(0)),
+            recreate_calls: Arc::new(AtomicUsize::new(0)),
+        })
+    }
+
+    #[tokio::test]
+    async fn duplicate_queue_entry_for_in_flight_restart_is_not_processed_again() {
+        let pool = Arc::new(TokioRwLock::new(ProxyPool::new(&[
+            "socks5://127.0.0.1:40001".to_string(),
+        ])));
+        {
+            let mut guard = pool.write().await;
+            let node = &mut guard.proxies[0];
+            // Exact signature an automatic restart leaves while its Docker
+            // operation is still executing: the worker reserved the node as
+            // Recovering/HalfOpen and consumed one attempt from the budget.
+            // A transport failure observed through probe traffic during that
+            // window re-queues the same index; the next cadence tick must not
+            // start a second concurrent restart of the same container.
+            node.health = HealthState::Recovering;
+            node.circuit = CircuitState::HalfOpen;
+            node.recovery_cause = Some(RecoveryCause::Transport);
+            node.restart_attempts = 1;
+            guard.restart_queue.push(0);
+        }
+
+        let runtime = counting_runtime();
+        let metrics = Arc::new(Metrics::default());
+        restart_container(
+            0,
+            pool.clone(),
+            runtime.clone(),
+            "example/warp:test".to_string(),
+            Vec::new(),
+            metrics.clone(),
+        )
+        .await;
+
+        assert_eq!(
+            runtime.restart_calls.load(Ordering::SeqCst),
+            0,
+            "an in-flight automatic restart must never be issued twice concurrently"
+        );
+        assert_eq!(runtime.recreate_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(metrics.snapshot().proxy_restart_attempts, 0);
+    }
+
+    #[tokio::test]
+    async fn fresh_failure_after_completed_recovery_still_restarts_node() {
+        let mut pool = ProxyPool::new(&["socks5://127.0.0.1:40001".to_string()]);
+        pool.record_failure(0);
+        pool.record_failure(0);
+        assert_eq!(pool.restart_queue, vec![0]);
+
+        let runtime = counting_runtime();
+        let metrics = Arc::new(Metrics::default());
+        restart_container(
+            0,
+            Arc::new(TokioRwLock::new(pool)),
+            runtime.clone(),
+            "example/warp:test".to_string(),
+            Vec::new(),
+            metrics.clone(),
+        )
+        .await;
+
+        assert_eq!(
+            runtime.restart_calls.load(Ordering::SeqCst),
+            1,
+            "the in-flight guard must not suppress a genuinely fresh recovery"
+        );
+        assert_eq!(metrics.snapshot().proxy_restart_attempts, 1);
+    }
 
     #[derive(Debug)]
     struct FailingRuntime;
@@ -1234,5 +1610,81 @@ mod metrics_tests {
         assert_eq!(snapshot.proxy_restart_attempts, 1);
         assert_eq!(snapshot.proxy_restart_failures, 1);
         assert_eq!(snapshot.proxy_restart_successes, 0);
+    }
+
+    fn recovering_rate_limited_pool() -> Arc<TokioRwLock<ProxyPool>> {
+        let mut pool_state = ProxyPool::new(&[
+            "socks5://127.0.0.1:40001".to_string(),
+            "socks5://127.0.0.1:40002".to_string(),
+        ]);
+        pool_state.proxies[0].exit_identity = Some(identity("1.1.1.1"));
+        pool_state.proxies[1].exit_identity = Some(identity("8.8.8.8"));
+        pool_state.mark_rate_limited(0, Duration::from_secs(3_600));
+        pool_state.drain_restart_queue();
+        Arc::new(TokioRwLock::new(pool_state))
+    }
+
+    fn identity(ip: &str) -> ExitIdentity {
+        ExitIdentity {
+            public_ip: ip.to_string(),
+            provider: Some("cloudflare-warp".to_string()),
+            colo: Some("HKG".to_string()),
+            verified_at_unix_secs: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_recovery_identity_records_duplicate_exit_event_once() {
+        let pool = recovering_rate_limited_pool();
+
+        let rejection = {
+            let mut guard = pool.write().await;
+            accept_recovered_identity(&mut guard, 0, identity("8.8.8.8"))
+                .expect_err("duplicate exit must be rejected")
+        };
+
+        let metrics = Arc::new(Metrics::default());
+        handle_recovered_identity(&pool, 0, 1, Err(rejection), &metrics).await;
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(
+            snapshot.proxy_duplicate_exit_events, 1,
+            "a rejected recovery identity is exactly one duplicate-exit event"
+        );
+        assert_eq!(snapshot.proxy_restart_failures, 1);
+        assert_eq!(snapshot.proxy_restart_successes, 0);
+        // The failure path requeued index 0 for a bounded retry; that queued
+        // retry is a future detection opportunity and must not itself have
+        // double-counted this rejection.
+        assert_eq!(pool.read().await.restart_queue, vec![0]);
+        assert_eq!(snapshot.proxy_duplicate_exit_events, 1);
+    }
+
+    #[tokio::test]
+    async fn accepted_recovery_identity_never_counts_duplicate_exit_event() {
+        let pool = recovering_rate_limited_pool();
+        let accepted = {
+            let mut guard = pool.write().await;
+            accept_recovered_identity(&mut guard, 0, identity("9.9.9.9"))
+        };
+        assert!(
+            accepted.is_ok(),
+            "a fresh unique exit must be accepted: {accepted:?}"
+        );
+
+        let metrics = Arc::new(Metrics::default());
+        handle_recovered_identity(&pool, 0, 1, accepted, &metrics).await;
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(
+            snapshot.proxy_duplicate_exit_events, 0,
+            "successful recovery is not a duplicate-exit event"
+        );
+        assert_eq!(snapshot.proxy_restart_successes, 1);
+        assert_eq!(snapshot.proxy_restart_failures, 0);
+        assert_eq!(pool.read().await.proxies[0].health, HealthState::Healthy);
     }
 }

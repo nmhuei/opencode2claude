@@ -4,6 +4,7 @@
 //! focused submodules so the binary entry point stays trivial and testable.
 
 mod dashboard;
+mod models;
 mod proxy;
 mod server;
 mod utility;
@@ -45,6 +46,8 @@ pub async fn run_cli() {
 
         // New commands
         Some(Command::Doctor) => utility::cmd_doctor(fmt).await,
+        Some(Command::List(args)) => models::cmd_list(args, fmt).await,
+        Some(Command::Model(args)) => models::cmd_model(args, fmt).await,
         Some(Command::Completion(args)) => utility::cmd_completion(args, fmt),
         Some(Command::Update(args)) => utility::cmd_update(args, fmt).await,
         Some(Command::Init(args)) => utility::cmd_init(args, fmt).await,
@@ -107,7 +110,15 @@ pub async fn run_cli() {
 }
 
 fn launch_claude_code(continue_session: bool, resume: Option<&str>) {
-    let resolved = BridgeConfig::from_env_and_cli(CliOverrides::default());
+    let mut resolved = BridgeConfig::from_env_and_cli(CliOverrides::default());
+    if resolved
+        .model
+        .as_deref()
+        .is_none_or(|m| m.is_empty() || m.contains("x-preview-f-free"))
+    {
+        resolved.model = Some("opencode/mimo-v2.5-free".to_string());
+    }
+
     let supervisor = server::resolve_runtime(None, None);
 
     match supervisor.status() {
@@ -124,20 +135,11 @@ fn launch_claude_code(continue_session: bool, resume: Option<&str>) {
         }
     }
 
-    let mut command = std::process::Command::new("claude");
-    command.args(claude_launch_args(continue_session, resume));
-    for (key, value) in crate::application::integration::process_environment(&resolved) {
-        match value {
-            Some(value) => {
-                command.env(key, value);
-            }
-            None => {
-                command.env_remove(key);
-            }
-        }
-    }
-
-    match command.status() {
+    match crate::infrastructure::process::run_foreground(
+        "claude",
+        claude_launch_args(continue_session, resume),
+        crate::application::integration::process_environment(&resolved),
+    ) {
         Ok(status) if status.success() => {}
         Ok(status) => std::process::exit(status.code().unwrap_or(1)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {

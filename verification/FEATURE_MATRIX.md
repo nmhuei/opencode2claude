@@ -51,6 +51,7 @@ This matrix is the authoritative inventory of public contracts. `status` is one 
 | MGT-006 | Typed config apply | validate/preview/atomic apply/rollback | `src/management/config_apply.rs` | merge/validation/rollback tests | disposable filesystem fixture | `docs/management-api.md` | yes | verified |
 | MGT-007 | Browser CSRF | cookie-authenticated mutations require CSRF token | `src/dashboard/auth.rs` | double-submit/header tests | dashboard router tests | `docs/security.md` | yes | verified |
 | MGT-008 | Audit events | management mutations emit secret-free audit events | `src/audit.rs`, REST/dashboard mutations | bounded/redaction tests | authenticated router test | `docs/management-api.md` | yes | verified |
+| MGT-009 | Proxy drain | authenticated drain/undrain removes managed primaries from fresh routing while leases finish | `src/proxy_pool/`, `src/management/service.rs`, REST/dashboard routes | drain routing/service tests | REST/dashboard route tests | `docs/management-api.md`, `docs/proxy-pool.md` | yes | verified |
 | DASH-001 | Landing/dashboard assets | `/`, `/dashboard*` serve embedded UI safely | dashboard assets | asset tests | router tests | dashboard docs | yes | verified |
 | DASH-002 | Login/logout/auth status | dashboard cookie auth works and fails closed | dashboard auth | auth tests | router tests | security guide | yes | verified |
 | DASH-003 | Status/proxy/config views | dashboard uses shared management policy | dashboard/management | service tests | router tests | dashboard docs | yes | verified |

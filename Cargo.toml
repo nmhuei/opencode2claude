@@ -47,6 +47,12 @@ memchr = "2.8"
 regex = "1.11"
 rusqlite = { version = "0.32", features = ["bundled"] }
 
+# Raw syscall wrappers (pidfd_open/pidfd_send_signal/kill) for the process
+# boundary. Already present transitively via tokio/console/dirs, so this adds
+# no new code to the tree — only a direct edge for Linux targets.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "socks", "rustls-tls"] }
 

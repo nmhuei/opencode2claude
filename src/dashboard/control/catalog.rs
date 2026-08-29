@@ -18,7 +18,7 @@ pub async fn handler_capabilities(
     Ok(Json(json!({
         "groups": [
             {"id":"server","actions":["status","start_state","restart","stop","logs","config"]},
-            {"id":"proxy","actions":["status","plan_restart","restart","plan_purge","purge","logs"]},
+            {"id":"proxy","actions":["status","drain","undrain","plan_restart","restart","plan_purge","purge","logs"]},
             {"id":"dashboard","actions":["status","session","events"]},
             {"id":"integration","actions":["env","doctor","completion"]},
             {"id":"configuration","actions":["view","template","init","preview","apply","select_model"]},
@@ -28,7 +28,8 @@ pub async fn handler_capabilities(
         "constraints": {
             "server_start": "Dashboard is reachable only while the server is already running; start is represented as idempotent running state.",
             "destructive_actions_require_confirmation": true,
-            "protected_standby_mutation": false
+            "protected_standby_mutation": false,
+            "drain_preserves_active_leases": true
         }
     })))
 }
@@ -38,9 +39,23 @@ pub async fn handler_models(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     super::super::auth::check_admin_token(&state, &headers, None)?;
+    let catalog = models::free_models()
+        .iter()
+        .map(|model| {
+            json!({
+                "id": model.id,
+                "label": model.label,
+                "provider": model.provider,
+                "protocol": model.protocol,
+                "limited_time": model.limited_time,
+                "privacy_notice": model.privacy_notice,
+                "capabilities": crate::opencode::mapper::model_capabilities(model.id),
+            })
+        })
+        .collect::<Vec<_>>();
     Ok(Json(json!({
         "selected": state.config.model,
-        "models": models::free_models(),
+        "models": catalog,
         "source": "OpenCode Zen official free catalog",
         "catalog_date": "2026-07-21"
     })))

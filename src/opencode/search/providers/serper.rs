@@ -2,7 +2,7 @@ use super::{map_reqwest_error, read_json_response};
 use crate::opencode::search::types::{
     SearchError, SearchErrorKind, SearchPolicy, SearchProviderKind, SearchQuery, SearchResult,
 };
-use reqwest::Client;
+use reqwest::{header::HeaderValue, Client};
 use serde_json::Value;
 
 pub(crate) async fn search(
@@ -12,11 +12,16 @@ pub(crate) async fn search(
     endpoint: &str,
     policy: &SearchPolicy,
 ) -> Result<Vec<SearchResult>, SearchError> {
-    let response = client
+    let mut request = client
         .post(endpoint)
         .timeout(policy.request_timeout)
-        .header("X-API-KEY", api_key)
-        .json(&serde_json::json!({"q": query.text, "num": query.max_results}))
+        .json(&serde_json::json!({"q": query.text, "num": query.max_results}));
+    // Skip invalid header values (control characters in a misconfigured key)
+    // instead of panicking.
+    if let Ok(value) = HeaderValue::from_str(api_key) {
+        request = request.header("X-API-KEY", value);
+    }
+    let response = request
         .send()
         .await
         .map_err(|error| map_reqwest_error(SearchProviderKind::Serper, error))?;

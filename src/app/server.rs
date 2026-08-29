@@ -48,7 +48,13 @@ pub(super) async fn cmd_server(cmd: ServerCommand, fmt: OutputFormat) {
         ServerCommand::Stop(args) => {
             let resolved = resolve_config(args.port, args.host);
             let sup = supervisor_from_config(&resolved);
-            match sup.stop() {
+            let result = if args.unmanaged {
+                sup.stop_adopting_unmanaged()
+            } else {
+                sup.stop()
+            };
+            let exit_code = stop_exit_code(&result);
+            match &result {
                 Ok(()) => {
                     let mut proxy_error = None;
                     if should_manage_proxy_containers(&resolved) {
@@ -80,6 +86,31 @@ pub(super) async fn cmd_server(cmd: ServerCommand, fmt: OutputFormat) {
                         }
                     }
                 }
+                Err(error @ SupervisorError::UnmanagedListener { port, .. }) => {
+                    let message = error.to_string();
+                    match fmt {
+                        OutputFormat::Json => println!(
+                            "{}",
+                            serde_json::json!({
+                                "status": "refused",
+                                "operation": "stop",
+                                "port": port,
+                                "message": message,
+                            })
+                        ),
+                        OutputFormat::Quiet => eprintln!("refused: {message}"),
+                        OutputFormat::Human => {
+                            print_error(
+                                "Refused to stop an untracked gateway",
+                                &message,
+                                &[
+                                    "opencode2api server status",
+                                    "opencode2api server stop --unmanaged",
+                                ],
+                            );
+                        }
+                    }
+                }
                 Err(error) => {
                     if fmt == OutputFormat::Json {
                         println!(
@@ -99,23 +130,28 @@ pub(super) async fn cmd_server(cmd: ServerCommand, fmt: OutputFormat) {
                             &["opencode2api server status"],
                         );
                     }
-                    std::process::exit(1);
                 }
             }
+            exit_with_status(exit_code);
         }
         ServerCommand::Status(args) => {
             let sup = resolve_runtime(args.port, args.host);
             if fmt == OutputFormat::Json {
-                let status_info = status_info(sup.status().map_err(|e| e.to_string())).await;
+                let status_result = sup.status().map_err(|e| e.to_string());
+                let exit_code = status_result.as_ref().map_or(1, |s| s.exit_code());
+                let status_info = status_info(status_result).await;
                 if let Ok(s) = serde_json::to_string_pretty(&status_info) {
                     println!("{s}");
                 }
+                exit_with_status(exit_code);
             } else {
                 match sup.status() {
                     Ok(status) => {
+                        let exit_code = status.exit_code();
                         let resolved =
                             BridgeConfig::from_env_and_cli(config::CliOverrides::default());
-                        cmd_print_status(status, fmt, &resolved).await
+                        cmd_print_status(status, fmt, &resolved).await;
+                        exit_with_status(exit_code);
                     }
                     Err(e) => {
                         if fmt == OutputFormat::Quiet {
@@ -123,13 +159,70 @@ pub(super) async fn cmd_server(cmd: ServerCommand, fmt: OutputFormat) {
                         } else {
                             eprintln!("{} bridge: status failed — {}.", "✗".red().bold(), e);
                         }
+                        exit_with_status(1);
                     }
                 }
             }
         }
-        ServerCommand::Restart => {
+        ServerCommand::Restart(args) => {
             let sup = resolve_runtime(None, None);
-            let _ = sup.stop();
+            // Honest-lifecycle contract: a stop-phase failure aborts the
+            // restart BEFORE anything is started — never the old
+            // swallow-then-confusing-start-failure behavior.
+            if let Err(error) = restart_stop_phase(&sup, args.unmanaged) {
+                let exit_code = match &error {
+                    SupervisorError::UnmanagedListener { port, .. } => {
+                        let message = error
+                            .refusal_message("restart")
+                            .unwrap_or_else(|| error.to_string());
+                        match fmt {
+                            OutputFormat::Json => println!(
+                                "{}",
+                                serde_json::json!({
+                                    "status": "refused",
+                                    "operation": "restart",
+                                    "port": port,
+                                    "message": message,
+                                })
+                            ),
+                            OutputFormat::Quiet => eprintln!("refused: {message}"),
+                            OutputFormat::Human => {
+                                print_error(
+                                    "Refused to restart over an untracked gateway",
+                                    &message,
+                                    &[
+                                        "opencode2api server status",
+                                        "opencode2api server restart --unmanaged",
+                                    ],
+                                );
+                            }
+                        }
+                        crate::supervisor::STOP_REFUSED_UNMANAGED_EXIT_CODE
+                    }
+                    error => {
+                        if fmt == OutputFormat::Json {
+                            println!(
+                                "{}",
+                                serde_json::json!({
+                                    "status": "error",
+                                    "operation": "restart",
+                                    "message": error.to_string(),
+                                })
+                            );
+                        } else if fmt == OutputFormat::Quiet {
+                            eprintln!("error");
+                        } else {
+                            print_error(
+                                "Could not restart the gateway",
+                                &error.to_string(),
+                                &["opencode2api server status"],
+                            );
+                        }
+                        1
+                    }
+                };
+                exit_with_status(exit_code);
+            }
             match sup.start() {
                 Ok(()) => {
                     let status = sup.status().unwrap_or(SupervisorStatus::Stopped);
@@ -193,6 +286,7 @@ pub(super) async fn cmd_server(cmd: ServerCommand, fmt: OutputFormat) {
                     stream_buffer_size: usize,
                     channel_capacity: usize,
                     max_search_loops: u32,
+                    search_chain_budget_secs: u64,
                     metrics_enabled: bool,
                     history_enabled: bool,
                     config_path: String,
@@ -218,6 +312,7 @@ pub(super) async fn cmd_server(cmd: ServerCommand, fmt: OutputFormat) {
                     stream_buffer_size: cfg.stream_buffer_size,
                     channel_capacity: cfg.channel_capacity,
                     max_search_loops: cfg.max_search_loops,
+                    search_chain_budget_secs: cfg.search.chain_budget.as_secs(),
                     metrics_enabled: cfg.observability.metrics_enabled,
                     history_enabled: cfg.history.enabled,
                     config_path: cfg.management.config_path.display().to_string(),
@@ -379,17 +474,25 @@ pub(super) async fn cmd_start_legacy(args: cli::StartArgs, fmt: OutputFormat) {
 pub(super) async fn cmd_status_legacy(args: cli::StatusArgs, fmt: OutputFormat) {
     let sup = resolve_runtime(args.port, args.host);
     if fmt == OutputFormat::Json {
-        let status_info = status_info(sup.status().map_err(|e| e.to_string())).await;
+        let status_result = sup.status().map_err(|e| e.to_string());
+        let exit_code = status_result.as_ref().map_or(1, |s| s.exit_code());
+        let status_info = status_info(status_result).await;
         if let Ok(s) = serde_json::to_string_pretty(&status_info) {
             println!("{s}");
         }
+        exit_with_status(exit_code);
     } else {
         match sup.status() {
             Ok(status) => {
+                let exit_code = status.exit_code();
                 let resolved = BridgeConfig::from_env_and_cli(config::CliOverrides::default());
-                cmd_print_status(status, fmt, &resolved).await
+                cmd_print_status(status, fmt, &resolved).await;
+                exit_with_status(exit_code);
             }
-            Err(e) => eprintln!("{} bridge: status failed — {}.", "✗".red().bold(), e),
+            Err(e) => {
+                eprintln!("{} bridge: status failed — {}.", "✗".red().bold(), e);
+                exit_with_status(1);
+            }
         }
     }
 }
@@ -398,6 +501,13 @@ pub(super) fn cmd_stop_legacy(args: cli::StopArgs) {
     let sup = resolve_runtime(args.port, args.host);
     match sup.stop() {
         Ok(()) => println!("Bridge stopped."),
+        Err(e @ SupervisorError::UnmanagedListener { .. }) => {
+            eprintln!("{} bridge: stop refused — {}", "✗".red().bold(), e);
+            eprintln!(
+                "   Hint: `oc2api server stop --unmanaged` verifies and adopts an untracked listener."
+            );
+            std::process::exit(crate::supervisor::STOP_REFUSED_UNMANAGED_EXIT_CODE);
+        }
         Err(e) => {
             eprintln!("{} bridge: stop failed — {}", "✗".red().bold(), e);
             eprintln!("   Hint: Try `oc2api server status` to check if the bridge is running.");
@@ -408,7 +518,54 @@ pub(super) fn cmd_stop_legacy(args: cli::StopArgs) {
 
 pub(super) async fn cmd_restart_legacy(fmt: OutputFormat) {
     let sup = resolve_runtime(None, None);
-    let _ = sup.stop();
+    // Same honest-lifecycle contract as `server restart`: never swallow a
+    // stop-refusal and then fail confusingly inside start.
+    if let Err(e) = restart_stop_phase(&sup, false) {
+        match &e {
+            SupervisorError::UnmanagedListener { .. } => {
+                let message = e
+                    .refusal_message("restart")
+                    .unwrap_or_else(|| e.to_string());
+                if fmt == OutputFormat::Json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "status": "refused",
+                            "operation": "restart",
+                            "message": message,
+                        })
+                    );
+                } else if fmt == OutputFormat::Quiet {
+                    eprintln!("refused: {message}");
+                } else {
+                    eprintln!("{} bridge: restart refused — {message}", "✗".red().bold());
+                    eprintln!(
+                        "   Hint: `oc2api server restart --unmanaged` verifies and adopts an untracked listener, then restarts over it."
+                    );
+                }
+                exit_with_status(crate::supervisor::STOP_REFUSED_UNMANAGED_EXIT_CODE);
+            }
+            e => {
+                if fmt == OutputFormat::Json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "status": "error",
+                            "operation": "restart",
+                            "message": e.to_string(),
+                        })
+                    );
+                } else {
+                    eprintln!(
+                        "{} bridge: restart failed during its stop phase — {e}",
+                        "✗".red().bold()
+                    );
+                    eprintln!("   Hint: Check the PID file or run `oc2api server status`");
+                }
+                exit_with_status(1);
+            }
+        }
+    }
     match sup.start() {
         Ok(()) => {
             let status = sup.status().unwrap_or(SupervisorStatus::Stopped);
@@ -442,7 +599,9 @@ pub(super) async fn cmd_run_server(args: ServeArgsBridge) {
             "✓".green().bold(),
             status
         );
-        eprintln!("   Use `o2a server status`, `o2a server stop`, or `o2a server start -f --port <port>`.");
+        eprintln!(
+            "   Use `o2a server status`, `o2a server stop`, or `o2a server start -f --port <port>`."
+        );
         return;
     }
     if let Err(error) = run_server(args).await {
@@ -452,6 +611,47 @@ pub(super) async fn cmd_run_server(args: ServeArgsBridge) {
 }
 
 // ── Runtime helpers ──
+
+/// Stop phase shared by every restart entry point (`server restart`, legacy
+/// `restart`). Honest-lifecycle contract for the whole restart flow:
+///
+/// - stop phase refused over an untracked listener (no `--unmanaged`): abort
+///   BEFORE starting anything — one actionable message naming
+///   `server restart --unmanaged`, exit code
+///   [`STOP_REFUSED_UNMANAGED_EXIT_CODE`] (4), matching the stop contract;
+/// - any other stop-phase failure: abort with exit code 1 rather than falling
+///   through to `start`, which could only fail again with a confusing
+///   secondary error;
+/// - stop succeeded (including "was already stopped"): proceed to start.
+fn restart_stop_phase(sup: &Supervisor, adopt_unmanaged: bool) -> Result<(), SupervisorError> {
+    if adopt_unmanaged {
+        sup.stop_adopting_unmanaged()
+    } else {
+        sup.stop()
+    }
+}
+
+/// Flush pending stdout and terminate with the given status code so the
+/// `server status` exit-code contract is observable by shell callers.
+fn exit_with_status(code: i32) -> ! {
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
+    std::process::exit(code);
+}
+
+/// Exit-code contract for `server stop`:
+/// - `0`: stopped (or was already stopped — nothing answered the probe);
+/// - `4`: refusal — an untracked listener answered on the configured port;
+/// - `1`: any other failure while attempting to stop.
+fn stop_exit_code(result: &Result<(), SupervisorError>) -> i32 {
+    match result {
+        Ok(()) => 0,
+        Err(SupervisorError::UnmanagedListener { .. }) => {
+            crate::supervisor::STOP_REFUSED_UNMANAGED_EXIT_CODE
+        }
+        Err(_) => 1,
+    }
+}
 
 async fn status_info(result: Result<SupervisorStatus, String>) -> ServerStatusInfo {
     let port = match &result {
@@ -619,6 +819,224 @@ pub(super) async fn maybe_bootstrap_proxies(no_proxy: bool, quiet: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infrastructure::process::{ProcessIdentity, ProcessManager, ProcessSpec};
+    use crate::pidfile::PidFile;
+    use std::net::TcpListener;
+
+    fn temp_runtime_root(name: &str) -> std::path::PathBuf {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let mut root = std::env::temp_dir();
+        root.push(format!(
+            "opencode2api-app-server-test-{}-{name}-{suffix}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&root);
+        root
+    }
+
+    /// Grab a fresh ephemeral port and release it so probes against it are
+    /// refused immediately (silent port).
+    fn grab_free_port() -> u16 {
+        TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    /// A live listener owned by this very test process: enough to make
+    /// supervisor port probes report "something answers" without spawning any
+    /// child process or sending any signal anywhere.
+    fn bind_local_listener() -> (TcpListener, u16) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        (listener, port)
+    }
+
+    #[test]
+    fn restart_stop_phase_refuses_plain_over_untracked_listener() {
+        let (_listener, port) = bind_local_listener();
+        let root = temp_runtime_root("restart-refuse");
+        let paths = RuntimePaths::from_root(&root);
+        let sup = Supervisor::new(paths.clone(), port, "127.0.0.1");
+
+        let error = restart_stop_phase(&sup, false)
+            .expect_err("plain restart must refuse over an untracked listener");
+
+        match &error {
+            SupervisorError::UnmanagedListener {
+                port: reported_port,
+                ..
+            } => assert_eq!(*reported_port, port),
+            other => panic!("expected UnmanagedListener refusal, got: {other:?}"),
+        }
+        // Refusal must happen BEFORE anything is started or adopted.
+        assert!(!paths.pid_file().exists());
+
+        drop(_listener);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn restart_stop_phase_override_engages_adoption_instead_of_refusal() {
+        let (_listener, port) = bind_local_listener();
+        let root = temp_runtime_root("restart-adopt-route");
+        let paths = RuntimePaths::from_root(&root);
+        let sup = Supervisor::new(paths.clone(), port, "127.0.0.1");
+
+        // The only listener is this test process itself; adoption skips
+        // self-adoption by design, so the override surfaces an AdoptionFailed
+        // — proving the flag routed through the adoption path rather than the
+        // plain-refusal path, with no signal ever sent anywhere.
+        let error = restart_stop_phase(&sup, true)
+            .expect_err("self-owned listener cannot be adopted into supervisor state");
+
+        match &error {
+            SupervisorError::AdoptionFailed { port: failed, .. } => assert_eq!(*failed, port),
+            other => panic!(
+                "expected AdoptionFailed from the --unmanaged adoption route, got: {other:?}"
+            ),
+        }
+        assert!(!paths.pid_file().exists());
+
+        drop(_listener);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn restart_stop_phase_proceeds_when_port_is_silent() {
+        let port = grab_free_port();
+        let root = temp_runtime_root("restart-silent");
+        let sup = Supervisor::new(RuntimePaths::from_root(&root), port, "127.0.0.1");
+
+        restart_stop_phase(&sup, false).expect("plain restart proceeds over a silent port");
+        restart_stop_phase(&sup, true)
+            .expect("--unmanaged restart also proceeds over a silent port");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Minimal fake: the recorded identity stays alive until `terminate`
+    /// clears it, so the supervisor's post-TERM wait loop exits immediately
+    /// and the destructive KILL batch must never fire.
+    #[derive(Debug)]
+    struct TerminatesOnSignalManager {
+        identity: std::sync::Mutex<Option<ProcessIdentity>>,
+        terminate_calls: std::sync::Mutex<Vec<u32>>,
+        force_calls: std::sync::Mutex<Vec<u32>>,
+    }
+
+    impl ProcessManager for TerminatesOnSignalManager {
+        fn spawn_detached(&self, _spec: &ProcessSpec) -> std::io::Result<ProcessIdentity> {
+            Err(std::io::Error::other("not used"))
+        }
+
+        fn identity(&self, _pid: u32) -> std::io::Result<Option<ProcessIdentity>> {
+            Ok(self.identity.lock().unwrap().clone())
+        }
+
+        fn terminate(&self, pid: u32) -> std::io::Result<()> {
+            self.terminate_calls.lock().unwrap().push(pid);
+            *self.identity.lock().unwrap() = None;
+            Ok(())
+        }
+
+        fn force_kill(&self, pid: u32) -> std::io::Result<()> {
+            self.force_calls.lock().unwrap().push(pid);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn restart_stop_phase_stops_managed_process_via_verified_flow() {
+        let port = grab_free_port();
+        let root = temp_runtime_root("restart-managed-stop");
+        let paths = RuntimePaths::from_root(&root);
+        paths.ensure_dirs().unwrap();
+        let identity = ProcessIdentity {
+            pid: 4747,
+            executable: Some(std::env::current_exe().unwrap()),
+            start_marker: Some("restart-managed".to_string()),
+        };
+        PidFile::with_identity(identity.clone(), port, "127.0.0.1")
+            .write(&paths.pid_file())
+            .unwrap();
+
+        let manager = std::sync::Arc::new(TerminatesOnSignalManager {
+            identity: std::sync::Mutex::new(Some(identity)),
+            terminate_calls: std::sync::Mutex::new(Vec::new()),
+            force_calls: std::sync::Mutex::new(Vec::new()),
+        });
+        let sup =
+            Supervisor::new(paths.clone(), port, "127.0.0.1").with_process_manager(manager.clone());
+
+        restart_stop_phase(&sup, false).expect("managed stop must succeed before start phase");
+
+        assert_eq!(*manager.terminate_calls.lock().unwrap(), vec![4747]);
+        assert!(
+            manager.force_calls.lock().unwrap().is_empty(),
+            "a clean TERM must never escalate to KILL"
+        );
+        assert!(!paths.pid_file().exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn refusal_message_renders_requested_operation_from_one_source() {
+        let error = SupervisorError::UnmanagedListener {
+            port: 4000,
+            detail: "a TCP listener accepted a connection on probed port 4000".to_string(),
+        };
+        // Restart flows must name the restart override, never the stop flag.
+        let restart_message = error
+            .refusal_message("restart")
+            .expect("refusal message for this variant");
+        assert!(restart_message.contains("server restart --unmanaged"));
+        assert!(
+            !restart_message.contains("stop --unmanaged"),
+            "restart guidance must not send users to the stop flag: {restart_message}"
+        );
+        assert!(restart_message.contains("refusing to restart"));
+        // The stop flow renders its own flag from the same single template.
+        let stop_message = error
+            .refusal_message("stop")
+            .expect("refusal message for this variant");
+        assert!(stop_message.contains("refusing to stop"));
+        assert!(stop_message.contains("server stop --unmanaged"));
+        assert_eq!(
+            error.to_string(),
+            stop_message,
+            "Display must stay the stop-flavored rendering of the shared template"
+        );
+        assert_eq!(
+            SupervisorError::NotRunning.refusal_message("restart"),
+            None,
+            "only the unmanaged-listener refusal has dedicated wording"
+        );
+    }
+
+    #[test]
+    fn stop_exit_code_contract_distinguishes_stopped_refused_failed() {
+        let stopped: Result<(), SupervisorError> = Ok(());
+        assert_eq!(stop_exit_code(&stopped), 0);
+
+        let refused = Err(SupervisorError::UnmanagedListener {
+            port: 4000,
+            detail: "a TCP listener accepted a connection on probed port 4000".to_string(),
+        });
+        assert_eq!(stop_exit_code(&refused), 4);
+
+        let failed = Err(SupervisorError::OwnershipMismatch(4242));
+        assert_eq!(stop_exit_code(&failed), 1);
+        assert_eq!(
+            stop_exit_code(&Err(SupervisorError::NotRunning)),
+            1,
+            "generic failures stay at exit code 1"
+        );
+    }
 
     #[test]
     fn hybrid_startup_never_blocks_on_bootstrap() {

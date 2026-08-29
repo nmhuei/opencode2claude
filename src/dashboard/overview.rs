@@ -19,7 +19,8 @@ pub async fn handler_rest_status(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, (StatusCode, Json<Value>)> {
     check_admin_token(&state, &headers, None)?;
-    let snapshot = service::proxy_snapshot(&state).await;
+    let egress = service::egress_operational_snapshot(&state).await;
+    let snapshot = &egress.proxy_pool;
     let uptime_secs = service::uptime_secs(&state);
     let auth_enabled = state.api_keys.read().await.configured();
 
@@ -34,6 +35,14 @@ pub async fn handler_rest_status(
         "auth_enabled": auth_enabled,
         "admin_token_configured": auth::dashboard_token(&state.config).is_some(),
         "shell_policy": state.config.shell_policy.kind(),
+        "egress": {
+            "mode": egress.mode,
+            "ready": egress.gateway_ready,
+            "active_route": egress.active_route,
+            "minimum_unique_exit_ips": egress.minimum_unique_exit_ips,
+            "unique_verified_exits": egress.unique_verified_exits,
+            "proxy_subsystem": egress.proxy_subsystem,
+        },
         "primary_proxies": {
             "total": snapshot.primary.total,
             "healthy": snapshot.primary.healthy,
@@ -121,6 +130,78 @@ pub async fn handler_proxy_restart(
             state.audit_log.record(
                 "dashboard",
                 "proxy_restart",
+                format!("proxy:{port}"),
+                AuditOutcome::Failure,
+                correlation,
+                BTreeMap::from([("error_code".to_string(), error.code.to_string())]),
+            );
+            Ok(Json(json!({
+                "status": "error",
+                "message": error.message,
+            })))
+        }
+    }
+}
+
+/// POST /api/dashboard/proxy/:port/drain — stop fresh routing while leases finish.
+pub async fn handler_proxy_drain(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    request_id: Option<Extension<RequestId>>,
+    Path(port): Path<u16>,
+) -> Result<impl axum::response::IntoResponse, (StatusCode, Json<Value>)> {
+    set_proxy_drain(state, headers, request_id, port, true).await
+}
+
+/// POST /api/dashboard/proxy/:port/undrain — restore fresh routing eligibility.
+pub async fn handler_proxy_undrain(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    request_id: Option<Extension<RequestId>>,
+    Path(port): Path<u16>,
+) -> Result<impl axum::response::IntoResponse, (StatusCode, Json<Value>)> {
+    set_proxy_drain(state, headers, request_id, port, false).await
+}
+
+async fn set_proxy_drain(
+    state: AppState,
+    headers: HeaderMap,
+    request_id: Option<Extension<RequestId>>,
+    port: u16,
+    draining: bool,
+) -> Result<impl axum::response::IntoResponse, (StatusCode, Json<Value>)> {
+    check_admin_mutation(&state, &headers)?;
+    let correlation = request_id.map(|Extension(value)| value.0);
+    let action = if draining {
+        "proxy_drain"
+    } else {
+        "proxy_undrain"
+    };
+
+    match service::set_managed_proxy_drain(&state, port, draining).await {
+        Ok(result) => {
+            state.audit_log.record(
+                "dashboard",
+                action,
+                format!("proxy:{port}"),
+                AuditOutcome::Success,
+                correlation,
+                BTreeMap::from([(
+                    "active_requests".to_string(),
+                    result.active_requests.to_string(),
+                )]),
+            );
+            Ok(Json(json!({
+                "status": "ok",
+                "port": result.port,
+                "draining": result.draining,
+                "active_requests": result.active_requests,
+            })))
+        }
+        Err(error) => {
+            state.audit_log.record(
+                "dashboard",
+                action,
                 format!("proxy:{port}"),
                 AuditOutcome::Failure,
                 correlation,

@@ -138,7 +138,6 @@ pub struct RetryConfig {
     pub model_fallbacks: Vec<String>,
     pub default_fallbacks_enabled: bool,
     pub max_network_attempts: usize,
-    pub max_provider_attempts: u32,
     pub base_backoff: Duration,
     pub max_backoff: Duration,
 }
@@ -155,6 +154,18 @@ pub struct EgressConfig {
     pub restart_interval: Duration,
     pub max_restart_attempts: u32,
     pub allow_direct_fallback: bool,
+    /// True when at least one of `BRIDGE_PRIMARY_PROXIES`, legacy
+    /// `BRIDGE_PROXIES`, TOML `primary_proxies`, or TOML `proxies` was
+    /// explicitly provided by the operator AND parsed to at least one proxy.
+    ///
+    /// The loader always materializes a built-in WARP default pool when
+    /// nothing is configured (other components depend on a non-empty pool);
+    /// this flag lets security validation distinguish that silent
+    /// inheritance from deliberate configuration without altering the
+    /// resolved list itself. Sources that yield zero proxies after parsing
+    /// (comma-only text, an empty array) count as unconfigured so that
+    /// `egress_mode="proxy"` cannot be unlocked by a phantom setting.
+    pub proxies_explicitly_configured: bool,
     pub bootstrap_timeout: Duration,
     pub verify_timeout: Duration,
     pub recovery_backoff_max: Duration,
@@ -250,6 +261,11 @@ pub struct SearchConfig {
     pub max_snippet_chars: usize,
     pub max_response_bytes: usize,
     pub request_timeout: Duration,
+    /// Wall-clock budget for one full provider fallback-chain walk, plumbed
+    /// into `SearchPolicy.chain_budget` (see `opencode::search`). Must stay in
+    /// lockstep with the loader's effective default of 25 seconds so both
+    /// construction paths behave identically.
+    pub chain_budget: Duration,
     pub allow_private_searxng: bool,
     pub tavily_url: String,
     pub exa_url: String,
@@ -321,7 +337,6 @@ impl Default for BridgeConfig {
                 model_fallbacks: Vec::new(),
                 default_fallbacks_enabled: false,
                 max_network_attempts: 8,
-                max_provider_attempts: 2,
                 base_backoff: Duration::from_secs(1),
                 max_backoff: Duration::from_secs(30),
             },
@@ -339,6 +354,7 @@ impl Default for BridgeConfig {
                 restart_interval: Duration::from_secs(2),
                 max_restart_attempts: 6,
                 allow_direct_fallback: false,
+                proxies_explicitly_configured: false,
                 bootstrap_timeout: Duration::from_secs(30),
                 verify_timeout: Duration::from_secs(10),
                 recovery_backoff_max: Duration::from_secs(120),
@@ -372,7 +388,10 @@ impl Default for BridgeConfig {
                 max_database_bytes: 16 * 1024 * 1024 * 1024,
                 max_request_bytes: 8 * 1024 * 1024,
                 max_reasoning_bytes: 16 * 1024 * 1024,
-                max_response_bytes: 16 * 1024 * 1024,
+                // Kept in lockstep with the loader's effective default
+                // (`BRIDGE_HISTORY_MAX_RESPONSE_BYTES` fallback) so both
+                // construction paths behave identically.
+                max_response_bytes: 2 * 1024 * 1024,
                 max_tool_payload_bytes: 4 * 1024 * 1024,
                 max_record_bytes: 48 * 1024 * 1024,
                 queue_capacity: 8192,
@@ -388,6 +407,10 @@ impl Default for BridgeConfig {
                 max_snippet_chars: 2000,
                 max_response_bytes: 8 * 1024 * 1024,
                 request_timeout: Duration::from_secs(30),
+                // Matches `SearchPolicy::default().chain_budget`: above a
+                // single default provider timeout (15s) but far below the
+                // unbounded serial walk.
+                chain_budget: Duration::from_secs(25),
                 allow_private_searxng: false,
                 tavily_url: "https://api.tavily.com/search".to_string(),
                 exa_url: "https://api.exa.ai/search".to_string(),

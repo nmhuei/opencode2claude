@@ -3,13 +3,14 @@ use crate::opencode::search::types::{
     SearchError, SearchErrorKind, SearchPolicy, SearchProviderKind, SearchQuery, SearchResult,
 };
 use crate::opencode::search::util::urlencoding_simple;
-use reqwest::Client;
+use reqwest::{header::HeaderValue, Client};
 use serde_json::Value;
 
 pub(crate) async fn search(
     client: &Client,
     query: &SearchQuery,
     base_url: &str,
+    api_key: Option<&str>,
     policy: &SearchPolicy,
 ) -> Result<Vec<SearchResult>, SearchError> {
     let encoded = urlencoding_simple(&query.text);
@@ -21,9 +22,17 @@ pub(crate) async fn search(
             base_url.trim_end_matches('/')
         )
     };
-    let response = client
-        .get(url)
-        .timeout(policy.request_timeout)
+    let mut request = client.get(url).timeout(policy.request_timeout);
+    // SearXNG itself is keyless; instances exposed through an authenticating
+    // reverse proxy conventionally accept a bearer credential. Skip invalid
+    // header values (e.g. control characters in a misconfigured key) instead
+    // of panicking.
+    if let Some(key) = api_key {
+        if let Ok(value) = HeaderValue::from_str(&format!("Bearer {key}")) {
+            request = request.header("Authorization", value);
+        }
+    }
+    let response = request
         .send()
         .await
         .map_err(|error| map_reqwest_error(SearchProviderKind::SearXng, error))?;

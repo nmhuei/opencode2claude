@@ -98,6 +98,14 @@ fn dashboard_routes() -> Router<AppState> {
             post(dashboard::handler_proxy_restart),
         )
         .route(
+            "/api/dashboard/proxy/:port/drain",
+            post(dashboard::handler_proxy_drain),
+        )
+        .route(
+            "/api/dashboard/proxy/:port/undrain",
+            post(dashboard::handler_proxy_undrain),
+        )
+        .route(
             "/api/dashboard/control/capabilities",
             get(dashboard::handler_capabilities),
         )

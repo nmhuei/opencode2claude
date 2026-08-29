@@ -19,6 +19,60 @@ pub(super) use serper::search as serper;
 pub(super) use tavily::search as tavily;
 pub(super) use yahoo::search as yahoo;
 
+/// Redirect hops a keyless scraper may follow before being cut off.
+const MAX_SCRAPER_REDIRECTS: usize = 3;
+
+/// Whether one redirect hop keeps the keyless scraper on its current origin:
+/// identical host plus either an unchanged scheme/port pair or an explicit
+/// http->https upgrade whose port stays unchanged or makes the canonical
+/// move between the schemes' default ports (80 -> 443). The port is part of
+/// the identity — loopback-mock attacks differ only by port — so even an
+/// upgrade must never relocate the scraper onto an arbitrary TLS port of
+/// the same host.
+pub(super) fn scraper_redirect_stays_on_origin(last: &reqwest::Url, target: &reqwest::Url) -> bool {
+    if last.host_str() != target.host_str() {
+        return false;
+    }
+    if last.scheme() == target.scheme() {
+        return last.port_or_known_default() == target.port_or_known_default();
+    }
+    // Sole carve-out: explicit http->https upgrade, with port discipline.
+    last.scheme() == "http"
+        && target.scheme() == "https"
+        && (last.port_or_known_default() == target.port_or_known_default()
+            || (last.port_or_known_default() == Some(80)
+                && target.port_or_known_default() == Some(443)))
+}
+
+/// Redirect policy for the keyless HTML/JSON scrapers (DuckDuckGo, Yahoo,
+/// SearXNG): same host only, bounded hops, never a scheme downgrade — and an
+/// http->https upgrade may keep or canonically move the port (80 -> 443),
+/// never land on an arbitrary one.
+///
+/// Off-host bounces are the classic way an open redirect turns a search
+/// integration into an SSRF gadget; blocked bounces surface as transport
+/// errors and simply fall through to the next provider. Same-host redirects
+/// stay enabled because search endpoints legitimately relocate between paths
+/// on their own origin.
+pub(super) fn scraper_redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= MAX_SCRAPER_REDIRECTS {
+            return attempt.error("search scraper exceeded redirect hop limit");
+        }
+        // Every hop must stay on one origin (see
+        // scraper_redirect_stays_on_origin). Comparing against the most
+        // recent visited URL is sufficient — any single off-origin jump is
+        // rejected at its own hop.
+        let Some(last) = attempt.previous().last() else {
+            return attempt.error("redirect without recorded origin");
+        };
+        if !scraper_redirect_stays_on_origin(last, attempt.url()) {
+            return attempt.error("redirect to a different origin blocked");
+        }
+        attempt.follow()
+    })
+}
+
 async fn read_json_response(
     provider: SearchProviderKind,
     response: Response,

@@ -436,6 +436,7 @@ impl ProxyPool {
             let identity_required =
                 self.require_verified_exit_ip || node.role == EgressRole::WarmStandby;
             role_enabled
+                && !node.draining
                 && node.health == HealthState::Healthy
                 && node.circuit == CircuitState::Closed
                 && node.duplicate_of.is_none()

@@ -30,6 +30,8 @@ Browser login sets an HttpOnly session cookie. Cookie-authenticated mutation req
 | `POST` | `/api/v1/config/preview` | Recursive merge, key validation, semantic validation, and changed-key preview. |
 | `POST` | `/api/v1/config/apply` | Atomic write, post-write verification, and rollback on failure. |
 | `POST` | `/api/v1/proxies/:port/restart` | Restart a configured managed primary node. Protected or leased nodes are rejected before runtime access. |
+| `POST` | `/api/v1/proxies/:port/drain` | Stop assigning fresh traffic to a managed primary while existing request leases finish. |
+| `POST` | `/api/v1/proxies/:port/undrain` | Cancel a drain without changing transport health/circuit state. |
 | `GET` | `/api/v1/metrics` | Typed authenticated operational counter snapshot. |
 | `GET` | `/api/v1/audit` | Latest 100 bounded secret-safe management mutation events. |
 | `GET` | `/api/v1/openapi.json` | OpenAPI 3.1 document assembled from the same DTO schema registry used by handlers. |
@@ -60,14 +62,9 @@ The service rejects unknown top-level keys, invalid zero values, invalid URLs, i
 
 ## Proxy lifecycle policy
 
-Only managed primary nodes may be restarted. The service rejects:
+Only managed primary nodes may be mutated. Restart rejects protected nodes, unknown ports, and nodes with active request leases. Drain is intentionally non-destructive: it immediately removes a managed primary from fresh normal/probe routing while preserving existing leases, container state, transport health, circuit state, quota state, and identity. `undrain` restores routing eligibility but does not make an unhealthy/open-circuit node healthy.
 
-- protected warm-standby nodes;
-- unknown ports;
-- nodes with active request leases;
-- invalid or unconfigured proxy IDs.
-
-The same policy is shared by REST and dashboard operations.
+Protected warm-standby nodes reject drain/restart mutations. The same lifecycle policy is shared by REST and dashboard operations.
 
 ## OpenAPI
 
@@ -88,7 +85,7 @@ The embedded dashboard uses:
 - `/api/dashboard/login`, `/logout`, and `/auth/status`;
 - `/api/dashboard/status`, `/proxies`, `/config`, and `/diagnostics`;
 - `/api/dashboard/config/save`;
-- `/api/dashboard/proxy/:port/restart`;
+- `/api/dashboard/proxy/:port/restart`, `/drain`, and `/undrain`;
 - `/api/dashboard/events`;
 - `/api/dashboard/test/stream`.
 

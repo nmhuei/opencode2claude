@@ -2,6 +2,8 @@
 
 pub(crate) mod common;
 pub(super) mod fallback_intent;
+#[cfg(test)]
+mod parity_tests;
 mod stream;
 mod sync;
 

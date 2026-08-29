@@ -48,7 +48,8 @@
       apiDescription: 'Manage client credentials and access policies.',
       modelsDescription: 'Select and test the current upstream model.',
       historyDescription: 'Inspect prompts, reasoning, responses and request execution details.',
-      systemDescription: 'Inspect the server, proxies, security and maintenance tools.'
+      systemDescription: 'Inspect the server, proxies, security and maintenance tools.',
+      drain: 'Drain', undrain: 'Undrain', draining: 'Draining', egressMode: 'Egress mode', activeRoute: 'Active route', proxySubsystem: 'Proxy subsystem'
     },
     vi: {
       localControlPlane: 'Bảng điều khiển cục bộ', dashboard: 'Tổng quan', apiKeys: 'API Key', models: 'Mô hình', history: 'Lịch sử', system: 'Hệ thống',
@@ -60,13 +61,13 @@
       recentActivity: 'Hoạt động gần đây', recentActivityDescription: 'Các thay đổi có ý nghĩa từ control plane cục bộ.', clear: 'Xóa', waitingForEvents: 'Đang chờ sự kiện…', quickActions: 'Thao tác nhanh', quickActionsDescription: 'Các tác vụ thường dùng ngay trên trang tổng quan.', createApiKey: 'Tạo API key', testModel: 'Kiểm tra mô hình', viewLogs: 'Xem nhật ký',
       hotReloadNote: 'Thay đổi có hiệu lực ngay mà không cần khởi động lại bridge.', checkApiKey: 'Kiểm tra API key', clientApiKeys: 'API key của client', clientApiKeysDescription: 'Bấm vào một dòng để xem hoặc cập nhật chính sách truy cập.', search: 'Tìm kiếm', status: 'Trạng thái', allStatuses: 'Tất cả trạng thái', active: 'Hoạt động', disabled: 'Đã tắt', expired: 'Hết hạn', searchKeyPlaceholder: 'Tên hoặc fingerprint', loadingApiKeys: 'Đang tải API key…',
       currentModel: 'Mô hình hiện tại', modelRestartRequired: 'Mô hình cấu hình đã thay đổi. Khởi động lại bridge để áp dụng.', availableModels: 'Mô hình khả dụng', availableModelsDescription: 'Chọn một mô hình upstream miễn phí cho bridge.', reload: 'Tải lại', searchModelPlaceholder: 'Tìm mô hình', loadingModels: 'Đang tải mô hình…', testModelDescription: 'Chạy kiểm tra suy luận nhiều bước và streaming qua endpoint tương thích OpenAI.', idle: 'Chờ', prompt: 'Prompt', thinking: 'Suy luận', streamResponse: 'Trả lời dạng stream', runTest: 'Chạy kiểm tra', response: 'Phản hồi', reasoning: 'Suy luận', noResponseYet: 'Chưa có phản hồi.', noReasoningYet: 'Chưa có suy luận.',
-      server: 'Server', serverDescription: 'Trạng thái process và listener hiện tại của bridge.', restart: 'Khởi động lại', stop: 'Dừng', security: 'Bảo mật', securityDescription: 'Trạng thái xác thực và các tính năng nguy hiểm.', dashboardAuthentication: 'Xác thực dashboard', shellCommands: 'Lệnh shell', managedApiKeys: 'API key được quản lý', proxyPool: 'Nhóm proxy', loadingProxyHealth: 'Đang tải trạng thái proxy…', refreshHealth: 'Làm mới trạng thái', loadingNodes: 'Đang tải node…', maintenance: 'Bảo trì', maintenanceDescription: 'Nhật ký, chẩn đoán và cấu hình nâng cao chỉ mở khi cần.', viewLogsDescription: 'Xem output của bridge hoặc proxy.', runDiagnosticsDescription: 'Kiểm tra runtime, cấu hình và kết nối.', advancedConfiguration: 'Cấu hình nâng cao', advancedConfigurationDescription: 'Kiểm tra và sửa file TOML đang hoạt động.',
+      server: 'Server', serverDescription: 'Trạng thái process và listener hiện tại của bridge.', restart: 'Khởi động lại', stop: 'Dừng', drain: 'Ngừng nhận request mới', undrain: 'Nhận request mới', draining: 'Đang drain', security: 'Bảo mật', securityDescription: 'Trạng thái xác thực và các tính năng nguy hiểm.', dashboardAuthentication: 'Xác thực dashboard', shellCommands: 'Lệnh shell', managedApiKeys: 'API key được quản lý', proxyPool: 'Nhóm proxy', loadingProxyHealth: 'Đang tải trạng thái proxy…', refreshHealth: 'Làm mới trạng thái', loadingNodes: 'Đang tải node…', maintenance: 'Bảo trì', maintenanceDescription: 'Nhật ký, chẩn đoán và cấu hình nâng cao chỉ mở khi cần.', viewLogsDescription: 'Xem output của bridge hoặc proxy.', runDiagnosticsDescription: 'Kiểm tra runtime, cấu hình và kết nối.', advancedConfiguration: 'Cấu hình nâng cao', advancedConfigurationDescription: 'Kiểm tra và sửa file TOML đang hoạt động.',
       newCredential: 'Thông tin xác thực mới', createApiKeyDescription: 'Tạo credential có tên với chính sách mặc định an toàn.', name: 'Tên', preset: 'Mẫu cấu hình', environment: 'Môi trường', defaultModel: 'Mô hình mặc định', description: 'Mô tả', advancedSettings: 'Cài đặt nâng cao', expires: 'Hết hạn', maxOutputTokens: 'Token output tối đa', reasoningMode: 'Chế độ suy luận', reasoningEffort: 'Mức suy luận', maxReasoningTokens: 'Token suy luận tối đa', overLimitBehavior: 'Xử lý khi vượt giới hạn', requestsPerMinute: 'Yêu cầu / phút', concurrentRequests: 'Yêu cầu đồng thời', dailyQuota: 'Hạn mức yêu cầu ngày', permissions: 'Quyền', cancel: 'Hủy',
       apiKeySettings: 'Cài đặt API key', general: 'Chung', policy: 'Chính sách', usage: 'Sử dụng', expirationDate: 'Ngày hết hạn', clientConfiguration: 'Cấu hình client', format: 'Định dạng', apiKeySource: 'Nguồn API key', generate: 'Tạo', copy: 'Sao chép', download: 'Tải xuống', dangerZone: 'Vùng nguy hiểm', dangerZoneDescription: 'Rotate sẽ vô hiệu secret hiện tại ngay lập tức. Revoke là vĩnh viễn.', rotateSecret: 'Đổi secret', revokeKey: 'Thu hồi key', allowModelOverride: 'Cho phép client đổi mô hình', allowedModels: 'Mô hình được phép', protocols: 'Giao thức', features: 'Tính năng', close: 'Đóng', saveChanges: 'Lưu thay đổi',
       secretCreated: 'Đã tạo secret', secretShownOnce: 'Secret chỉ hiển thị một lần. Hãy lưu ở nơi an toàn.', secretWarning: 'Đóng cửa sổ này sẽ ẩn secret vĩnh viễn.', downloadConfig: 'Tải cấu hình', done: 'Hoàn tất', credentialHealth: 'Sức khỏe credential', checkApiKeyDescription: 'Kiểm tra toàn bộ key được quản lý để phát hiện key đã tắt, hết hạn hoặc không khả dụng.', checkingAllKeys: 'Đang kiểm tra toàn bộ API key…', apiKeyCheckNote: 'Raw secret không bao giờ được lưu. Kiểm tra này xác nhận trạng thái registry hiện tại và khả năng dùng key để xác thực.', checkAgain: 'Kiểm tra lại', dead: 'Không khả dụng', expiringSoon: 'Sắp hết hạn', checkedAt: 'Kiểm tra lúc', apiKey: 'API key', check: 'Kiểm tra',
       logs: 'Nhật ký', logsDescription: 'Xem output gần đây của bridge hoặc proxy.', source: 'Nguồn', lines: 'Số dòng', diagnostics: 'Chẩn đoán', diagnosticsDescription: 'Chạy các kiểm tra cốt lõi về runtime, cấu hình và mạng.', runAgain: 'Chạy lại', diagnosticsNotRun: 'Chưa chạy chẩn đoán.', advanced: 'Nâng cao', configurationDescription: 'Kiểm tra và áp dụng atomically tài liệu TOML đang hoạt động.', loadTemplate: 'Nạp mẫu', validate: 'Kiểm tra', save: 'Lưu', moreTools: 'Công cụ khác', resetTemplate: 'Đặt lại mẫu', shellCompletion: 'Shell completion', updateNotChecked: 'Chưa kiểm tra cập nhật.', checkUpdate: 'Kiểm tra cập nhật', applyUpdate: 'Áp dụng cập nhật', confirmAction: 'Xác nhận thao tác', confirm: 'Xác nhận',
       loading: 'Đang tải…', enabled: 'Đã bật', unlimited: 'Không giới hạn', never: 'Chưa bao giờ', noApiKeys: 'Chưa có API key.', noMatchingKeys: 'Không có API key phù hợp.', edit: 'Sửa', healthy: 'Bình thường', allClosed: 'Tất cả đã đóng', running: 'đang chạy', failed: 'lỗi', protected: 'Được bảo vệ', viewProxyLogs: 'Xem log', restartNode: 'Khởi động lại', configured: 'Đã cấu hình', notConfigured: 'Chưa cấu hình',
-      state: 'Trạng thái', version: 'Phiên bản', listener: 'Listener', clientAuth: 'Xác thực client', shellPolicy: 'Chính sách shell', role: 'Vai trò', health: 'Sức khỏe', circuit: 'Circuit', activeRequests: 'Đang xử lý', exitIp: 'IP đầu ra', action: 'Thao tác', configuration: 'Cấu hình', limits: 'Giới hạn', lastUsed: 'Dùng lần cuối', usageToday: 'Dùng hôm nay',
+      state: 'Trạng thái', version: 'Phiên bản', listener: 'Listener', clientAuth: 'Xác thực client', shellPolicy: 'Chính sách shell', egressMode: 'Chế độ egress', activeRoute: 'Route ưu tiên', proxySubsystem: 'Subsystem proxy', role: 'Vai trò', health: 'Sức khỏe', circuit: 'Circuit', activeRequests: 'Đang xử lý', exitIp: 'IP đầu ra', action: 'Thao tác', configuration: 'Cấu hình', limits: 'Giới hạn', lastUsed: 'Dùng lần cuối', usageToday: 'Dùng hôm nay',
       requestsToday: 'Request hôm nay', successRate: 'Tỷ lệ thành công', averageLatency: 'Độ trễ trung bình', storedSize: 'Dung lượng đã lưu', completedRequests: 'Request đã hoàn tất', loadingHistoryStatus: 'Đang tải trạng thái lịch sử…', historySettings: 'Cài đặt lịch sử', exportFiltered: 'Xuất kết quả lọc', purgeHistory: 'Xóa lịch sử', requestHistory: 'Lịch sử request', requestHistoryDescription: 'Kiểm tra prompt đầu vào, payload upstream thực tế, reasoning và response.', historySearchPlaceholder: 'Request ID, prompt, client hoặc model', protocol: 'Giao thức', allProtocols: 'Tất cả giao thức', allModels: 'Tất cả mô hình', all: 'Tất cả', clearFilters: 'Xóa bộ lọc', loadingHistory: 'Đang tải lịch sử request…', previous: 'Trước', next: 'Sau', completed: 'Hoàn tất', cancelled: 'Đã hủy', interrupted: 'Bị gián đoạn', requestDetail: 'Chi tiết request', overview: 'Tổng quan', inboundRequest: 'Request đầu vào', effectivePrompt: 'Prompt thực tế', toolsAndSearch: 'Tool và tìm kiếm', attempts: 'Lần thử', rawJson: 'JSON gốc', noToolEvents: 'Không có sự kiện tool hoặc tìm kiếm.', noAttempts: 'Không có lần thử được ghi nhận.', deleteRequest: 'Xóa request', exportJson: 'Xuất JSON', privacyAndRetention: 'Quyền riêng tư và lưu trữ', historySettingsDescription: 'Kiểm soát việc lưu prompt cục bộ, thời gian giữ và giới hạn dung lượng.', enableHistory: 'Bật lưu lịch sử request', captureMode: 'Chế độ lưu', retentionDays: 'Số ngày lưu', maxRecords: 'Số record tối đa', maxStorage: 'Dung lượng tối đa (MiB)', historySensitiveWarning: 'Prompt, reasoning và response có thể chứa dữ liệu nhạy cảm. Nội dung được che trước khi ghi xuống ổ đĩa.'
     }
   };
@@ -304,6 +305,8 @@
   }
 
   function renderServerFacts(data) {
+    var egress = data.egress || {};
+    var proxySubsystem = egress.proxy_subsystem || {};
     var rows = [
       [t('state', 'State'), data.status || 'unknown'],
       [t('version', 'Version'), data.version || '—'],
@@ -312,7 +315,10 @@
       [t('uptime', 'Uptime'), formatDuration(currentUptimeSeconds())],
       [t('model', 'Model'), data.model || 'auto'],
       [t('clientAuth', 'Client auth'), data.auth_enabled ? t('enabled', 'Enabled') : t('disabled', 'Disabled')],
-      [t('shellPolicy', 'Shell policy'), data.shell_policy || '—']
+      [t('shellPolicy', 'Shell policy'), data.shell_policy || '—'],
+      [t('egressMode', 'Egress mode'), egress.mode || '—'],
+      [t('activeRoute', 'Active route'), egress.active_route || '—'],
+      [t('proxySubsystem', 'Proxy subsystem'), proxySubsystem.phase || '—']
     ];
     $('#serverFacts').innerHTML = rows.map(function (row) {
       var id = row[0] === t('uptime', 'Uptime') ? ' id="serverFactUptime"' : '';
@@ -365,13 +371,22 @@
     return '<table class="data-table"><thead><tr><th>Node</th><th>' + escapeHtml(t('role', 'Role')) + '</th><th>' + escapeHtml(t('health', 'Health')) + '</th><th>' + escapeHtml(t('circuit', 'Circuit')) + '</th><th>' + escapeHtml(t('activeRequests', 'Active')) + '</th><th>' + escapeHtml(t('exitIp', 'Exit IP')) + '</th><th></th></tr></thead><tbody>' + nodes.map(function (node) {
       var identity = node.exit_identity && (node.exit_identity.public_ip || node.exit_identity.ip || node.exit_identity.address);
       var mutable = String(node.lifecycle || '').toLowerCase() !== 'protected';
-      return '<tr><td><strong class="mono">' + escapeHtml(node.id || ('proxy-' + node.port)) + '</strong><small class="mono">:' + escapeHtml(node.port) + '</small></td>' +
+      var drainAction = node.draining ? 'undrain' : 'drain';
+      var drainLabel = node.draining ? t('undrain', 'Undrain') : t('drain', 'Drain');
+      var recovery = node.recovery_cause ? ' · recovery ' + node.recovery_cause + ' #' + Number(node.restart_attempts || 0) : '';
+      var deadlines = [];
+      if (node.cooldown_remaining_secs != null) deadlines.push('cooldown ' + formatDuration(Number(node.cooldown_remaining_secs)));
+      if (node.rate_limit_remaining_secs != null) deadlines.push('quota ' + formatDuration(Number(node.rate_limit_remaining_secs)));
+      var identityMeta = [];
+      if (node.exit_identity && node.exit_identity.verified_at_unix_secs) identityMeta.push('verified ' + formatTimestamp(node.exit_identity.verified_at_unix_secs));
+      if (node.duplicate_of) identityMeta.push('duplicate of ' + node.duplicate_of);
+      return '<tr><td><strong class="mono">' + escapeHtml(node.id || ('proxy-' + node.port)) + '</strong><small class="mono">:' + escapeHtml(node.port) + '</small>' + (node.draining ? '<span class="count-badge">' + escapeHtml(t('draining', 'Draining')) + '</span>' : '') + '</td>' +
         '<td>' + escapeHtml(node.role || '—') + '</td>' +
-        '<td>' + statusHtml(node.health || node.status || 'unknown') + '</td>' +
-        '<td class="mono">' + escapeHtml(node.circuit || '—') + '</td>' +
+        '<td>' + statusHtml(node.health || node.status || 'unknown') + (recovery ? '<small>' + escapeHtml(recovery) + '</small>' : '') + '</td>' +
+        '<td class="mono">' + escapeHtml(node.circuit || '—') + (deadlines.length ? '<small>' + escapeHtml(deadlines.join(' · ')) + '</small>' : '') + '</td>' +
         '<td class="mono">' + escapeHtml(node.active_requests || 0) + '</td>' +
-        '<td class="mono">' + escapeHtml(identity || 'unverified') + '</td>' +
-        '<td class="proxy-actions-cell"><div class="proxy-actions">' + (mutable ? '<button class="row-action proxy-primary-action" type="button" data-restart-port="' + escapeHtml(node.port) + '">' + escapeHtml(t('restart', 'Restart')) + '</button>' : '<span class="count-badge proxy-primary-action">' + escapeHtml(t('protected', 'Protected')) + '</span>') + '<button class="row-action proxy-logs-action" type="button" data-proxy-logs="' + escapeHtml(node.port) + '">' + escapeHtml(t('viewProxyLogs', 'Logs')) + '</button></div></td></tr>';
+        '<td class="mono">' + escapeHtml(identity || 'unverified') + (identityMeta.length ? '<small>' + escapeHtml(identityMeta.join(' · ')) + '</small>' : '') + '</td>' +
+        '<td class="proxy-actions-cell"><div class="proxy-actions">' + (mutable ? '<button class="row-action" type="button" data-drain-action="' + drainAction + '" data-drain-port="' + escapeHtml(node.port) + '">' + escapeHtml(drainLabel) + '</button><button class="row-action proxy-primary-action" type="button" data-restart-port="' + escapeHtml(node.port) + '">' + escapeHtml(t('restart', 'Restart')) + '</button>' : '<span class="count-badge proxy-primary-action">' + escapeHtml(t('protected', 'Protected')) + '</span>') + '<button class="row-action proxy-logs-action" type="button" data-proxy-logs="' + escapeHtml(node.port) + '">' + escapeHtml(t('viewProxyLogs', 'Logs')) + '</button></div></td></tr>';
     }).join('') + '</tbody></table>';
   }
 
@@ -380,7 +395,15 @@
     state.proxies = Array.isArray(data) ? data : (data.nodes || []);
     $('#networkProxyTable').innerHTML = proxyRows(state.proxies);
     var healthy = state.proxies.filter(function (node) { return String(node.health).toLowerCase() === 'healthy'; }).length;
-    $('#systemProxySummary').textContent = state.proxies.length + ' nodes · ' + healthy + ' healthy';
+    var egress = (state.status && state.status.egress) || {};
+    var subsystem = egress.proxy_subsystem || {};
+    var summary = state.proxies.length + ' nodes · ' + healthy + ' healthy';
+    if (egress.mode) summary += ' · ' + egress.mode + ' → ' + (egress.active_route || '—');
+    if (subsystem.phase) summary += ' · proxy ' + subsystem.phase;
+    if (egress.unique_verified_exits != null) summary += ' · ' + egress.unique_verified_exits + '/' + (egress.minimum_unique_exit_ips || 0) + ' unique exits';
+    if (subsystem.backoff_until_unix_secs) summary += ' · backoff until ' + formatTimestamp(subsystem.backoff_until_unix_secs);
+    if (subsystem.last_error) summary += ' · ' + subsystem.last_error;
+    $('#systemProxySummary').textContent = summary;
     var allClosed = state.proxies.every(function (node) { return String(node.circuit).toLowerCase() === 'closed'; });
     $('#statusCircuits').innerHTML = statusHtml(allClosed ? t('allClosed', 'All closed') : 'Attention required', allClosed ? 'ok' : 'warn');
     return state.proxies;
@@ -1188,6 +1211,19 @@
       pushEvent('Proxy restarted · :' + port, 'ok');
     });
   }
+  async function setProxyDrain(port, action, button) {
+    var draining = action === 'drain';
+    var title = (draining ? t('drain', 'Drain') : t('undrain', 'Undrain')) + ' proxy :' + port + '?';
+    var note = draining ? 'Fresh requests will stop using this node; existing requests may finish.' : 'The node becomes eligible for fresh traffic again only if its health and circuit state allow it.';
+    if (!await confirmAction(title, note)) return;
+    await withBusy(button, draining ? 'Draining…' : 'Restoring…', async function () {
+      var result = await api('/api/dashboard/proxy/' + encodeURIComponent(port) + '/' + action, { method: 'POST', body: {} });
+      if (result.status === 'error') throw new Error(result.message || 'Proxy drain operation failed');
+      await loadProxies();
+      toast('Proxy :' + port + (draining ? ' is draining.' : ' restored to routing eligibility.'), 'success');
+      pushEvent('Proxy ' + (draining ? 'draining' : 'undrained') + ' · :' + port, draining ? 'warn' : 'ok');
+    });
+  }
   async function restartServer(button) {
     if (!await confirmAction('Restart bridge?', 'The dashboard will disconnect briefly and reconnect when the new process is healthy.')) return;
     var previousPid = state.status && state.status.pid;
@@ -1707,8 +1743,10 @@
     $('#stopServerButton').addEventListener('click', function () { stopServer(this).catch(function () {}); });
     $('#reloadProxiesButton').addEventListener('click', function () { withBusy(this, 'Loading…', loadProxies).catch(function () {}); });
     $('#networkProxyTable').addEventListener('click', function (event) {
+      var drain = event.target.closest('[data-drain-port]');
       var restart = event.target.closest('[data-restart-port]');
       var logs = event.target.closest('[data-proxy-logs]');
+      if (drain) setProxyDrain(drain.dataset.drainPort, drain.dataset.drainAction, drain).catch(function () {});
       if (restart) restartProxy(restart.dataset.restartPort, restart).catch(function () {});
       if (logs) openLogs('proxies');
     });

@@ -116,6 +116,9 @@ pub struct ProxyEntry {
     /// Whether this primary belongs to the normal serving set. Standby role is
     /// governed separately and is never converted into a managed primary.
     pub routing_enabled: bool,
+    /// Operator/runtime drain gate. Draining is orthogonal to health: existing
+    /// leases may finish, but no fresh normal or probe route may select the node.
+    pub draining: bool,
     pub health: HealthState,
     pub circuit: CircuitState,
     pub consecutive_failures: u32,
@@ -230,6 +233,7 @@ pub struct ProxyNodeStats {
     pub role: EgressRole,
     pub lifecycle: LifecyclePolicy,
     pub routing_enabled: bool,
+    pub draining: bool,
     pub health: HealthState,
     pub circuit: String,
     /// Compatibility label retained for existing dashboard clients.
@@ -238,6 +242,7 @@ pub struct ProxyNodeStats {
     pub success_count: u32,
     pub restart_attempts: u32,
     pub cooldown_remaining_secs: Option<u64>,
+    pub rate_limit_remaining_secs: Option<u64>,
     pub recovery_cause: Option<RecoveryCause>,
     pub quarantined_exit_ip: Option<String>,
     pub active_requests: usize,
