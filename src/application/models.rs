@@ -296,8 +296,8 @@ pub fn resolve_model_profile(model: &str) -> ModelProfile {
             id: "deepseek-v4-pro",
             label: "DeepSeek V4",
             provider: "DeepSeek",
-            context_window: 128_000,
-            max_output_tokens: 16_384,
+            context_window: 1_000_000,
+            max_output_tokens: 384_000,
             supports_thinking: true,
             anthropic_alias: "claude-opus-5",
         }
@@ -307,7 +307,7 @@ pub fn resolve_model_profile(model: &str) -> ModelProfile {
             label: "GLM 5.3 Flash",
             provider: "Zhipu AI",
             context_window: 1_000_000,
-            max_output_tokens: 128_000,
+            max_output_tokens: 131_072,
             supports_thinking: true,
             anthropic_alias: "claude-opus-5",
         }
