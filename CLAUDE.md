@@ -72,7 +72,7 @@ cargo clippy -- -D warnings
 
 ## Project Overview
 
-**OpenCode2API** (~4.2k LOC) is a local HTTP proxy that translates Anthropic Messages API requests into OpenAI-compatible API calls. It allows Claude Code to use any LLM provider — OpenCode Zen free tier as well as external OpenAI-compatible endpoints (such as `api.b.ai`, Ollama, vLLM, DeepSeek, etc.).
+**OpenCode2API** (~64k LOC src/) is a local HTTP proxy that translates Anthropic Messages API requests into OpenAI-compatible API calls. It allows Claude Code to use any LLM provider — OpenCode Zen free tier as well as external OpenAI-compatible endpoints (such as `api.b.ai`, Ollama, vLLM, DeepSeek, etc.).
 
 ### 1-Touch Zero-Hardcode Launcher
 
@@ -90,44 +90,46 @@ The bridge communicates **directly with the upstream OpenAI-compatible API** (su
 
 ## Architecture
 
-### Modules (~10k LOC)
+### Modules (~64k LOC)
 
 ```
 src/
 ├── main.rs               # Daemon controller CLI (opencode2api)
 ├── serve_main.rs         # HTTP bridge server entrypoint (opencode2api-serve)
 ├── lib.rs                # Library entry point (in-process embedding)
-├── server.rs             # HTTP bridge server running logic
 ├── cli.rs                # CLI argument parsing via Clap subcommands
-├── config.rs             # Config chain: CLI args > Env vars > TOML > Defaults
-├── handlers.rs           # Parse Anthropic requests, route to shell/upstream
+├── server/               # HTTP composition: args, routes, runtime
+├── config/               # Config chain: CLI args > Env vars > TOML > Defaults (types/file/loader/security)
+├── handlers/             # Anthropic + OpenAI request handling (messages/, openai/, shell, metadata)
 ├── state.rs              # AppState: shared config, HTTP/search clients, proxy pool, rate limiter
 ├── error.rs              # BridgeError enum → HTTP error responses
 ├── middleware.rs         # Bearer token auth (skips /health)
 ├── shell.rs              # !command execution via sh -c with ShellPolicy
 ├── sse.rs                # SseEventBuilder — Anthropic SSE protocol
-├── supervisor.rs         # Bridge daemon lifecycle (start/stop/status)
-├── docker.rs             # Docker proxy container management
-├── pidfile.rs            # PID file read/write
-├── runtime.rs            # Runtime path resolution (.runtime/ dir)
+├── supervisor/           # Bridge daemon lifecycle (start/stop/status submodules)
+├── api_key/              # API key management (types/registry/legacy)
+├── history/              # Conversation history store (store/{types,capture,sql})
+├── docker/               # Docker proxy container management
+├── application/          # Model profiles, prober, Claude Code integration
+├── app/                  # CLI command implementations (launch, models, dashboard UI)
+├── infrastructure/       # Process execution boundary (sole Command::new location)
 ├── opencode/             # Direct upstream API gateway
-│   ├── mod.rs            # Re-exports
-│   ├── forward.rs        # HTTP forwarding, WARP retry, search interception
-│   ├── mapper.rs         # Anthropic Messages → OpenAI Chat Completions
-│   ├── search.rs         # Web search with 5-provider fallback chain
-│   ├── retry.rs          # Retry loop with adaptive cooldown
-│   ├── sanitize.rs       # DSML tag stripping and tool-call parsing
-│   └── types.rs          # OpenAI API request/response types
-└── proxy_pool/           # 2-tier proxy pool (split module)
+│   ├── forward/          # HTTP forwarding, streaming (stream/{context,execute}), compat parsing (common/)
+│   ├── mapper/           # Anthropic Messages → OpenAI Chat Completions
+│   ├── search/           # Web search with 5-provider fallback chain
+│   ├── retry/            # Retry loop with model fallbacks (execute/{request,route})
+│   └── sanitize.rs       # DSML tag stripping and tool-call parsing
+└── proxy_pool/           # 2-tier proxy pool
     ├── mod.rs            # Pool lifecycle, health telemetry, cooldown/recovery
     ├── routing.rs        # Primary-first Rendezvous routing + WarmStandby failover
-    ├── maintenance.rs    # Docker container restart/purge queue
+    ├── maintenance/      # Docker container restart/purge queue (queue/docker/cooldown)
+    ├── reconcile/        # Readiness verification (verification/recovery)
     └── types.rs          # ProxyNode, ProxyTier, ProxyStatus enums
 
 tests/
 ├── common/mod.rs         # TestBridge harness (auto-assigns free ports, env overrides)
-├── fast.rs               # 5 fast smoke tests (no release build needed)
-└── integration.rs        # 18 full integration tests (ignored, require --release)
+├── fast.rs               # 81 fast smoke tests (no release build needed)
+└── integration.rs        # 18 full integration tests (spawns real bridge)
 ```
 
 ### Router (defined in `main.rs`)
