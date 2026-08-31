@@ -36,11 +36,11 @@ cargo test
 cargo test --locked       # respect Cargo.lock
 
 # Test (full integration — requires release build first)
-cargo build --release && cargo test --test integration -- --ignored
+cargo build --release && cargo test --test integration  # tests are NOT #[ignore]; --ignored would run 0 tests
 
 # Run a single test
 cargo test test_name
-cargo test --test integration test_shell_command_non_streaming -- --ignored
+cargo test --test integration test_shell_command_non_streaming
 cargo test --test fast test_health_endpoint_fast
 
 # Lint & format
@@ -266,7 +266,7 @@ max_search_loops = 5
 | File | Type | Count | Run with |
 |------|------|-------|----------|
 | `tests/fast.rs` | Smoke (no release build) | 5 | `cargo test --test fast` |
-| `tests/integration.rs` | Full (spawns real bridge) | 18 | `cargo build --release && cargo test --test integration -- --ignored` |
+| `tests/integration.rs` | Full (spawns real bridge) | 18 | `cargo build --release && cargo test --test integration  # tests are NOT #[ignore]; --ignored would run 0 tests` |
 | `tests/common/mod.rs` | Shared `TestBridge` harness | — | imported by both fast and integration |
 
 Key test modules in source:

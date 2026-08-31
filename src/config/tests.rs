@@ -710,6 +710,9 @@ primary_proxies = ["socks5://127.0.0.1:40001"]
 
     for name in [
         "OPENCODE_UPSTREAM_BASE_URL",
+        "OPENCODE_UPSTREAM_API_KEY",
+        "BRIDGE_UPSTREAM_BASE_URL",
+        "BRIDGE_UPSTREAM_API_KEY",
         "BRIDGE_ACTIVE_PROXY_COUNT",
         "BRIDGE_RATE_LIMIT",
         "BRIDGE_MIN_REASONING_STREAM_TOKENS",
@@ -728,6 +731,13 @@ primary_proxies = ["socks5://127.0.0.1:40001"]
 #[test]
 fn test_upstream_api_key_and_base_url_resolution() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    // Hermetic start: a leaked upstream credential from the surrounding
+    // environment (shell export, .env) would otherwise win the resolution
+    // chain before the TOML file and break step 1's assertion.
+    env::remove_var("OPENCODE_UPSTREAM_API_KEY");
+    env::remove_var("BRIDGE_UPSTREAM_API_KEY");
+    env::remove_var("OPENCODE_UPSTREAM_BASE_URL");
+    env::remove_var("BRIDGE_UPSTREAM_BASE_URL");
     let tmp = std::env::temp_dir().join("opencode2api_upstream_test.toml");
     std::fs::write(
         &tmp,
