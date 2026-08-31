@@ -882,12 +882,12 @@ pub async fn forward_to_llm_stream(
                     break;
                 }
 
-                let stop_reason = if ctx.has_emitted_tool_use {
-                    "tool_use".to_string()
+                let stop_reason: &'static str = if ctx.has_emitted_tool_use {
+                    "tool_use"
                 } else {
-                    // Cloned, not moved: the tracked terminator sends below
+                    // Copied, not moved: the tracked terminator sends below
                     // still need mutable access to the context.
-                    ctx.final_stop_reason.clone()
+                    ctx.final_stop_reason
                 };
 
                 // Send final message_delta and message_stop
@@ -902,7 +902,7 @@ pub async fn forward_to_llm_stream(
                 send_tracked(
                     &mut ctx,
                     &tx,
-                    builder.message_delta_with_stop(&stop_reason, output_tokens),
+                    builder.message_delta_with_stop(stop_reason, output_tokens),
                 )
                 .await;
 
@@ -923,11 +923,11 @@ pub async fn forward_to_llm_stream(
                 capture.attempt_finished(
                     Some(200),
                     "completed",
-                    Some(&stop_reason),
+                    Some(stop_reason),
                     None,
                     None,
                 );
-                capture.finish_success(200, Some(&stop_reason), Some(&model_clone));
+                capture.finish_success(200, Some(stop_reason), Some(&model_clone));
                 stream_metrics.completed();
                 break;
             }

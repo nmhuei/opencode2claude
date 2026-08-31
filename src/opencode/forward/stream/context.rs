@@ -253,11 +253,11 @@ pub(super) async fn finalize_stream(
     }
 
     let stop_reason = if ctx.has_emitted_tool_use {
-        "tool_use".to_string()
+        "tool_use"
     } else {
-        "end_turn".to_string()
+        "end_turn"
     };
-    send_tracked(ctx, tx, builder.message_delta_with_stop(&stop_reason, 1)).await;
+    send_tracked(ctx, tx, builder.message_delta_with_stop(stop_reason, 1)).await;
     send_tracked(ctx, tx, builder.message_stop()).await;
 }
 
@@ -483,7 +483,7 @@ pub(super) struct StreamContext {
     /// EOF; only then may the lazily activated compatibility parser run.
     defer_encoded_fallback_until_native_finalized: bool,
     /// Determined from `finish_reason` in the last stream chunk.
-    pub(super) final_stop_reason: String,
+    pub(super) final_stop_reason: &'static str,
 }
 
 impl StreamContext {
@@ -540,7 +540,7 @@ impl StreamContext {
             // this attempt have been finalized. This preserves native-first
             // precedence without requiring a second upstream request.
             defer_encoded_fallback_until_native_finalized: true,
-            final_stop_reason: "end_turn".to_string(),
+            final_stop_reason: "end_turn",
         }
     }
 
@@ -575,16 +575,14 @@ impl StreamContext {
     /// Update the final stop reason from a stream chunk's `finish_reason`.
     fn update_stop_reason(&mut self, reason: &str) {
         self.final_stop_reason = match reason {
-            "stop" => "end_turn".to_string(),
+            "stop" => "end_turn",
             // An upstream model may hallucinate a tool that Claude Code did not
             // provide. In that case no tool_use block is emitted, so returning
             // tool_use would make Claude Code report malformed_tool_use.
-            "tool_calls" if self.has_emitted_tool_use || self.intercepting_search => {
-                "tool_use".to_string()
-            }
-            "tool_calls" => "end_turn".to_string(),
-            "length" => "max_tokens".to_string(),
-            _ => "end_turn".to_string(),
+            "tool_calls" if self.has_emitted_tool_use || self.intercepting_search => "tool_use",
+            "tool_calls" => "end_turn",
+            "length" => "max_tokens",
+            _ => "end_turn",
         };
     }
 
@@ -1002,7 +1000,7 @@ impl StreamContext {
         .await;
         send_tracked(self, tx, crate::sse::emit_block_stop(call_idx)).await;
         self.has_emitted_tool_use = true;
-        self.final_stop_reason = "tool_use".to_string();
+        self.final_stop_reason = "tool_use";
     }
 
     async fn process_complete_dsml_block(
@@ -1385,7 +1383,7 @@ impl StreamContext {
                 warn!(source_index, "Native tool call ended without a name");
                 if !self.has_emitted_tool_use {
                     self.compat_retry_requested = true;
-                    self.final_stop_reason = "end_turn".to_string();
+                    self.final_stop_reason = "end_turn";
                 }
                 return;
             };
@@ -1396,7 +1394,7 @@ impl StreamContext {
                 );
                 if !self.has_emitted_tool_use {
                     self.compat_retry_requested = true;
-                    self.final_stop_reason = "end_turn".to_string();
+                    self.final_stop_reason = "end_turn";
                 }
                 return;
             };
@@ -1408,7 +1406,7 @@ impl StreamContext {
                 );
                 if !self.has_emitted_tool_use {
                     self.compat_retry_requested = true;
-                    self.final_stop_reason = "end_turn".to_string();
+                    self.final_stop_reason = "end_turn";
                 }
                 return;
             }
@@ -1419,7 +1417,7 @@ impl StreamContext {
                 );
                 if !self.has_emitted_tool_use {
                     self.compat_retry_requested = true;
-                    self.final_stop_reason = "end_turn".to_string();
+                    self.final_stop_reason = "end_turn";
                 }
                 return;
             };
@@ -1430,7 +1428,7 @@ impl StreamContext {
                 );
                 if !self.has_emitted_tool_use {
                     self.compat_retry_requested = true;
-                    self.final_stop_reason = "end_turn".to_string();
+                    self.final_stop_reason = "end_turn";
                 }
                 return;
             }
@@ -1444,7 +1442,7 @@ impl StreamContext {
                 );
                 if !self.has_emitted_tool_use {
                     self.compat_retry_requested = true;
-                    self.final_stop_reason = "end_turn".to_string();
+                    self.final_stop_reason = "end_turn";
                 }
                 return;
             }
@@ -1510,7 +1508,7 @@ impl StreamContext {
             self.search_tc_id = id.clone();
             self.search_tc_name = name.clone();
             self.search_tc_args = serde_json::to_string(arguments).unwrap_or_else(|_| "{}".into());
-            self.final_stop_reason = "tool_use".to_string();
+            self.final_stop_reason = "tool_use";
             return;
         }
 
@@ -1558,7 +1556,7 @@ impl StreamContext {
             self.has_emitted_tool_use = true;
         }
         if self.has_emitted_tool_use {
-            self.final_stop_reason = "tool_use".to_string();
+            self.final_stop_reason = "tool_use";
         }
     }
 
