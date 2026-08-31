@@ -726,6 +726,128 @@ primary_proxies = ["socks5://127.0.0.1:40001"]
 }
 
 #[test]
+fn test_upstream_api_key_and_base_url_resolution() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let tmp = std::env::temp_dir().join("opencode2api_upstream_test.toml");
+    std::fs::write(
+        &tmp,
+        r#"
+upstream_base_url = "https://toml.upstream.example/v1"
+upstream_api_key = "sk-toml-upstream-key"
+"#,
+    )
+    .expect("write test config");
+
+    // 1. From TOML
+    let config_toml = BridgeConfig::from_env_and_cli(CliOverrides {
+        config_path: Some(tmp.to_string_lossy().to_string()),
+        ..Default::default()
+    });
+    assert_eq!(
+        config_toml.retry.upstream_base_url,
+        "https://toml.upstream.example/v1"
+    );
+    assert_eq!(
+        config_toml
+            .retry
+            .upstream_api_key
+            .as_ref()
+            .map(|k| k.expose()),
+        Some("sk-toml-upstream-key")
+    );
+
+    // 2. Compatibility env aliases
+    env::set_var(
+        "BRIDGE_UPSTREAM_BASE_URL",
+        "https://bridge-env.upstream.example/v1",
+    );
+    env::set_var("BRIDGE_UPSTREAM_API_KEY", "sk-bridge-env-upstream-key");
+    let config_bridge_env = BridgeConfig::from_env_and_cli(CliOverrides {
+        config_path: Some(tmp.to_string_lossy().to_string()),
+        ..Default::default()
+    });
+    assert_eq!(
+        config_bridge_env.retry.upstream_base_url,
+        "https://bridge-env.upstream.example/v1"
+    );
+    assert_eq!(
+        config_bridge_env
+            .retry
+            .upstream_api_key
+            .as_ref()
+            .map(|k| k.expose()),
+        Some("sk-bridge-env-upstream-key")
+    );
+    env::remove_var("BRIDGE_UPSTREAM_BASE_URL");
+    env::remove_var("BRIDGE_UPSTREAM_API_KEY");
+
+    // 3. Canonical env override
+    env::set_var(
+        "OPENCODE_UPSTREAM_BASE_URL",
+        "https://env.upstream.example/v1",
+    );
+    env::set_var("OPENCODE_UPSTREAM_API_KEY", "sk-env-upstream-key");
+
+    let config_env = BridgeConfig::from_env_and_cli(CliOverrides {
+        config_path: Some(tmp.to_string_lossy().to_string()),
+        ..Default::default()
+    });
+    assert_eq!(
+        config_env.retry.upstream_base_url,
+        "https://env.upstream.example/v1"
+    );
+    assert_eq!(
+        config_env
+            .retry
+            .upstream_api_key
+            .as_ref()
+            .map(|k| k.expose()),
+        Some("sk-env-upstream-key")
+    );
+
+    // 3. CLI override
+    let config_cli = BridgeConfig::from_env_and_cli(CliOverrides {
+        config_path: Some(tmp.to_string_lossy().to_string()),
+        upstream_base_url: Some("https://cli.upstream.example/v1".to_string()),
+        upstream_api_key: Some("sk-cli-upstream-key".to_string()),
+        ..Default::default()
+    });
+    assert_eq!(
+        config_cli.retry.upstream_base_url,
+        "https://cli.upstream.example/v1"
+    );
+    assert_eq!(
+        config_cli
+            .retry
+            .upstream_api_key
+            .as_ref()
+            .map(|k| k.expose()),
+        Some("sk-cli-upstream-key")
+    );
+
+    env::remove_var("OPENCODE_UPSTREAM_BASE_URL");
+    env::remove_var("OPENCODE_UPSTREAM_API_KEY");
+
+    // 4. URL-only CLI overrides must never inherit a stored key from TOML.
+    let config_url_only = BridgeConfig::from_env_and_cli(CliOverrides {
+        config_path: Some(tmp.to_string_lossy().to_string()),
+        upstream_base_url: Some("https://other-provider.example/v1".to_string()),
+        clear_upstream_api_key: true,
+        ..Default::default()
+    });
+    assert_eq!(
+        config_url_only.retry.upstream_base_url,
+        "https://other-provider.example/v1"
+    );
+    assert!(
+        config_url_only.retry.upstream_api_key.is_none(),
+        "URL-only provider override must clear inherited credentials"
+    );
+
+    let _ = std::fs::remove_file(tmp);
+}
+
+#[test]
 fn search_chain_budget_default_matches_search_policy() {
     let config = BridgeConfig::default();
     assert_eq!(

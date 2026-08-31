@@ -33,12 +33,14 @@ pub(super) async fn cmd_server(cmd: ServerCommand, fmt: OutputFormat) {
                     model: args.model,
                     shell_policy: args.shell_policy.map(|p| p.to_string()),
                     max_body_size: args.max_body_size,
-                    tavily_api_key: args.tavily_api_key,
-                    exa_api_key: args.exa_api_key,
-                    serper_api_key: args.serper_api_key,
+                    tavily_api_key: None,
+                    exa_api_key: None,
+                    serper_api_key: None,
                     searxng_url: args.searxng_url,
-                    searxng_api_key: args.searxng_api_key,
+                    searxng_api_key: None,
                     egress_mode: args.no_proxy.then(|| "direct".to_string()),
+                    upstream_base_url: args.upstream_base_url,
+                    upstream_api_key: None,
                 };
                 cmd_run_server(bridge_args).await;
             } else {
@@ -448,12 +450,14 @@ pub(super) async fn cmd_serve_legacy(args: cli::ServeArgs) {
         model: args.model,
         shell_policy: args.shell_policy.map(|p| p.to_string()),
         max_body_size: args.max_body_size,
-        tavily_api_key: args.tavily_api_key,
-        exa_api_key: args.exa_api_key,
-        serper_api_key: args.serper_api_key,
+        tavily_api_key: None,
+        exa_api_key: None,
+        serper_api_key: None,
         searxng_url: args.searxng_url,
-        searxng_api_key: args.searxng_api_key,
+        searxng_api_key: None,
         egress_mode: None,
+        upstream_base_url: None,
+        upstream_api_key: None,
     };
     cmd_run_server(bridge_args).await;
 }
@@ -718,25 +722,24 @@ fn resolve_config_for_start(args: &cli::ServerStartArgs) -> BridgeConfig {
         model: args.model.clone(),
         shell_policy: args.shell_policy.map(|value| value.to_string()),
         max_body_size: args.max_body_size,
-        tavily_api_key: args.tavily_api_key.clone(),
-        exa_api_key: args.exa_api_key.clone(),
-        serper_api_key: args.serper_api_key.clone(),
+        tavily_api_key: None,
+        exa_api_key: None,
+        serper_api_key: None,
         searxng_url: args.searxng_url.clone(),
-        searxng_api_key: args.searxng_api_key.clone(),
+        searxng_api_key: None,
         egress_mode: args.no_proxy.then(|| "direct".to_string()),
+        upstream_base_url: args.upstream_base_url.clone(),
+        upstream_api_key: None,
+        clear_upstream_api_key: args.upstream_base_url.is_some(),
     })
 }
 
-pub(super) fn resolve_runtime_for_start(args: &cli::ServerStartArgs) -> Supervisor {
-    let resolved = resolve_config_for_start(args);
-    let p = resolved.bridge_port;
-    let h = resolved.host.to_string();
-
+fn daemon_child_launch(args: &cli::ServerStartArgs, port: u16, host: &str) -> Vec<String> {
     let mut child_args = vec![
         "--port".to_string(),
-        p.to_string(),
+        port.to_string(),
         "--host".to_string(),
-        h.clone(),
+        host.to_string(),
     ];
     push_opt_arg(&mut child_args, "--config", args.config.as_deref());
     push_opt_arg(&mut child_args, "--model", args.model.as_deref());
@@ -748,34 +751,27 @@ pub(super) fn resolve_runtime_for_start(args: &cli::ServerStartArgs) -> Supervis
     );
     push_opt_arg(
         &mut child_args,
-        "--tavily-api-key",
-        args.tavily_api_key.as_deref(),
-    );
-    push_opt_arg(
-        &mut child_args,
-        "--exa-api-key",
-        args.exa_api_key.as_deref(),
-    );
-    push_opt_arg(
-        &mut child_args,
-        "--serper-api-key",
-        args.serper_api_key.as_deref(),
-    );
-    push_opt_arg(
-        &mut child_args,
         "--searxng-url",
         args.searxng_url.as_deref(),
     );
     push_opt_arg(
         &mut child_args,
-        "--searxng-api-key",
-        args.searxng_api_key.as_deref(),
+        "--upstream-base-url",
+        args.upstream_base_url.as_deref(),
     );
     push_opt_arg_usize(&mut child_args, "--max-body-size", args.max_body_size);
     if args.no_proxy {
         child_args.push("--egress-mode".to_string());
         child_args.push("direct".to_string());
     }
+    child_args
+}
+
+pub(super) fn resolve_runtime_for_start(args: &cli::ServerStartArgs) -> Supervisor {
+    let resolved = resolve_config_for_start(args);
+    let p = resolved.bridge_port;
+    let h = resolved.host.to_string();
+    let child_args = daemon_child_launch(args, p, &h);
 
     let paths = RuntimePaths::from_config(&resolved);
     Supervisor::new(paths, p, h).with_child_args(child_args)

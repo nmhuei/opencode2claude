@@ -18,8 +18,8 @@ use clap::{Args, Parser, Subcommand};
     name = "opencode2api",
     version,
     about = "A local Anthropic and OpenAI-compatible model gateway",
-    long_about = "OpenCode2API accepts Anthropic Messages and OpenAI Chat Completions requests, then routes them to the configured OpenCode-compatible model provider.",
-    after_help = "Quick start:\n  opencode2api                 # open a new Claude Code conversation\n  opencode2api -c              # continue the latest conversation in this directory\n  opencode2api -r              # open Claude Code's resume picker\n  opencode2api -r <session-id> # resume a specific conversation\n  opencode2api server status\n  opencode2api set env         # env only, no Claude launch\n\nTip: the bridge must already be running. Bare `opencode2api` launches Claude Code natively with bypassPermissions. The bash/zsh hook is only needed for `opencode2api set env` to modify the current shell.",
+    long_about = "OpenCode2API is a local Anthropic/OpenAI-compatible gateway with two explicit provider modes: OpenCode Zen or a custom OpenAI-compatible API.",
+    after_help = "Quick start:\n  opencode2api provider opencode                       # OpenCode Zen + default free model\n  opencode2api provider opencode mimo-v2.5-free       # OpenCode Zen + chosen model\n  opencode2api provider api https://api.example/v1 deepseek-v4-flash --api-key-stdin\n  opencode2api provider models                        # list models for the active provider\n  opencode2api provider status                        # show active provider + model\n  opencode2api                                        # launch Claude Code using that configuration\n\nLifecycle commands remain under server; legacy list/upstream aliases are hidden but still accepted.",
     styles = clap_styles()
 )]
 pub struct Cli {
@@ -93,12 +93,20 @@ pub enum Command {
     /// Diagnose common issues with the bridge and its dependencies
     Doctor,
 
-    /// List available free models from OpenCode Zen
-    #[command(alias = "models")]
+    /// Legacy model-list alias; use provider models
+    #[command(alias = "models", hide = true)]
     List(ListArgs),
 
-    /// Inspect or set the active model
+    /// Configure or inspect the active model provider
+    Provider(ProviderArgs),
+
+    /// Advanced model override namespace
+    #[command(hide = true)]
     Model(ModelArgs),
+
+    /// Legacy upstream configuration namespace
+    #[command(hide = true)]
+    Upstream(UpstreamArgs),
 
     /// Generate shell completion scripts
     Completion(CompletionArgs),
@@ -131,6 +139,7 @@ pub enum Command {
 }
 
 /// Server management subcommands.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum ServerCommand {
     /// Start the bridge server
@@ -190,25 +199,9 @@ pub struct ServerStartArgs {
     #[arg(long = "shell-policy", value_enum)]
     pub shell_policy: Option<CliShellPolicy>,
 
-    /// Tavily search API key override
-    #[arg(long)]
-    pub tavily_api_key: Option<String>,
-
-    /// Exa search API key override
-    #[arg(long)]
-    pub exa_api_key: Option<String>,
-
-    /// Serper.dev search API key override
-    #[arg(long)]
-    pub serper_api_key: Option<String>,
-
     /// SearXNG instance URL override
     #[arg(long)]
     pub searxng_url: Option<String>,
-
-    /// Override SearXNG API key override
-    #[arg(long)]
-    pub searxng_api_key: Option<String>,
 
     /// Skip Docker SOCKS5 proxy pool bootstrap
     #[arg(long = "no-proxy")]
@@ -217,6 +210,10 @@ pub struct ServerStartArgs {
     /// Override max request body size in bytes (0 = unlimited)
     #[arg(long = "max-body-size")]
     pub max_body_size: Option<usize>,
+
+    /// Legacy provider override; prefer provider api
+    #[arg(long = "upstream-base-url", hide = true)]
+    pub upstream_base_url: Option<String>,
 }
 
 /// Arguments for `server stop`.
@@ -328,25 +325,9 @@ pub struct ServeArgs {
     #[arg(long = "shell-policy", value_enum)]
     pub shell_policy: Option<CliShellPolicy>,
 
-    /// Tavily search API key override
-    #[arg(long)]
-    pub tavily_api_key: Option<String>,
-
-    /// Exa search API key override
-    #[arg(long)]
-    pub exa_api_key: Option<String>,
-
-    /// Serper.dev search API key override
-    #[arg(long)]
-    pub serper_api_key: Option<String>,
-
     /// SearXNG instance URL override
     #[arg(long)]
     pub searxng_url: Option<String>,
-
-    /// SearXNG API key override
-    #[arg(long)]
-    pub searxng_api_key: Option<String>,
 
     /// Override max request body size in bytes (0 = unlimited)
     #[arg(long = "max-body-size")]
@@ -527,15 +508,77 @@ pub enum DashboardCommand {
     Status,
 }
 
+/// Select and inspect the upstream provider mode.
+#[derive(Args, Debug, Clone, Default)]
+pub struct ProviderArgs {
+    #[command(subcommand)]
+    pub command: Option<ProviderSubcommand>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ProviderSubcommand {
+    /// Use OpenCode Zen. Model defaults to mimo-v2.5-free.
+    Opencode(ProviderOpenCodeArgs),
+
+    /// Use a custom OpenAI-compatible API endpoint.
+    Api(ProviderApiArgs),
+
+    /// List models exposed by the active provider.
+    Models(ListArgs),
+
+    /// Show active provider mode, endpoint, credential state, and model.
+    Status,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ProviderOpenCodeArgs {
+    /// OpenCode model id, with or without the opencode/ prefix
+    #[arg(default_value = "mimo-v2.5-free")]
+    pub model: String,
+
+    /// Config file to update; defaults to the resolved active config
+    #[arg(short, long)]
+    pub config: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ProviderApiArgs {
+    /// OpenAI-compatible API base URL, e.g. https://api.example/v1
+    pub url: String,
+
+    /// Exact model id sent to the API
+    pub model: String,
+
+    /// Read the Bearer API key from standard input instead of process argv
+    #[arg(long = "api-key-stdin")]
+    pub api_key_stdin: bool,
+
+    /// Config file to update; defaults to the resolved active config
+    #[arg(short, long)]
+    pub config: Option<String>,
+}
+
 /// List available models.
 #[derive(Args, Debug, Clone, Default)]
 pub struct ListArgs {
-    /// Probe live availability and latency from upstream API
+    /// Probe every discovered model with a completion request (opt-in for custom providers)
     #[arg(long, short = 'p')]
     pub probe: bool,
+
+    /// Skip all upstream network checks and show only the local static catalog
+    #[arg(long = "no-probe", conflicts_with = "probe")]
+    pub no_probe: bool,
+
+    /// Show all models including offline/unavailable ones (by default dead models are hidden)
+    #[arg(long = "all", short = 'a')]
+    pub all: bool,
+
+    /// Upstream base URL override (e.g. https://api.b.ai/v1)
+    #[arg(long = "upstream-base-url")]
+    pub upstream_base_url: Option<String>,
 }
 
-/// Manage configured and available models.
+/// Advanced model override commands.
 #[derive(Args, Debug, Clone, Default)]
 pub struct ModelArgs {
     #[command(subcommand)]
@@ -558,6 +601,39 @@ pub enum ModelSubcommand {
 pub struct ModelSetArgs {
     /// The model identifier to use (e.g. mimo-v2.5-free, nemotron-3-ultra-free)
     pub model: String,
+
+    /// Config file to update; defaults to the resolved active config
+    #[arg(short, long)]
+    pub config: Option<String>,
+}
+
+/// Manage configured upstream provider settings.
+#[derive(Args, Debug, Clone, Default)]
+pub struct UpstreamArgs {
+    #[command(subcommand)]
+    pub command: Option<UpstreamSubcommand>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum UpstreamSubcommand {
+    /// Set the upstream API base URL and optional API key
+    Set(UpstreamSetArgs),
+
+    /// Show current upstream API configuration and health status
+    Status,
+
+    /// Reset upstream back to default OpenCode Zen endpoint
+    Reset,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct UpstreamSetArgs {
+    /// Upstream API base URL (e.g. https://api.b.ai/v1 or https://opencode.ai/zen/v1)
+    pub url: String,
+
+    /// Read the upstream API key from standard input instead of process argv
+    #[arg(long = "api-key-stdin")]
+    pub api_key_stdin: bool,
 
     /// Config file to update; defaults to the resolved active config
     #[arg(short, long)]
@@ -643,6 +719,89 @@ mod tests {
         // No subcommand is valid (bare invocation launches Claude Code); an
         // empty parse must not error at the CLI layer.
         assert!(parse(&[]).is_ok());
+    }
+
+    #[test]
+    fn secret_values_are_not_accepted_in_process_argv() {
+        for argv in [
+            vec!["list", "--upstream-api-key", "secret"],
+            vec!["server", "start", "--upstream-api-key", "secret"],
+            vec!["server", "start", "--tavily-api-key", "secret"],
+            vec!["serve", "--exa-api-key", "secret"],
+            vec![
+                "upstream",
+                "set",
+                "https://provider.example/v1",
+                "--api-key",
+                "secret",
+            ],
+        ] {
+            assert!(
+                parse(&argv).is_err(),
+                "secret-bearing argv option must stay removed: {}",
+                argv.join(" ")
+            );
+        }
+
+        let parsed = parse(&[
+            "upstream",
+            "set",
+            "https://provider.example/v1",
+            "--api-key-stdin",
+        ])
+        .expect("safe stdin credential option must parse");
+        let Command::Upstream(args) = parsed.command.unwrap() else {
+            panic!("expected upstream command");
+        };
+        let Some(UpstreamSubcommand::Set(set)) = args.command else {
+            panic!("expected upstream set");
+        };
+        assert!(set.api_key_stdin);
+    }
+
+    #[test]
+    fn provider_modes_parse_cleanly() {
+        let opencode = parse(&["provider", "opencode"]).expect("provider opencode");
+        let Command::Provider(args) = opencode.command.unwrap() else {
+            panic!("expected provider command");
+        };
+        let Some(ProviderSubcommand::Opencode(args)) = args.command else {
+            panic!("expected provider opencode");
+        };
+        assert_eq!(args.model, "mimo-v2.5-free");
+
+        let api = parse(&[
+            "provider",
+            "api",
+            "https://api.example/v1",
+            "deepseek-v4-flash",
+            "--api-key-stdin",
+        ])
+        .expect("provider api");
+        let Command::Provider(args) = api.command.unwrap() else {
+            panic!("expected provider command");
+        };
+        let Some(ProviderSubcommand::Api(args)) = args.command else {
+            panic!("expected provider api");
+        };
+        assert_eq!(args.url, "https://api.example/v1");
+        assert_eq!(args.model, "deepseek-v4-flash");
+        assert!(args.api_key_stdin);
+
+        let models = parse(&["provider", "models", "--probe"]).expect("provider models");
+        let Command::Provider(args) = models.command.unwrap() else {
+            panic!("expected provider command");
+        };
+        let Some(ProviderSubcommand::Models(args)) = args.command else {
+            panic!("expected provider models");
+        };
+        assert!(args.probe);
+
+        let status = parse(&["provider", "status"]).expect("provider status");
+        let Command::Provider(args) = status.command.unwrap() else {
+            panic!("expected provider command");
+        };
+        assert!(matches!(args.command, Some(ProviderSubcommand::Status)));
     }
 
     #[test]

@@ -33,7 +33,14 @@ pub fn load_dotenv() -> Option<std::path::PathBuf> {
     loader::load_dotenv()
 }
 
-pub(crate) use loader::{ambient_home, ambient_shell, ambient_zdotdir, terminal_columns};
+pub(crate) fn validate_upstream_transport(endpoint: &str, has_api_key: bool) -> Result<(), String> {
+    security::validate_upstream_transport(endpoint, has_api_key)
+}
+
+pub(crate) use loader::{
+    ambient_home, ambient_shell, ambient_zdotdir, pre_dotenv_upstream_env_override_present,
+    terminal_columns,
+};
 
 const DEFAULT_SHELL_ALLOWLIST: &str = "git,ls,pwd,cat,find,grep,echo,wc,head,tail,diff";
 const DEFAULT_PRIMARY_PROXIES: &str = "socks5h://127.0.0.1:40001";

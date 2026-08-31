@@ -185,7 +185,12 @@ async fn execute_retryable_request<T: RetryableOpenAiRequest>(
     request: &T,
 ) -> Result<LeasedResponse, BridgeError> {
     let max_retries = state.config.retry.max_network_attempts as u32;
-    let models = build_model_retry_list(request.model(), request.stream(), &state.config.retry);
+    let models = build_model_retry_list(
+        request.model(),
+        request.stream(),
+        &state.config.retry,
+        crate::opencode::mapper::uses_opencode_model_aliases(&state.config.retry.upstream_base_url),
+    );
     let upstream_url = format!(
         "{}/chat/completions",
         state.config.retry.upstream_base_url.trim_end_matches('/')
@@ -210,6 +215,10 @@ async fn execute_retryable_request<T: RetryableOpenAiRequest>(
             .get(model_index)
             .cloned()
             .unwrap_or_else(|| request.model().to_string());
+
+        // Model identifiers returned by an OpenAI-compatible provider belong
+        // to that provider. Forward them exactly; provider-specific alias
+        // resolution happens before this retry layer.
         let mut attempt_request = compatible_request.clone();
         attempt_request.set_model(current_model.clone());
 
@@ -221,9 +230,16 @@ async fn execute_retryable_request<T: RetryableOpenAiRequest>(
             retained_rate_limit_route.take(),
         )
         .await?;
-        let result = prepare_upstream_request(&route, &upstream_url, &attempt_request)
-            .send()
-            .await;
+        let upstream_api_key = state
+            .config
+            .retry
+            .upstream_api_key
+            .as_ref()
+            .map(|k| k.expose());
+        let result =
+            prepare_upstream_request(&route, &upstream_url, &attempt_request, upstream_api_key)
+                .send()
+                .await;
 
         match result {
             Ok(response) => {
@@ -405,6 +421,34 @@ async fn execute_retryable_request<T: RetryableOpenAiRequest>(
                     ));
                 }
 
+                // HTTP 403 Forbidden / 404 Not Found: model restricted (e.g. deposit required)
+                // or unknown on this provider. Advance to the next fallback model if configured.
+                if status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND {
+                    let body = response.bytes().await.unwrap_or_default();
+                    let body_text = String::from_utf8_lossy(&body);
+                    warn!(
+                        status = status.as_u16(),
+                        body = %body_text.chars().take(240).collect::<String>(),
+                        from_model = %current_model,
+                        "upstream model access denied or not found"
+                    );
+                    if advance_model(
+                        state,
+                        &models,
+                        &mut model_index,
+                        &current_model,
+                        status.as_str(),
+                    ) {
+                        retry_count = 0;
+                        last_failed_proxy = None;
+                        continue;
+                    }
+                    return Err(BridgeError::UpstreamError(format!(
+                        "Upstream returned status {status}: {}",
+                        body_text.chars().take(200).collect::<String>()
+                    )));
+                }
+
                 return Ok(LeasedResponse::new(
                     response,
                     route.lease.take(),
@@ -499,13 +543,16 @@ fn prepare_upstream_request<T: Serialize>(
     route: &SelectedRoute,
     upstream_url: &str,
     request: &T,
+    upstream_api_key: Option<&str>,
 ) -> RequestBuilder {
-    let builder = route.client.post(upstream_url).json(request);
-    if let Some(real_ip) = route.upstream_real_ip.as_deref() {
-        builder.header("x-real-ip", real_ip)
-    } else {
-        builder
+    let mut builder = route.client.post(upstream_url).json(request);
+    if let Some(key) = upstream_api_key.filter(|k| !k.trim().is_empty()) {
+        builder = builder.header("Authorization", format!("Bearer {key}"));
     }
+    if let Some(real_ip) = route.upstream_real_ip.as_deref() {
+        builder = builder.header("x-real-ip", real_ip);
+    }
+    builder
 }
 
 fn verified_exit_real_ip(identity: Option<&crate::proxy_pool::ExitIdentity>) -> Option<String> {
@@ -1461,6 +1508,7 @@ mod tests {
             &route,
             "https://upstream.test/chat/completions",
             &OpenAiRequest::default(),
+            None,
         )
         .build()
         .expect("request builds");
@@ -1471,6 +1519,24 @@ mod tests {
                 .get("x-real-ip")
                 .and_then(|value| value.to_str().ok()),
             Some("203.0.113.10")
+        );
+        assert!(request.headers().get("Authorization").is_none());
+
+        let authed_request = prepare_upstream_request(
+            &route,
+            "https://upstream.test/chat/completions",
+            &OpenAiRequest::default(),
+            Some("sk-test-upstream-key"),
+        )
+        .build()
+        .expect("request builds");
+
+        assert_eq!(
+            authed_request
+                .headers()
+                .get("Authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer sk-test-upstream-key")
         );
     }
 
@@ -1720,6 +1786,62 @@ mod tests {
         );
         // The mock URL must not leak into the client-visible message.
         assert!(!error.to_string().contains("http://"), "{error}");
+    }
+
+    async fn spawn_model_capture_server() -> (String, tokio::sync::mpsc::Receiver<String>) {
+        use axum::{routing::post, Json, Router};
+        use serde_json::Value;
+        use tokio::net::TcpListener;
+        use tokio::sync::mpsc;
+
+        let (tx, rx) = mpsc::channel(1);
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move |Json(body): Json<Value>| {
+                let tx = tx.clone();
+                async move {
+                    let model = body
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    let _ = tx.send(model).await;
+                    Json(serde_json::json!({}))
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("address");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{address}"), rx)
+    }
+
+    #[tokio::test]
+    async fn custom_provider_model_id_is_forwarded_verbatim() {
+        let (mock, mut captured) = spawn_model_capture_server().await;
+        let mut config = BridgeConfig::default();
+        config.egress.mode = crate::config::EgressMode::Direct;
+        config.retry.upstream_base_url = mock;
+        config.retry.max_network_attempts = 1;
+        config.retry.upstream_api_key =
+            Some(crate::config::SecretString::from("FAKE_UPSTREAM_SECRET"));
+        let state = AppState::new_with_container_runtime(config, Arc::new(NoopContainerRuntime));
+        state.workers.cancel();
+
+        let request = OpenAiRequest {
+            model: "custom-model-free".to_string(),
+            stream: false,
+            ..OpenAiRequest::default()
+        };
+        let response = execute_with_warp_retry(&state, "exact-custom-model", &request)
+            .await
+            .expect("custom provider request should succeed");
+        drop(response);
+
+        let forwarded = captured.recv().await.expect("captured model");
+        assert_eq!(forwarded, "custom-model-free");
     }
 
     #[tokio::test(start_paused = true)]

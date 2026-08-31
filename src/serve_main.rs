@@ -33,25 +33,9 @@ pub struct ServeArgs {
     #[arg(long = "shell-policy")]
     pub shell_policy: Option<String>,
 
-    /// Tavily search API key override
-    #[arg(long = "tavily-api-key")]
-    pub tavily_api_key: Option<String>,
-
-    /// Exa search API key override
-    #[arg(long = "exa-api-key")]
-    pub exa_api_key: Option<String>,
-
-    /// Serper.dev search API key override
-    #[arg(long = "serper-api-key")]
-    pub serper_api_key: Option<String>,
-
     /// SearXNG instance URL override
     #[arg(long = "searxng-url")]
     pub searxng_url: Option<String>,
-
-    /// SearXNG API key override
-    #[arg(long = "searxng-api-key")]
-    pub searxng_api_key: Option<String>,
 
     /// Override max request body size in bytes (0 = unlimited)
     #[arg(long = "max-body-size")]
@@ -60,6 +44,10 @@ pub struct ServeArgs {
     /// Override egress mode (direct or proxy)
     #[arg(long = "egress-mode", hide = true)]
     pub egress_mode: Option<String>,
+
+    /// Upstream base URL (e.g. https://api.b.ai/v1 or https://opencode.ai/zen/v1)
+    #[arg(long = "upstream-base-url")]
+    pub upstream_base_url: Option<String>,
 }
 
 #[tokio::main]
@@ -77,13 +65,15 @@ async fn main() {
         config: args.config,
         model: args.model,
         shell_policy: args.shell_policy,
-        tavily_api_key: args.tavily_api_key,
-        exa_api_key: args.exa_api_key,
-        serper_api_key: args.serper_api_key,
+        tavily_api_key: None,
+        exa_api_key: None,
+        serper_api_key: None,
         searxng_url: args.searxng_url,
-        searxng_api_key: args.searxng_api_key,
+        searxng_api_key: None,
         max_body_size: args.max_body_size,
         egress_mode: args.egress_mode,
+        upstream_base_url: args.upstream_base_url,
+        upstream_api_key: None,
     };
 
     if let Err(error) = run_server(bridge_args).await {

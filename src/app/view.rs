@@ -775,9 +775,10 @@ pub(super) fn cmd_print_env(config: &BridgeConfig) {
         rows.extend([
             (
                 "ANTHROPIC_MODEL",
-                crate::application::integration::OX_ALPHA_CLAUDE_MODEL.to_string(),
+                crate::application::integration::OX_ALPHA_MODEL.to_string(),
             ),
             ("CLAUDE_CODE_DISABLE_1M_CONTEXT", "0".to_string()),
+            ("CLAUDE_CODE_MAX_CONTEXT_TOKENS", "1000000".to_string()),
             (
                 "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
                 crate::application::integration::OX_ALPHA_MAX_OUTPUT_TOKENS.to_string(),
@@ -789,7 +790,6 @@ pub(super) fn cmd_print_env(config: &BridgeConfig) {
             ("CLAUDE_CODE_DISABLE_THINKING", "0".to_string()),
             ("CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING", "0".to_string()),
             ("CLAUDE_CODE_ALWAYS_ENABLE_EFFORT", "1".to_string()),
-            ("CLAUDE_CODE_EFFORT_LEVEL", "max".to_string()),
             (
                 "MAX_THINKING_TOKENS",
                 crate::application::integration::OX_ALPHA_MAX_THINKING_TOKENS.to_string(),

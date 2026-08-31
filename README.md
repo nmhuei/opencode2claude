@@ -55,6 +55,50 @@ opencode2api env
 opencode2api api-key generate [--save] [--config PATH]
 ```
 
+### 1-Touch Zero-Hardcode Claude Code Launch
+
+Running `opencode2api` without subcommands in any directory launches Claude Code CLI in that directory with dynamic, per-process environment variables (injecting `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, and active model token limits). It requires zero modifications to global `~/.claude.json` configuration files and automatically starts the background bridge daemon if not already running:
+
+```bash
+cd /path/to/project
+opencode2api
+```
+
+### Provider Modes: OpenCode Zen or Custom API
+
+OpenCode2API now has one provider namespace for both supported source types.
+
+**1. OpenCode Zen mode**
+
+~~~bash
+opencode2api provider opencode
+opencode2api provider opencode mimo-v2.5-free
+opencode2api provider status
+opencode2api provider models
+~~~
+
+**2. Custom OpenAI-compatible API mode**
+
+~~~bash
+printf '%s\n' "$OPENCODE_UPSTREAM_API_KEY" | \
+  opencode2api provider api https://api.example/v1 deepseek-v4-flash --api-key-stdin
+
+opencode2api provider api http://127.0.0.1:8000/v1 deepseek-v4-flash
+opencode2api provider models
+opencode2api provider models --probe
+~~~
+
+The legacy list, model, and upstream namespaces remain accepted for scripts but are hidden from the main help.
+
+| Model | Context | Auto-compact | Max output | Default output | Price |
+|---|---:|---:|---:|---:|---|
+| deepseek-v4-flash | 1,000,000 | 800,000 | 384,000 | provider-defined | Free (0 Credits) |
+| deepseek-v4-flash-vision-exp | 1,000,000 | 800,000 | 384,000 | provider-defined | Free (0 Credits) |
+| glm-5.3-flash | 1,000,000 | 800,000 | 131,072 | 65,536 | Free (0 Credits) |
+
+Advanced deployments may still set OPENCODE_UPSTREAM_BASE_URL, OPENCODE_UPSTREAM_API_KEY, OPENCODE_MODEL, and OPENCODE_MODEL_FALLBACKS directly through environment/TOML.
+
+
 ## API surface
 
 Anthropic-compatible routes:

@@ -37,8 +37,9 @@ schema_version = 1
 # rest_api_token = "replace-with-a-different-long-random-token"
 # csrf_enabled = true
 
-# OpenAI-compatible upstream base URL and retry policy.
+# OpenAI-compatible upstream base URL and authentication.
 # upstream_base_url = "https://opencode.ai/zen/v1"
+# upstream_api_key = "sk-example-upstream-key"
 # model_fallbacks = ["opencode/deepseek-v4-flash-free"]
 # enable_default_fallbacks = false
 # max_network_attempts = 5

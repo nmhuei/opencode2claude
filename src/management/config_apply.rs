@@ -46,6 +46,7 @@ const KNOWN_ROOT_KEYS: &[&str] = &[
     "max_sse_line_bytes",
     "max_sync_response_bytes",
     "upstream_base_url",
+    "upstream_api_key",
     "model_fallbacks",
     "enable_default_fallbacks",
     "max_network_attempts",
@@ -291,13 +292,8 @@ fn validate_document(value: &toml::Value) -> Result<(), ManagementError> {
         ));
     }
     if let Some(url) = cfg.upstream_base_url.as_deref() {
-        if !(url.starts_with("https://") || url.starts_with("http://")) {
-            return Err(error(
-                StatusCode::BAD_REQUEST,
-                "invalid_upstream_url",
-                "upstream_base_url must start with http:// or https://",
-            ));
-        }
+        crate::config::validate_upstream_transport(url, cfg.upstream_api_key.is_some())
+            .map_err(|message| error(StatusCode::BAD_REQUEST, "invalid_upstream_url", message))?;
     }
     if let (Some(base), Some(max)) = (cfg.retry_base_backoff_ms, cfg.retry_max_backoff_ms) {
         if max < base {

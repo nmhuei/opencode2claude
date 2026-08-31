@@ -12,7 +12,7 @@ fn retry_config() -> RetryConfig {
 
 #[test]
 fn streaming_reasoning_model_has_no_implicit_non_reasoning_fallback() {
-    let models = build_model_retry_list("deepseek-v4-flash-free", true, &retry_config());
+    let models = build_model_retry_list("deepseek-v4-flash-free", true, &retry_config(), true);
     assert_eq!(models, vec!["deepseek-v4-flash-free"]);
 }
 
@@ -20,7 +20,7 @@ fn streaming_reasoning_model_has_no_implicit_non_reasoning_fallback() {
 fn explicit_fallbacks_are_respected_for_reasoning_stream() {
     let mut retry = retry_config();
     retry.model_fallbacks = vec!["opencode/deepseek-v4-flash-free".to_string()];
-    let models = build_model_retry_list("deepseek-v4-flash-free", true, &retry);
+    let models = build_model_retry_list("deepseek-v4-flash-free", true, &retry, true);
     assert_eq!(models, vec!["deepseek-v4-flash-free"]);
 }
 
@@ -28,9 +28,24 @@ fn explicit_fallbacks_are_respected_for_reasoning_stream() {
 fn default_fallbacks_can_be_enabled_for_non_reasoning_requests() {
     let mut retry = retry_config();
     retry.default_fallbacks_enabled = true;
-    let models = build_model_retry_list("nemotron-3-ultra-free", false, &retry);
+    let models = build_model_retry_list("nemotron-3-ultra-free", false, &retry, true);
     assert!(models.contains(&"nemotron-3-ultra-free".to_string()));
     assert!(models.contains(&"deepseek-v4-flash-free".to_string()));
+}
+
+#[test]
+fn custom_provider_fallback_ids_are_preserved_verbatim() {
+    let mut retry = retry_config();
+    retry.model_fallbacks = vec!["deepseek-v4-flash".to_string(), "custom-free".to_string()];
+    let models = build_model_retry_list("primary", false, &retry, false);
+    assert_eq!(
+        models,
+        vec![
+            "primary".to_string(),
+            "deepseek-v4-flash".to_string(),
+            "custom-free".to_string(),
+        ]
+    );
 }
 
 #[test]

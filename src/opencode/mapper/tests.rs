@@ -2016,3 +2016,32 @@ fn response_format_golden_mappings_per_model_family() {
         }))
     );
 }
+
+#[test]
+fn custom_provider_wire_model_is_not_rewritten() {
+    let payload = MessagesRequest {
+        model: Some("deepseek-v4-flash".to_string()),
+        messages: vec![Message {
+            role: "user".to_string(),
+            content: ContentVal::Single("hi".to_string()),
+        }],
+        max_tokens: Some(32),
+        ..Default::default()
+    };
+    let mapped = map_anthropic_to_openai_with_policy_and_aliases(
+        &payload,
+        "deepseek-v4-flash".to_string(),
+        DEFAULT_MIN_REASONING_STREAM_TOKENS,
+        false,
+    );
+    assert_eq!(mapped.model, "deepseek-v4-flash");
+}
+
+#[test]
+fn opencode_alias_policy_uses_exact_host_boundaries() {
+    assert!(uses_opencode_model_aliases("https://opencode.ai/zen/v1"));
+    assert!(uses_opencode_model_aliases("https://api.opencode.ai/v1"));
+    assert!(!uses_opencode_model_aliases(
+        "https://opencode.ai.attacker.example/v1"
+    ));
+}

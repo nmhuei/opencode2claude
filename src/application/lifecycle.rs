@@ -51,6 +51,7 @@ pub fn schedule_cli_command(
         let _ = manager.spawn_detached(&ProcessSpec {
             executable,
             args,
+            environment: Vec::new(),
             stdout_path: log.clone(),
             stderr_path: log,
         });

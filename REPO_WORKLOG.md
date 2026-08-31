@@ -26,25 +26,24 @@
 
 ## Snapshot hiện tại
 
-Cập nhật gần nhất: **2026-08-26**
+Cập nhật gần nhất: **2026-08-31 21:20 +0700**
 
 ### Repo và service
 
 ```text
 Repo:          /home/light/GitHub/opencode2claude
-Branch:        integration/branch-audit — HEAD 8619bee (2026-08-25); working tree ĐANG CÓ ~50 files
-               modified + 2 untracked chưa commit (chuỗi audit-fix 2026-08-26 — xem entry cuối file)
-Unpushed:      40 commits ahead origin/main / 38 ahead local main (chưa push, chưa merge)
+Branch:        integration/branch-audit — HEAD 8619bee
 Service URL:   http://127.0.0.1:4000
 Dashboard:     http://127.0.0.1:4000/dashboard
-Binary:        /home/light/.local/bin/opencode2api-serve v0.5.0 (build khớp HEAD 8619bee, 2026-08-25 12:24)
+Binary:        /home/light/.local/bin/opencode2api v0.5.0
 Controller:    /home/light/.local/bin/opencode2api
 Port:          4000
-PID snapshot:  9918   (start 2026-08-26 07:21 +0700 — khởi động TRỰC TIẾP, không qua supervisor; .runtime/ không có PID file)
-Status:        running
-Managed:       false  (direct launch; log tại ~/.opencode2api/opencode2api.log)
-Model runtime: opencode/x-preview-f-free  (từ live traffic log)
-Proxy pool:    /health schema mới tối giản {"status":"ok","version":"0.5.0"} — không còn expose model/pool snapshot; port 4096 không có listener (monitor-only, benign)
+Status:        running (managed supervisor)
+Active Model:  glm-5.3-flash (1,000,000 tokens context, 800,000 auto-compact, thinking enabled)
+Upstream:      https://api.b.ai/v1 (OpenAI-compatible with Bearer auth)
+Fallbacks:     ["glm-5.3-flash", "qwen3.8-flash", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp", "mimo-v2.5"]
+Claude Code:   Direct 1-touch launch (`opencode2api`) with 1M context, ultra effort, and zero hardcoded global settings.
+Tests:         900 unit tests + 87 fast integration tests PASS (0 failures)
 ```
 
 PID và uptime là snapshot tại thời điểm ghi; phải kiểm tra lại bằng:
@@ -4023,3 +4022,54 @@ The harness used only isolated loopback stub/side-bridge processes and left prod
   - `cargo clippy -- -D warnings`: PASS (0 warnings)
   - `cargo test --locked`: PASS (890 lib tests, 87 fast, 18 integration, 46 protocol conformance, 2 parser fuzz, 2 stream retry, 1 retry livelock = ALL PASS).
   - Local installation verified: `~/.local/bin/opencode2api` updated and functional.
+
+## 2026-08-31 19:50 +0700 — External OpenAI-Compatible Provider Integration, Bearer Auth, Live Model Discovery & Provider Fallback Chains
+
+- **External OpenAI-Compatible API & Bearer Authentication**:
+  - Added `upstream_base_url` and `upstream_api_key` to `BridgeConfig`, `RetryConfig`, `CliOverrides`, `ConfigFile`, and `ServeArgsBridge` across `src/config/types.rs`, `src/config/file.rs`, `src/config/loader.rs`, `src/server/args.rs`, `src/cli.rs`, and `src/serve_main.rs`.
+  - Added environment variable resolution from `OPENCODE_UPSTREAM_BASE_URL` / `BRIDGE_UPSTREAM_BASE_URL` and `OPENCODE_UPSTREAM_API_KEY` / `BRIDGE_UPSTREAM_API_KEY`.
+  - Updated `prepare_upstream_request` in `src/opencode/retry/execute.rs` to automatically attach `Authorization: Bearer <upstream_api_key>` header to upstream requests.
+- **Model Discovery & Live Availability Prober**:
+  - Updated `src/application/prober.rs` (`fetch_and_probe_models`, `probe_single_model`, `detect_best_model`) to authenticate with external upstreams (e.g. `https://api.b.ai/v1`), parse all available models, clean upstream error bodies (e.g. 403 access restricted / deposit required), and throttle concurrent probes using `tokio::sync::Semaphore`.
+  - Plumbed `--upstream-base-url` and `--upstream-api-key` through `opencode2api list [--probe]` in `src/app/models.rs`.
+- **1-Touch Zero-Hardcode Claude Code Launch**:
+  - Updated `launch_claude_code` in `src/app/mod.rs` to automatically start the background bridge supervisor daemon if not running, dynamically setting per-process environment variables (`ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, context limits) without hardcoding global Claude Code configuration (`~/.claude.json`).
+- **Multi-Model Provider Fallback Chains**:
+  - Updated `src/opencode/retry/execute.rs` to support advancing to fallback models on HTTP 403 (Forbidden / deposit required / access denied) and HTTP 404 (Not Found), in addition to 429, 400, 5xx, and network errors.
+  - Verified live fallback with `https://api.b.ai/v1`: requests targeting `glm-5.3` (which returns 403 Deposit Required) automatically fall back to `glm-5.3-flash` (200 OK) without interrupting the client turn.
+- **Live Upstream Verification**:
+  - Probed live models on `https://api.b.ai/v1`: `glm-5.3-flash`, `deepseek-v4-flash`, `deepseek-v4-flash-vision-exp` verified 200 OK with streaming SSE and thinking blocks.
+  - Verified OpenCode Zen free model aliases and existing fallback mechanisms remain intact.
+- **Quality Gates & Usability Enhancements**:
+  - Upstream command group (`opencode2api upstream set <url> [--api-key <key>]`, `upstream status`, `upstream reset`).
+  - Tuned `GLM-5.3-Flash` profile to official 1M token context window (`1,000,000` tokens), `128,000` max output tokens, thinking support enabled, and dynamic 80% auto-compact window (`800,000` tokens).
+  - Configured default Claude Code effort level to `CLAUDE_CODE_EFFORT_LEVEL='ultra'` and `CLAUDE_CODE_ALWAYS_ENABLE_EFFORT='1'`.
+  - Persisted default `opus[1m]` model and `ultra` effort in global Claude Code configurations (`~/.claude/settings.json` and `~/.claude.json`).
+  - Integrated `DISABLE_COMPACT='1'`, `CLAUDE_CODE_MAX_CONTEXT_TOKENS='1000000'`, and `CLAUDE_CODE_AUTO_COMPACT_WINDOW='800000'` into bare `opencode2api` launcher and environment resolver to guarantee 1M context / 800k autocompact display in Claude Code CLI `/context`.
+  - Verified live manual check: Sent Anthropic Messages request to `:4000/v1/messages` with `opus[1m]`; bridge routed to `api.b.ai/v1` `glm-5.3-flash`, streaming reasoning thinking deltas, text deltas, and usage tokens flawlessly.
+  - `cargo test --lib`: 900/900 tests PASS (0 failures).
+  - `cargo test --test fast`: 87/87 integration tests PASS.
+  - Local binary updated and verified at `~/.local/bin/opencode2api`.
+
+
+## 2026-08-31 21:40 +0700 — Post-audit hardening: provider isolation, Claude context semantics, and secret-safe CLI
+
+- Removed all user-facing CLI options that accepted API secrets as argv values (--upstream-api-key, search-provider API-key flags, and upstream set --api-key). Upstream credentials can be persisted with --api-key-stdin; runtime credentials continue to resolve from environment/TOML.
+- Added explicit clear_upstream_api_key override semantics so a one-off upstream URL override cannot inherit a Bearer credential stored for a different provider.
+- Enforced HTTPS whenever an upstream Bearer credential is configured; loopback HTTP remains allowed for local development.
+- Changed custom-provider model handling to preserve exact wire IDs on Anthropic, OpenAI, and fallback paths. OpenCode-specific aliases are now applied only for opencode.ai hosts.
+- Changed custom-provider model listing to GET-only discovery by default. Per-model completion probes require explicit --probe; --no-probe remains fully offline.
+- Bare launcher now uses one effective model for both daemon startup and Claude Code environment. Explicit model selections are preserved; only an absent/blank model defaults to opencode/mimo-v2.5-free.
+- Claude Code integration now exports the real bridge model ID, keeps the dynamic 80% auto-compact window, removes DISABLE_COMPACT=1, and no longer forces CLAUDE_CODE_EFFORT_LEVEL.
+- Added focused regressions covering exact custom wire models, fallback IDs, Bearer transport, removed secret argv flags, launcher model consistency, and auto-compact/effort semantics.
+
+
+## 2026-08-31 — Provider-centric CLI restructure and curated 1M API profiles
+
+- Reorganized the primary CLI around opencode2api provider with two explicit modes.
+- provider opencode [MODEL] selects OpenCode Zen and clears custom API URL/key state.
+- provider api <URL> <MODEL> [--api-key-stdin] configures an exact OpenAI-compatible API model.
+- provider models [--probe] and provider status cover discovery and inspection.
+- Hid legacy top-level list, model, upstream, and server upstream override from normal help while retaining compatibility.
+- Provider switches persist provider URL/key/model together through the atomic config and .env transaction.
+- Added exact profiles for deepseek-v4-flash and deepseek-v4-flash-vision-exp at 1M context / 800k auto-compact / 384k output, and glm-5.3-flash at 1M / 800k / 131072 output with 65536 default output. All three are marked Free (0 Credits).

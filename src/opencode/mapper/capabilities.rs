@@ -62,6 +62,13 @@ impl ModelCapabilities {
 ///
 /// Prefix stripping happens before alias rules so policy/allowlist checks and
 /// the forwarder reason about exactly the same canonical identifier.
+pub fn uses_opencode_model_aliases(base_url: &str) -> bool {
+    reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|host| host == "opencode.ai" || host.ends_with(".opencode.ai"))
+}
+
 pub fn canonical_model_name(model: &str) -> String {
     let name = model.strip_prefix("opencode/").unwrap_or(model);
     match name {

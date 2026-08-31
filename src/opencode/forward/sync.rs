@@ -16,7 +16,8 @@ use crate::opencode::forward::fallback_intent::{
     FallbackIntentContext,
 };
 use crate::opencode::mapper::{
-    is_bridge_search_tool, is_compact_request, map_anthropic_to_openai_with_policy,
+    is_bridge_search_tool, is_compact_request, map_anthropic_to_openai_with_policy_and_aliases,
+    uses_opencode_model_aliases,
 };
 use crate::opencode::retry::execute_with_warp_retry;
 use crate::opencode::sanitize::{
@@ -126,10 +127,11 @@ pub async fn forward_to_llm_sync(
             return Ok(terminal);
         }
 
-        let openai_req = map_anthropic_to_openai_with_policy(
+        let openai_req = map_anthropic_to_openai_with_policy_and_aliases(
             &payload,
             model.clone(),
             state.config.protocol.min_reasoning_stream_tokens,
+            uses_opencode_model_aliases(&state.config.retry.upstream_base_url),
         );
         if let Ok(value) = serde_json::to_value(&openai_req) {
             capture.effective_json(&value, Some(&openai_req.model), "primary", upstream_turns);

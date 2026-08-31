@@ -47,6 +47,7 @@ where
 pub struct ProcessSpec {
     pub executable: PathBuf,
     pub args: Vec<String>,
+    pub environment: Vec<(String, String)>,
     pub stdout_path: PathBuf,
     pub stderr_path: PathBuf,
 }
@@ -118,8 +119,11 @@ impl ProcessManager for SystemProcessManager {
         };
 
         let mut command = Command::new(&spec.executable);
+        command.args(&spec.args);
+        for (key, value) in &spec.environment {
+            command.env(key, value);
+        }
         command
-            .args(&spec.args)
             .stdin(Stdio::null())
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr));

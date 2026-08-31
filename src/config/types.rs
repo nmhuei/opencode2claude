@@ -21,6 +21,9 @@ pub struct CliOverrides {
     pub searxng_url: Option<String>,
     pub searxng_api_key: Option<String>,
     pub egress_mode: Option<String>,
+    pub upstream_base_url: Option<String>,
+    pub upstream_api_key: Option<String>,
+    pub clear_upstream_api_key: bool,
 }
 
 impl fmt::Debug for CliOverrides {
@@ -50,6 +53,12 @@ impl fmt::Debug for CliOverrides {
                 &self.searxng_api_key.as_ref().map(|_| "[REDACTED]"),
             )
             .field("egress_mode", &self.egress_mode)
+            .field("upstream_base_url", &self.upstream_base_url)
+            .field(
+                "upstream_api_key",
+                &self.upstream_api_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("clear_upstream_api_key", &self.clear_upstream_api_key)
             .finish()
     }
 }
@@ -135,6 +144,7 @@ impl ManagementConfig {
 #[derive(Debug, Clone)]
 pub struct RetryConfig {
     pub upstream_base_url: String,
+    pub upstream_api_key: Option<SecretString>,
     pub model_fallbacks: Vec<String>,
     pub default_fallbacks_enabled: bool,
     pub max_network_attempts: usize,
@@ -334,6 +344,7 @@ impl Default for BridgeConfig {
             },
             retry: RetryConfig {
                 upstream_base_url: "https://opencode.ai/zen/v1".to_string(),
+                upstream_api_key: None,
                 model_fallbacks: Vec::new(),
                 default_fallbacks_enabled: false,
                 max_network_attempts: 8,

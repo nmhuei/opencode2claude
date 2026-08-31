@@ -46,8 +46,10 @@ pub async fn run_cli() {
 
         // New commands
         Some(Command::Doctor) => utility::cmd_doctor(fmt).await,
+        Some(Command::Provider(args)) => models::cmd_provider(args, fmt).await,
         Some(Command::List(args)) => models::cmd_list(args, fmt).await,
         Some(Command::Model(args)) => models::cmd_model(args, fmt).await,
+        Some(Command::Upstream(args)) => models::cmd_upstream(args, fmt).await,
         Some(Command::Completion(args)) => utility::cmd_completion(args, fmt),
         Some(Command::Update(args)) => utility::cmd_update(args, fmt).await,
         Some(Command::Init(args)) => utility::cmd_init(args, fmt).await,
@@ -109,25 +111,34 @@ pub async fn run_cli() {
     }
 }
 
-fn launch_claude_code(continue_session: bool, resume: Option<&str>) {
-    let mut resolved = BridgeConfig::from_env_and_cli(CliOverrides::default());
+fn apply_claude_default_model(mut resolved: BridgeConfig) -> BridgeConfig {
     if resolved
         .model
         .as_deref()
-        .is_none_or(|m| m.is_empty() || m.contains("x-preview-f-free"))
+        .is_none_or(|model| model.trim().is_empty())
     {
         resolved.model = Some("opencode/mimo-v2.5-free".to_string());
     }
+    resolved
+}
 
-    let supervisor = server::resolve_runtime(None, None);
+fn launch_claude_code(continue_session: bool, resume: Option<&str>) {
+    let resolved =
+        apply_claude_default_model(BridgeConfig::from_env_and_cli(CliOverrides::default()));
+
+    let supervisor = server::resolve_runtime_for_start(&cli::ServerStartArgs {
+        model: resolved.model.clone(),
+        ..Default::default()
+    });
 
     match supervisor.status() {
         Ok(SupervisorStatus::Running { .. }) => {}
         Ok(SupervisorStatus::Stopped) => {
-            eprintln!(
-                "opencode2api: bridge is not running. Start it first with: opencode2api server start"
-            );
-            std::process::exit(1);
+            eprintln!("opencode2api: bridge is not running, starting background daemon...");
+            if let Err(error) = supervisor.start() {
+                eprintln!("opencode2api: failed to start bridge daemon: {error}");
+                std::process::exit(1);
+            }
         }
         Err(error) => {
             eprintln!("opencode2api: could not determine bridge status: {error}");
@@ -171,7 +182,24 @@ fn claude_launch_args(continue_session: bool, resume: Option<&str>) -> Vec<Strin
 
 #[cfg(test)]
 mod launcher_tests {
-    use super::claude_launch_args;
+    use super::{apply_claude_default_model, claude_launch_args};
+    use crate::config::BridgeConfig;
+
+    #[test]
+    fn launcher_default_model_is_mimo_but_explicit_models_are_preserved() {
+        let defaulted = apply_claude_default_model(BridgeConfig::default());
+        assert_eq!(defaulted.model.as_deref(), Some("opencode/mimo-v2.5-free"));
+
+        let explicit = apply_claude_default_model(BridgeConfig {
+            model: Some("opencode/x-preview-f-free".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(
+            explicit.model.as_deref(),
+            Some("opencode/x-preview-f-free"),
+            "explicit model selection must never be silently replaced"
+        );
+    }
 
     #[test]
     fn bare_launcher_defaults_to_bypass_permissions() {

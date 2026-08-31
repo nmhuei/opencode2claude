@@ -30,7 +30,25 @@ pub fn map_anthropic_to_openai_with_policy(
     model: String,
     minimum_reasoning_stream_tokens: u32,
 ) -> OpenAiRequest {
-    let mapped_model = map_model_name(&model);
+    map_anthropic_to_openai_with_policy_and_aliases(
+        payload,
+        model,
+        minimum_reasoning_stream_tokens,
+        true,
+    )
+}
+
+pub fn map_anthropic_to_openai_with_policy_and_aliases(
+    payload: &MessagesRequest,
+    model: String,
+    minimum_reasoning_stream_tokens: u32,
+    apply_opencode_aliases: bool,
+) -> OpenAiRequest {
+    let mapped_model = if apply_opencode_aliases {
+        map_model_name(&model)
+    } else {
+        model
+    };
     // DFLASH thinking requests require every historical assistant tool-call
     // message to carry non-empty reasoning_content, for both sync and stream.
     let synthesize_missing_tool_reasoning =

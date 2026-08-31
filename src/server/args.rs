@@ -14,10 +14,14 @@ pub struct ServeArgsBridge {
     pub searxng_url: Option<String>,
     pub searxng_api_key: Option<String>,
     pub egress_mode: Option<String>,
+    pub upstream_base_url: Option<String>,
+    pub upstream_api_key: Option<String>,
 }
 
 impl From<ServeArgsBridge> for crate::config::CliOverrides {
     fn from(args: ServeArgsBridge) -> Self {
+        let clear_upstream_api_key =
+            args.upstream_base_url.is_some() && args.upstream_api_key.is_none();
         Self {
             bridge_port: args.port,
             host: args.host,
@@ -31,6 +35,9 @@ impl From<ServeArgsBridge> for crate::config::CliOverrides {
             searxng_url: args.searxng_url,
             searxng_api_key: args.searxng_api_key,
             egress_mode: args.egress_mode,
+            upstream_base_url: args.upstream_base_url,
+            upstream_api_key: args.upstream_api_key,
+            clear_upstream_api_key,
         }
     }
 }

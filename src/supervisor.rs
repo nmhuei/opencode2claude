@@ -180,6 +180,7 @@ pub struct Supervisor {
     port: u16,
     host: String,
     child_args: Vec<String>,
+    child_environment: Vec<(String, String)>,
     process_manager: Arc<dyn ProcessManager>,
 }
 
@@ -191,6 +192,7 @@ impl Supervisor {
             port,
             host: host.into(),
             child_args: Vec::new(),
+            child_environment: Vec::new(),
             process_manager: Arc::new(SystemProcessManager),
         }
     }
@@ -221,6 +223,14 @@ impl Supervisor {
     /// Override the argv used for the foreground child process.
     pub fn with_child_args(mut self, child_args: Vec<String>) -> Self {
         self.child_args = child_args;
+        self
+    }
+
+    /// Override environment variables injected into the detached server child.
+    /// Secrets belong here instead of argv so they are not exposed via ps or
+    /// /proc/<pid>/cmdline.
+    pub fn with_child_environment(mut self, child_environment: Vec<(String, String)>) -> Self {
+        self.child_environment = child_environment;
         self
     }
 
@@ -279,6 +289,7 @@ impl Supervisor {
             .spawn_detached(&ProcessSpec {
                 executable,
                 args: child_args,
+                environment: self.child_environment.clone(),
                 stdout_path: log_path.clone(),
                 stderr_path: log_path.clone(),
             })

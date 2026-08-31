@@ -52,6 +52,7 @@ pub fn process_environment(config: &BridgeConfig) -> Vec<(String, Option<String>
         ("OPENAI_API_KEY".to_string(), Some(key)),
         ("OPENAI_BASE_URL".to_string(), Some(format!("{base}/v1"))),
         ("ANTHROPIC_AUTH_TOKEN".to_string(), None),
+        ("ANTHROPIC_MODEL".to_string(), Some(effective_model.clone())),
         ("OPENCODE_MODEL".to_string(), Some(effective_model.clone())),
     ];
 
@@ -100,10 +101,10 @@ pub fn model_claude_code_vars(
     } else {
         "1"
     };
-    let (disable_thinking, disable_adaptive, effort, effort_level) = if profile.supports_thinking {
-        ("0", "0", "1", "max")
+    let (disable_thinking, disable_adaptive, effort) = if profile.supports_thinking {
+        ("0", "0", "1")
     } else {
-        ("1", "1", "0", "low")
+        ("1", "1", "0")
     };
     let max_thinking = profile
         .max_output_tokens
@@ -112,8 +113,11 @@ pub fn model_claude_code_vars(
         .to_string();
 
     vec![
-        ("ANTHROPIC_MODEL", profile.anthropic_alias.to_string()),
         ("CLAUDE_CODE_DISABLE_1M_CONTEXT", disable_1m.to_string()),
+        (
+            "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+            profile.context_window.to_string(),
+        ),
         ("CLAUDE_CODE_MAX_OUTPUT_TOKENS", max_output),
         ("CLAUDE_CODE_AUTO_COMPACT_WINDOW", auto_compact),
         ("CLAUDE_CODE_DISABLE_THINKING", disable_thinking.to_string()),
@@ -122,15 +126,14 @@ pub fn model_claude_code_vars(
             disable_adaptive.to_string(),
         ),
         ("CLAUDE_CODE_ALWAYS_ENABLE_EFFORT", effort.to_string()),
-        ("CLAUDE_CODE_EFFORT_LEVEL", effort_level.to_string()),
         ("MAX_THINKING_TOKENS", max_thinking),
     ]
 }
 
 pub fn ox_alpha_claude_code_exports() -> Vec<String> {
     let profile = crate::application::models::resolve_model_profile(OX_ALPHA_MODEL);
-    model_claude_code_vars(&profile)
-        .into_iter()
+    std::iter::once(("ANTHROPIC_MODEL", OX_ALPHA_MODEL.to_string()))
+        .chain(model_claude_code_vars(&profile))
         .map(|(key, value)| format!("export {key}={}", shell_quote(&value)))
         .collect()
 }
@@ -173,7 +176,22 @@ mod tests {
         let exports = environment(&config_mimo).shell_exports;
         assert!(exports
             .iter()
+            .any(|line| line == "export ANTHROPIC_MODEL='opencode/mimo-v2.5-free'"));
+        assert!(exports
+            .iter()
             .any(|line| line == "export CLAUDE_CODE_AUTO_COMPACT_WINDOW='204800'"));
+        assert!(
+            exports
+                .iter()
+                .all(|line| !line.starts_with("export CLAUDE_CODE_EFFORT_LEVEL=")),
+            "the bridge must not override the user's Claude Code effort selection"
+        );
+        assert!(
+            exports
+                .iter()
+                .all(|line| line != "export DISABLE_COMPACT='1'"),
+            "auto-compact tuning must never be paired with DISABLE_COMPACT"
+        );
         assert!(exports
             .iter()
             .any(|line| line == "export CLAUDE_CODE_MAX_OUTPUT_TOKENS='64000'"));
@@ -186,5 +204,50 @@ mod tests {
         assert!(exports_nemotron
             .iter()
             .any(|line| line == "export CLAUDE_CODE_AUTO_COMPACT_WINDOW='102400'"));
+
+        let million = BridgeConfig {
+            model: Some("opencode/x-preview-f-free".to_string()),
+            ..Default::default()
+        };
+        let exports_million = environment(&million).shell_exports;
+        assert!(exports_million
+            .iter()
+            .any(|line| line == "export CLAUDE_CODE_MAX_CONTEXT_TOKENS='1000000'"));
+        assert!(exports_million
+            .iter()
+            .any(|line| line == "export CLAUDE_CODE_AUTO_COMPACT_WINDOW='800000'"));
+        assert!(exports_million
+            .iter()
+            .all(|line| line != "export DISABLE_COMPACT='1'"));
+
+        let deepseek = BridgeConfig {
+            model: Some("deepseek-v4-flash".to_string()),
+            ..Default::default()
+        };
+        let deepseek_exports = environment(&deepseek).shell_exports;
+        assert!(deepseek_exports
+            .iter()
+            .any(|line| line == "export CLAUDE_CODE_MAX_CONTEXT_TOKENS='1000000'"));
+        assert!(deepseek_exports
+            .iter()
+            .any(|line| line == "export CLAUDE_CODE_AUTO_COMPACT_WINDOW='800000'"));
+        assert!(deepseek_exports
+            .iter()
+            .any(|line| line == "export CLAUDE_CODE_MAX_OUTPUT_TOKENS='384000'"));
+
+        let glm = BridgeConfig {
+            model: Some("glm-5.3-flash".to_string()),
+            ..Default::default()
+        };
+        let glm_exports = environment(&glm).shell_exports;
+        assert!(glm_exports
+            .iter()
+            .any(|line| line == "export CLAUDE_CODE_MAX_CONTEXT_TOKENS='1000000'"));
+        assert!(glm_exports
+            .iter()
+            .any(|line| line == "export CLAUDE_CODE_AUTO_COMPACT_WINDOW='800000'"));
+        assert!(glm_exports
+            .iter()
+            .any(|line| line == "export CLAUDE_CODE_MAX_OUTPUT_TOKENS='131072'"));
     }
 }

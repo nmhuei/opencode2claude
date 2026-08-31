@@ -12,6 +12,10 @@ pub(super) fn validate(config: &BridgeConfig) -> Result<(), String> {
     if config.retry.upstream_base_url.trim().is_empty() {
         return Err("CONFIGURATION ERROR: upstream base URL cannot be empty".to_string());
     }
+    validate_upstream_transport(
+        &config.retry.upstream_base_url,
+        config.retry.upstream_api_key.is_some(),
+    )?;
     if config.stream_buffer_size == 0 || config.channel_capacity == 0 {
         return Err(
             "CONFIGURATION ERROR: stream buffer size and channel capacity must be greater than zero"
@@ -153,6 +157,34 @@ pub(super) fn validate(config: &BridgeConfig) -> Result<(), String> {
     Ok(())
 }
 
+pub(super) fn validate_upstream_transport(endpoint: &str, has_api_key: bool) -> Result<(), String> {
+    let parsed = validate_http_url("upstream", endpoint)?;
+    if has_api_key && parsed.scheme() == "http" && !is_loopback_endpoint(&parsed) {
+        return Err(
+            "SECURITY VIOLATION: upstream Bearer credentials require HTTPS; plain HTTP is allowed only for loopback upstreams"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn is_loopback_endpoint(url: &reqwest::Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let normalized = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if normalized == "localhost" || normalized.ends_with(".localhost") {
+        return true;
+    }
+    normalized
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|address| address.is_loopback())
+}
+
 fn validate_http_url(name: &str, endpoint: &str) -> Result<reqwest::Url, String> {
     let parsed = reqwest::Url::parse(endpoint)
         .map_err(|error| format!("CONFIGURATION ERROR: invalid {name} URL: {error}"))?;
@@ -221,6 +253,19 @@ fn is_private_v4(ip: std::net::Ipv4Addr) -> bool {
 #[cfg(test)]
 mod search_security_tests {
     use super::*;
+
+    #[test]
+    fn upstream_bearer_requires_https_except_loopback() {
+        assert!(validate_upstream_transport("https://provider.example/v1", true).is_ok());
+        assert!(validate_upstream_transport("http://127.0.0.1:8080/v1", true).is_ok());
+        assert!(validate_upstream_transport("http://[::1]:8080/v1", true).is_ok());
+        assert!(validate_upstream_transport("http://localhost:8080/v1", true).is_ok());
+        assert!(validate_upstream_transport("http://provider.example/v1", false).is_ok());
+
+        let error = validate_upstream_transport("http://provider.example/v1", true)
+            .expect_err("remote HTTP with Bearer credential must fail closed");
+        assert!(error.contains("require HTTPS"), "{error}");
+    }
 
     #[test]
     fn rejects_private_searxng_without_explicit_opt_in() {

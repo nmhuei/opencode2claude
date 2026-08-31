@@ -39,20 +39,7 @@ pub async fn run_server(args: ServeArgsBridge) -> Result<(), ServerError> {
         .with(tracing_subscriber::fmt::layer())
         .try_init();
 
-    let overrides = config::CliOverrides {
-        bridge_port: args.port,
-        host: args.host,
-        model: args.model,
-        shell_policy: args.shell_policy,
-        config_path: args.config,
-        max_body_size: args.max_body_size,
-        tavily_api_key: args.tavily_api_key,
-        exa_api_key: args.exa_api_key,
-        serper_api_key: args.serper_api_key,
-        searxng_url: args.searxng_url,
-        searxng_api_key: args.searxng_api_key,
-        egress_mode: args.egress_mode,
-    };
+    let overrides = config::CliOverrides::from(args);
     let config = BridgeConfig::from_env_and_cli(overrides);
     config
         .validate_security()

@@ -14,7 +14,10 @@ use crate::opencode::forward::common::{
     prepare_compat_tool_retry, prepare_final_search_synthesis, prepare_native_tool_retry,
     resolve_search_query, search_results_with_instruction,
 };
-use crate::opencode::mapper::{is_compact_request, map_anthropic_to_openai_with_policy};
+use crate::opencode::mapper::{
+    is_compact_request, map_anthropic_to_openai_with_policy_and_aliases,
+    uses_opencode_model_aliases,
+};
 use crate::opencode::retry::execute_with_warp_retry;
 use crate::opencode::search::SearchClient;
 use crate::sse::SseEventBuilder;
@@ -194,10 +197,11 @@ pub async fn forward_to_llm_stream(
                     break;
                 }
 
-                let openai_req = map_anthropic_to_openai_with_policy(
+                let openai_req = map_anthropic_to_openai_with_policy_and_aliases(
                     &current_payload,
                     model_clone.clone(),
                     state_clone.config.protocol.min_reasoning_stream_tokens,
+                    uses_opencode_model_aliases(&state_clone.config.retry.upstream_base_url),
                 );
                 if let Ok(value) = serde_json::to_value(&openai_req) {
                     capture.effective_json(

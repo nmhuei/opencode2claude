@@ -110,7 +110,13 @@ async fn handle_chat_completions_inner(
             .or_else(|| (!payload.model.trim().is_empty()).then(|| payload.model.clone()))
             .ok_or_else(|| BridgeError::InvalidRequest("model is required".to_string()))?,
     };
-    payload.model = map_model_name(&selected_model);
+    payload.model = if crate::opencode::mapper::uses_opencode_model_aliases(
+        &state.config.retry.upstream_base_url,
+    ) {
+        map_model_name(&selected_model)
+    } else {
+        selected_model.clone()
+    };
     normalize_openai_request_for_model(&mut payload);
 
     let thinking_requested = payload
@@ -1258,7 +1264,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolved_namespace_allowlist_admits_wire_name_and_forwards_mapped_model() {
+    async fn resolved_namespace_allowlist_admits_wire_name_and_preserves_custom_wire_model() {
         use crate::config::{BridgeConfig, EgressConfig, EgressMode};
         use axum::routing::post;
         use axum::Router;
@@ -1325,8 +1331,8 @@ mod tests {
             .unwrap();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(
-            body["choices"][0]["message"]["content"], "deepseek-v4-flash-free",
-            "the forwarder must still receive the mapped/resolved id"
+            body["choices"][0]["message"]["content"], "deepseek-v4-flash",
+            "policy may resolve aliases internally, but a custom provider must receive the exact wire model id"
         );
     }
 }

@@ -12,6 +12,7 @@ use std::env;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tracing::warn;
 
@@ -37,7 +38,29 @@ pub(crate) fn terminal_columns() -> Option<usize> {
         .and_then(|value| value.trim().parse::<usize>().ok())
 }
 
+static PRE_DOTENV_UPSTREAM_ENV_OVERRIDE: OnceLock<bool> = OnceLock::new();
+
+fn upstream_env_override_present() -> bool {
+    [
+        "OPENCODE_UPSTREAM_BASE_URL",
+        "BRIDGE_UPSTREAM_BASE_URL",
+        "OPENCODE_UPSTREAM_API_KEY",
+        "BRIDGE_UPSTREAM_API_KEY",
+    ]
+    .into_iter()
+    .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
+}
+
+/// True when an upstream URL/API-key override already existed in the parent
+/// process environment before dotenv loading. Persistent config commands
+/// cannot remove such parent-shell state and must fail closed rather than
+/// claim that a provider switch took effect.
+pub(crate) fn pre_dotenv_upstream_env_override_present() -> bool {
+    *PRE_DOTENV_UPSTREAM_ENV_OVERRIDE.get_or_init(upstream_env_override_present)
+}
+
 pub(crate) fn load_dotenv() -> Option<std::path::PathBuf> {
+    let _ = PRE_DOTENV_UPSTREAM_ENV_OVERRIDE.get_or_init(upstream_env_override_present);
     if let Some(explicit) = std::env::var_os("BRIDGE_ENV_PATH") {
         let path = std::path::PathBuf::from(explicit);
         if path.is_file() && dotenvy::from_path(&path).is_ok() {
@@ -399,11 +422,25 @@ pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
         .or_else(|| file.as_ref().and_then(|cfg| cfg.yahoo_url.clone()))
         .unwrap_or_else(|| "https://search.yahoo.com/search".to_string());
 
-    resolved.retry.upstream_base_url = env_string("OPENCODE_UPSTREAM_BASE_URL")
+    resolved.retry.upstream_base_url = overrides
+        .upstream_base_url
+        .or_else(|| env_string("OPENCODE_UPSTREAM_BASE_URL"))
+        .or_else(|| env_string("BRIDGE_UPSTREAM_BASE_URL"))
         .or_else(|| file.as_ref().and_then(|cfg| cfg.upstream_base_url.clone()))
         .unwrap_or_else(|| "https://opencode.ai/zen/v1".to_string())
         .trim_end_matches('/')
         .to_string();
+    resolved.retry.upstream_api_key = if overrides.clear_upstream_api_key {
+        None
+    } else {
+        secret_option(
+            overrides
+                .upstream_api_key
+                .or_else(|| env_string("OPENCODE_UPSTREAM_API_KEY"))
+                .or_else(|| env_string("BRIDGE_UPSTREAM_API_KEY"))
+                .or_else(|| file.as_ref().and_then(|cfg| cfg.upstream_api_key.clone())),
+        )
+    };
     resolved.retry.model_fallbacks = env_string("OPENCODE_MODEL_FALLBACKS")
         .map(|value| parse_csv(&value))
         .or_else(|| {

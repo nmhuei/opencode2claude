@@ -72,17 +72,21 @@ cargo clippy -- -D warnings
 
 ## Project Overview
 
-**OpenCode2API** (~4.2k LOC) is a local HTTP proxy that translates Anthropic Messages API requests into OpenAI-compatible API calls. It allows Claude Code to use any LLM provider supported by the OpenCode platform — DeepSeek, GPT-4o, Gemini, Llama, etc.
+**OpenCode2API** (~4.2k LOC) is a local HTTP proxy that translates Anthropic Messages API requests into OpenAI-compatible API calls. It allows Claude Code to use any LLM provider — OpenCode Zen free tier as well as external OpenAI-compatible endpoints (such as `api.b.ai`, Ollama, vLLM, DeepSeek, etc.).
+
+### 1-Touch Zero-Hardcode Launcher
+
+Running `opencode2api` in any project folder injects per-process environment variables (`ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, active model token limits) and launches the `claude` CLI with zero modifications to global `~/.claude.json`. If the daemon is stopped, it automatically starts it in the background.
 
 ### Data Flow
 
 ```
-Claude Code → opencode2api (:4000) → opencode.ai/zen/v1/chat/completions → Any LLM
-                              ↓
-                        !shell commands (bypass LLM, local exec)
+Claude Code → opencode2api (:4000) → OpenAI-compatible Upstream (/chat/completions)
+                                  ↓
+                            !shell commands (bypass LLM, local exec)
 ```
 
-Unlike earlier versions, the bridge now communicates **directly with the upstream OpenAI-compatible API** (no subprocess to an OpenCode daemon). The daemon health check on `:4096/doc` is purely a monitoring indicator, not a routing dependency.
+The bridge communicates **directly with the upstream OpenAI-compatible API** (supporting Bearer authentication, custom model discovery, and multi-model fallback chains).
 
 ## Architecture
 
@@ -202,6 +206,10 @@ tests/
 ### CLI Subcommands
 
 ```
+opencode2api provider opencode [MODEL]  Use OpenCode Zen (default: mimo-v2.5-free)
+opencode2api provider api <URL> <MODEL> [--api-key-stdin]  Use custom OpenAI-compatible API
+opencode2api provider models [--probe]  List models for active provider
+opencode2api provider status            Show active provider + model profile
 opencode2api server start [OPTIONS]  Start API bridge server (daemon or -f foreground)
 opencode2api server stop [OPTIONS]   Stop the bridge
 opencode2api server status [OPTIONS]  Show bridge status
@@ -227,11 +235,10 @@ opencode2api proxy logs              View proxy container logs
 -c, --config            TOML config path
 -m, --model             Model override
 --shell-policy          Shell policy override
---tavily-api-key        Tavily search API key
---exa-api-key           Exa search API key
---serper-api-key        Serper.dev search API key
 --searxng-url           SearXNG instance URL
---searxng-api-key       SearXNG API key
+# API credentials are intentionally not accepted as CLI values.
+# Use environment variables/TOML, or provider api <URL> <MODEL> --api-key-stdin
+# when persisting an upstream Bearer token without exposing it in process argv.
 -v, --version           Print version
 ```
 

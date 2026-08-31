@@ -40,11 +40,19 @@ pub(super) fn build_model_retry_list(
     model: &str,
     stream: bool,
     retry: &RetryConfig,
+    apply_opencode_aliases: bool,
 ) -> Vec<String> {
     let configured = retry
         .model_fallbacks
         .iter()
-        .map(|model| crate::opencode::mapper::map_model_name(model.trim()))
+        .map(|model| {
+            let model = model.trim();
+            if apply_opencode_aliases {
+                crate::opencode::mapper::map_model_name(model)
+            } else {
+                model.to_string()
+            }
+        })
         .filter(|model| !model.is_empty())
         .collect::<Vec<_>>();
 
