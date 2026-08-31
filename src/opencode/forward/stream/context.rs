@@ -1452,9 +1452,9 @@ impl StreamContext {
             resolved.push((source_index, id, correct_name, arguments));
         }
 
-        let mut seen = self.emitted_tool_fingerprints.clone();
+        let fingerprints = &mut self.emitted_tool_fingerprints;
         resolved.retain(|(_, _, name, arguments)| {
-            let unique = seen.insert(tool_call_fingerprint(name, arguments));
+            let unique = fingerprints.insert(tool_call_fingerprint(name, arguments));
             if !unique {
                 warn!(tool = name, "Suppressing duplicate native tool invocation");
             }
