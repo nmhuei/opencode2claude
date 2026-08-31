@@ -4073,3 +4073,44 @@ The harness used only isolated loopback stub/side-bridge processes and left prod
 - Hid legacy top-level list, model, upstream, and server upstream override from normal help while retaining compatibility.
 - Provider switches persist provider URL/key/model together through the atomic config and .env transaction.
 - Added exact profiles for deepseek-v4-flash and deepseek-v4-flash-vision-exp at 1M context / 800k auto-compact / 384k output, and glm-5.3-flash at 1M / 800k / 131072 output with 65536 default output. All three are marked Free (0 Credits).
+
+## 2026-09-01 — Clean-architecture refactor phase 1: behavior-preserving module splits + CLI/model polish
+
+- Branch: `refactor/clean-architecture` (from `dashboard-ui` checkpoint commit `ec4d3d6`).
+- **Pre-work fixes**:
+  - `config::tests::test_upstream_api_key_and_base_url_resolution` made hermetic — a leaked
+    `OPENCODE_UPSTREAM_API_KEY`/`BRIDGE_UPSTREAM_API_KEY` from the surrounding shell env won the
+    resolution chain before TOML; test now clears both vars at start and the preceding test's
+    cleanup removes them. Unit suite 906/906 PASS (was 905/906).
+  - CLAUDE.md: integration tests are NOT `#[ignore]`; `-- --ignored` runs 0 tests. Correct
+    command is `cargo test --test integration` (needs a build first).
+- **CLI help reorganization** (no command semantics changed):
+  - `Command` enum reordered: `provider` first, then server/proxy/dashboard, session utilities,
+    diagnostics, setup; legacy aliases stay hidden.
+  - `after_help` rewritten as a two-mode tutorial (OpenCode Zen vs external OpenAI-compatible API).
+- **Model profiles**: `resolve_model_profile` fallbacks aligned with official 1M specs —
+  deepseek fallback 128k/16k → 1M/384k; glm fallback max output 128k → 131,072
+  (default 65,536 unchanged). Removed dead `pub fn api_model_profiles()` (zero callers).
+- **Module splits** (mechanical, verbatim moves, `pub use` re-exports keep every
+  `crate::` path stable; one commit per batch):
+  - api_key.rs → api_key/{mod,types,registry,legacy}.rs
+  - handlers/openai.rs → openai/{mod,capture,policy,error}.rs
+  - history/store.rs → store/{mod,types,capture,sql,tests}.rs
+  - opencode/forward/common.rs → common/{mod,compat,json_repair,header_parse,schema,search,tokens,tests}.rs
+  - opencode/forward/stream/tests.rs → tests/ (9 submodules by concern)
+  - opencode/retry/execute.rs → execute/{mod,request,route}.rs
+  - proxy_pool/reconcile.rs → reconcile/{mod,verification,recovery,tests}.rs
+  - proxy_pool/maintenance.rs split in progress (separate agent)
+- **Hot-path optimizations** (behavior-preserving):
+  - `final_stop_reason`: String → `&'static str` (all values are literals; removes per-response
+    heap allocs and .to_string() calls in `update_stop_reason` + finalize paths).
+  - `emitted_tool_fingerprints.clone()` eliminated — dedup inserts directly into the live set
+    (rejected duplicates are no-ops; final set state identical).
+- **Decision**: skipped anyhow→BridgeError unification in init.rs/update.rs/shell_integration.rs —
+  anyhow is idiomatic for CLI-only top-level flows; converting would add coupling without benefit.
+- **Gates at each step**: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  `cargo test --lib` (906/906), `cargo test --test fast` (87/87). Integration 18/18 PASS
+  (verified pre-refactor on checkpoint).
+- Note: `CARGO_TARGET_DIR=/home/light/Downloads/` in this environment — `./target/` holds a stale
+  Aug-26 binary; always run the binary from `$CARGO_TARGET_DIR/debug/`.
+- Production bridge on :4000 NOT restarted; CLI/serve deployment pending the full-PTY matrix gate.
