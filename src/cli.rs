@@ -19,7 +19,7 @@ use clap::{Args, Parser, Subcommand};
     version,
     about = "A local Anthropic and OpenAI-compatible model gateway",
     long_about = "OpenCode2API is a local Anthropic/OpenAI-compatible gateway with two explicit provider modes: OpenCode Zen or a custom OpenAI-compatible API.",
-    after_help = "Quick start:\n  opencode2api provider opencode                       # OpenCode Zen + default free model\n  opencode2api provider opencode mimo-v2.5-free       # OpenCode Zen + chosen model\n  opencode2api provider api https://api.example/v1 deepseek-v4-flash --api-key-stdin\n  opencode2api provider models                        # list models for the active provider\n  opencode2api provider status                        # show active provider + model\n  opencode2api                                        # launch Claude Code using that configuration\n\nLifecycle commands remain under server; legacy list/upstream aliases are hidden but still accepted.",
+    after_help = "Two provider modes - pick one, then just run `opencode2api`:\n\n  Mode 1 - OpenCode Zen (free tier):\n    opencode2api provider opencode [MODEL]     # switch to Zen (default: mimo-v2.5-free)\n    opencode2api provider models [--probe]     # list available models\n    opencode2api                               # launch Claude Code (auto-starts bridge)\n\n  Mode 2 - External OpenAI-compatible API:\n    opencode2api provider api <URL> <MODEL> [--api-key-stdin]\n    opencode2api provider models [--probe]     # discover and probe upstream models\n    opencode2api                               # launch Claude Code\n\n  Lifecycle & tooling:\n    server start|stop|status|restart|logs|config   # bridge daemon\n    proxy ps|restart|purge|logs                    # WARP proxy pool\n    dashboard start|status                         # admin dashboard\n    set env | shell | api-key | env | doctor       # session, hooks, keys, diagnostics\n    init | update | completion <SHELL>             # setup & maintenance\n\n  Legacy aliases (list, model, upstream, serve/start/stop/...) are hidden but still accepted.",
     styles = clap_styles()
 )]
 pub struct Cli {
@@ -63,6 +63,9 @@ fn clap_styles() -> clap::builder::Styles {
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum Command {
+    /// Configure or inspect the active model provider (OpenCode Zen or custom API)
+    Provider(ProviderArgs),
+
     /// Manage the bridge server (start, stop, status, etc.)
     #[command(subcommand)]
     Server(ServerCommand),
@@ -74,9 +77,6 @@ pub enum Command {
     /// Manage the admin dashboard (start, status)
     #[command(subcommand)]
     Dashboard(DashboardCommand),
-
-    /// Display environment information for Claude Code
-    Env,
 
     /// Apply session settings through the installed shell integration
     #[command(subcommand)]
@@ -90,23 +90,11 @@ pub enum Command {
     #[command(name = "api-key", subcommand)]
     ApiKey(ApiKeyCommand),
 
+    /// Display environment information for Claude Code
+    Env,
+
     /// Diagnose common issues with the bridge and its dependencies
     Doctor,
-
-    /// Legacy model-list alias; use provider models
-    #[command(alias = "models", hide = true)]
-    List(ListArgs),
-
-    /// Configure or inspect the active model provider
-    Provider(ProviderArgs),
-
-    /// Advanced model override namespace
-    #[command(hide = true)]
-    Model(ModelArgs),
-
-    /// Legacy upstream configuration namespace
-    #[command(hide = true)]
-    Upstream(UpstreamArgs),
 
     /// Generate shell completion scripts
     Completion(CompletionArgs),
@@ -116,6 +104,18 @@ pub enum Command {
 
     /// Generate a default config file
     Init(InitArgs),
+
+    /// Legacy model-list alias; use provider models
+    #[command(alias = "models", hide = true)]
+    List(ListArgs),
+
+    /// Advanced model override namespace
+    #[command(hide = true)]
+    Model(ModelArgs),
+
+    /// Legacy upstream configuration namespace
+    #[command(hide = true)]
+    Upstream(UpstreamArgs),
 
     // Legacy aliases (hidden, backward-compatible)
     /// Start the API bridge server (foreground)
