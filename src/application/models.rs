@@ -212,11 +212,6 @@ pub const API_MODEL_PROFILES: &[ModelProfile] = &[
         anthropic_alias: "glm-5.3-flash",
     },
 ];
-
-pub fn api_model_profiles() -> &'static [ModelProfile] {
-    API_MODEL_PROFILES
-}
-
 pub fn model_pricing(model: &str) -> &'static str {
     let clean = model.strip_prefix("opencode/").unwrap_or(model);
     if API_MODEL_PROFILES.iter().any(|profile| profile.id == clean) {
