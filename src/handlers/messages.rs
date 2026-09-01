@@ -540,7 +540,8 @@ fn resolve_anonymous_model(
     let configured_clean = configured.map(str::trim).filter(|value| !value.is_empty());
     let requested_clean = requested.map(str::trim).filter(|value| !value.is_empty());
 
-    let is_opencode = crate::application::prober::is_opencode_upstream(upstream_base_url);
+    let is_opencode = crate::application::prober::is_opencode_upstream(upstream_base_url)
+        || configured_clean.is_some_and(|c| c.starts_with("opencode/"));
 
     if let Some(req) = requested_clean {
         let req_lower = req.to_ascii_lowercase();

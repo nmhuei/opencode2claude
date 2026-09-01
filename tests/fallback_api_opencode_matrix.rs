@@ -457,7 +457,7 @@ async fn test_fallback_from_opencode_to_api_on_rate_limit_429() {
     })
     .await;
 
-    let (status, body) = post_anthropic_messages(app, "claude-opus-5", false).await;
+    let (status, body) = post_anthropic_messages(app, "claude-sonnet-5", false).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("Response from API DeepSeek"));
 
