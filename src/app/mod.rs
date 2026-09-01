@@ -151,7 +151,10 @@ fn launch_claude_code(continue_session: bool, resume: Option<&str>) {
     }
 
     let profile = crate::application::models::resolve_model_profile(
-        resolved.model.as_deref().unwrap_or(crate::application::integration::OX_ALPHA_MODEL),
+        resolved
+            .model
+            .as_deref()
+            .unwrap_or(crate::application::integration::OX_ALPHA_MODEL),
     );
     let target_alias = profile.anthropic_alias;
 
@@ -228,7 +231,12 @@ mod launcher_tests {
         );
         assert_eq!(
             claude_launch_args(false, None, Some("claude-opus-5")),
-            ["--permission-mode", "bypassPermissions", "--model", "claude-opus-5"]
+            [
+                "--permission-mode",
+                "bypassPermissions",
+                "--model",
+                "claude-opus-5"
+            ]
         );
     }
 

@@ -53,7 +53,10 @@ pub fn process_environment(config: &BridgeConfig) -> Vec<(String, Option<String>
         ("OPENAI_API_KEY".to_string(), Some(key)),
         ("OPENAI_BASE_URL".to_string(), Some(format!("{base}/v1"))),
         ("ANTHROPIC_AUTH_TOKEN".to_string(), None),
-        ("ANTHROPIC_MODEL".to_string(), Some(profile.anthropic_alias.to_string())),
+        (
+            "ANTHROPIC_MODEL".to_string(),
+            Some(profile.anthropic_alias.to_string()),
+        ),
         ("OPENCODE_MODEL".to_string(), Some(effective_model.clone())),
     ];
 

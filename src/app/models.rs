@@ -549,9 +549,16 @@ pub async fn cmd_list(args: ListArgs, fmt: OutputFormat) {
                     .set_width(presentation::content_width() as u16);
 
                 oc_table.set_header(
-                    ["MODEL ID", "CONTEXT", "MAX OUT", "THINKING", "TIER", "SWITCH COMMAND"]
-                        .into_iter()
-                        .map(|h| CtCell::new(h).fg(CtColor::Cyan)),
+                    [
+                        "MODEL ID",
+                        "CONTEXT",
+                        "MAX OUT",
+                        "THINKING",
+                        "TIER",
+                        "SWITCH COMMAND",
+                    ]
+                    .into_iter()
+                    .map(|h| CtCell::new(h).fg(CtColor::Cyan)),
                 );
 
                 for m in FREE_MODELS {
@@ -585,7 +592,10 @@ pub async fn cmd_list(args: ListArgs, fmt: OutputFormat) {
                 }
                 println!("{oc_table}\n");
 
-                let one_m_count = FREE_MODELS.iter().filter(|m| m.context_window >= 1_000_000).count();
+                let one_m_count = FREE_MODELS
+                    .iter()
+                    .filter(|m| m.context_window >= 1_000_000)
+                    .count();
                 let sub_m_count = FREE_MODELS.len() - one_m_count;
                 println!(
                     "  {} {} free models ({} × 1M context, {} × sub-1M)",

@@ -549,14 +549,18 @@ fn resolve_anonymous_model(
         if req_lower.contains("opus") || req_lower.contains("1m") {
             if is_opencode {
                 if let Some(cfg) = configured_clean {
-                    if crate::application::models::resolve_model_profile(cfg).context_window >= 1_000_000 {
+                    if crate::application::models::resolve_model_profile(cfg).context_window
+                        >= 1_000_000
+                    {
                         return cfg.to_string();
                     }
                 }
                 return "opencode/x-preview-f-free".to_string();
             } else {
                 if let Some(cfg) = configured_clean {
-                    if crate::application::models::resolve_model_profile(cfg).context_window >= 1_000_000 {
+                    if crate::application::models::resolve_model_profile(cfg).context_window
+                        >= 1_000_000
+                    {
                         return cfg.to_string();
                     }
                 }
@@ -567,14 +571,18 @@ fn resolve_anonymous_model(
         if req_lower.contains("sonnet") || req_lower.contains("haiku") {
             if is_opencode {
                 if let Some(cfg) = configured_clean {
-                    if crate::application::models::resolve_model_profile(cfg).context_window < 1_000_000 {
+                    if crate::application::models::resolve_model_profile(cfg).context_window
+                        < 1_000_000
+                    {
                         return cfg.to_string();
                     }
                 }
                 return "opencode/mimo-v2.5-free".to_string();
             } else {
                 if let Some(cfg) = configured_clean {
-                    if crate::application::models::resolve_model_profile(cfg).context_window < 1_000_000 {
+                    if crate::application::models::resolve_model_profile(cfg).context_window
+                        < 1_000_000
+                    {
                         return cfg.to_string();
                     }
                 }
@@ -596,13 +604,9 @@ fn resolve_anonymous_model(
         }
 
         // Fallback for custom or unknown model: configured wins if present
-        configured_clean
-            .unwrap_or(req)
-            .to_string()
+        configured_clean.unwrap_or(req).to_string()
     } else {
-        configured_clean
-            .unwrap_or(DEFAULT_MODEL)
-            .to_string()
+        configured_clean.unwrap_or(DEFAULT_MODEL).to_string()
     }
 }
 
@@ -835,7 +839,11 @@ mod model_resolution_tests {
     #[test]
     fn configured_global_model_still_wins_over_requested() {
         assert_eq!(
-            resolve_anonymous_model(Some("global-model"), Some("requested-model"), "https://opencode.ai/zen/v1"),
+            resolve_anonymous_model(
+                Some("global-model"),
+                Some("requested-model"),
+                "https://opencode.ai/zen/v1"
+            ),
             "global-model"
         );
     }
@@ -856,7 +864,11 @@ mod model_resolution_tests {
             "whitespace-only requested model must fall back, not forward garbage"
         );
         assert_eq!(
-            resolve_anonymous_model(Some(""), Some("requested-model"), "https://opencode.ai/zen/v1"),
+            resolve_anonymous_model(
+                Some(""),
+                Some("requested-model"),
+                "https://opencode.ai/zen/v1"
+            ),
             "requested-model",
             "blank configured model must be treated as unset"
         );
@@ -882,7 +894,11 @@ mod model_resolution_tests {
 
         // Sonnet & Haiku -> sub-1M (qwen3.8-flash) on b.ai
         assert_eq!(
-            resolve_anonymous_model(Some("glm-5.3-flash"), Some("claude-3-7-sonnet-20250219"), b_ai),
+            resolve_anonymous_model(
+                Some("glm-5.3-flash"),
+                Some("claude-3-7-sonnet-20250219"),
+                b_ai
+            ),
             "qwen3.8-flash"
         );
         assert_eq!(
@@ -890,18 +906,30 @@ mod model_resolution_tests {
             "qwen3.8-flash"
         );
         assert_eq!(
-            resolve_anonymous_model(Some("glm-5.3-flash"), Some("claude-3-5-haiku-20241022"), b_ai),
+            resolve_anonymous_model(
+                Some("glm-5.3-flash"),
+                Some("claude-3-5-haiku-20241022"),
+                b_ai
+            ),
             "qwen3.8-flash"
         );
 
         // OpenCode zen routing
         let zen = "https://opencode.ai/zen/v1";
         assert_eq!(
-            resolve_anonymous_model(Some("opencode/x-preview-f-free"), Some("claude-opus-5"), zen),
+            resolve_anonymous_model(
+                Some("opencode/x-preview-f-free"),
+                Some("claude-opus-5"),
+                zen
+            ),
             "opencode/x-preview-f-free"
         );
         assert_eq!(
-            resolve_anonymous_model(Some("opencode/x-preview-f-free"), Some("claude-3-7-sonnet-20250219"), zen),
+            resolve_anonymous_model(
+                Some("opencode/x-preview-f-free"),
+                Some("claude-3-7-sonnet-20250219"),
+                zen
+            ),
             "opencode/mimo-v2.5-free"
         );
     }
