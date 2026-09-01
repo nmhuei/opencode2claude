@@ -6,6 +6,10 @@ OpenCode2API uses hierarchical commands and supports `--json`, `--quiet`, and `-
 
 ```text
 opencode2api
+├── provider
+│   ├── opencode [MODEL]
+│   ├── api <URL> <MODEL> [--api-key-stdin]
+│   └── models [--probe] [--all]
 ├── server
 │   ├── start
 │   ├── stop
@@ -21,6 +25,10 @@ opencode2api
 ├── dashboard
 │   ├── start
 │   └── status
+├── set
+│   └── env
+├── shell
+│   └── install
 ├── env
 ├── api-key
 │   └── generate
@@ -126,6 +134,10 @@ IDs (`*-free` plus `big-pickle`). For `api.b.ai`, listing is deliberately
 limited to `deepseek-v4-flash`, `deepseek-v4-flash-vision-exp`,
 `glm-5.3-flash`, and `qwen3.8-flash` when the authenticated provider catalog
 contains them.
+
+When configured for a custom upstream API, `opencode2api list` and `opencode2api provider models`
+additionally render a dedicated **OpenCode Free Models** table showing all 11 zero-cost models
+partitioned by context tier (1M Opus vs Sub-1M Sonnet) with one-touch switch commands.
 
 
 ## API keys

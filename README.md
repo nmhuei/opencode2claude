@@ -64,6 +64,12 @@ cd /path/to/project
 opencode2api
 ```
 
+- **Seamless multi-directory support:** Automatically searches for `./opencode2api.toml` locally, falling back to `~/opencode2api.toml` or `~/.config/opencode2api/config.toml` so you can launch from any repository.
+- **Claude Code 1M Tiering (`claude-opus-5`):** 1M context models (`glm-5.3-flash`, `deepseek-v4-flash`, `x-preview-f-free`) are presented as `claude-opus-5`. Standard models are presented as `claude-sonnet-5`.
+- **Dynamic `/model` Switching:** Selecting models interactively via `/model` inside Claude Code CLI dynamically switches between 1M and Sub-1M upstream models.
+- **Isolated 1M Fallback Chains:** 1M sessions only fall back to 1M models, preventing catastrophic context truncation during long sessions.
+- **Dual-Provider Catalog:** `opencode2api list` displays active upstream models and all 11 OpenCode free models side-by-side with one-touch switch commands.
+
 ### Provider Modes: OpenCode Zen or Custom API
 
 OpenCode2API now has one provider namespace for both supported source types.

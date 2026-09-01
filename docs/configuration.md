@@ -6,7 +6,10 @@ OpenCode2API resolves configuration with this precedence, from lowest to highest
 defaults < TOML file < environment variables < CLI options
 ```
 
-The default TOML path is `opencode2api.toml`. Override it with `BRIDGE_CONFIG_PATH` or `--config`. Generate a current template with:
+The default TOML search path is `./opencode2api.toml` in the current working directory.
+If absent, OpenCode2API automatically falls back to `~/opencode2api.toml` or `~/.config/opencode2api/config.toml`,
+allowing `opencode2api` to be run seamlessly from any project repository without copying configuration files.
+Override it with `BRIDGE_CONFIG_PATH` or `--config`. Generate a current template with:
 
 ```bash
 opencode2api init --output opencode2api.toml
@@ -45,6 +48,21 @@ Upstream Bearer credentials are sent only over HTTPS, except for loopback HTTP e
 | qwen3.8-flash | 128,000 | 102,400 | 16,384 | provider-defined | Free (0 Credits) |
 
 These exact profiles are applied to Claude Code environment tuning and to model discovery output when the API exposes the matching IDs.
+
+### Claude Code model tiering & fallback isolation
+
+OpenCode2API organizes upstream models into two isolated context tiers to safeguard against catastrophic context truncation during long Claude Code sessions:
+
+1. **1M Tier (`claude-opus-5`):**
+   - Applied to models with $\ge$ 1,000,000 token context windows (`glm-5.3-flash`, `deepseek-v4-flash`, `deepseek-v4-flash-vision-exp` on custom APIs; `opencode/x-preview-f-free`, `opencode/deepseek-v4-flash-free` on OpenCode).
+   - **Fallback Isolation:** Sessions started on a 1M model only fall back to other 1M models. Sub-1M models are pruned from the retry chain automatically.
+   - Claude Code launches with `--model claude-opus-5` so it displays "Opus 5" rather than defaulting to deprecated Sonnet 4.
+
+2. **Sub-1M Tier (`claude-sonnet-5`):**
+   - Applied to standard models with $<$ 1,000,000 token context windows (`qwen3.8-flash` on `b.ai`; `opencode/mimo-v2.5-free`, `opencode/nemotron-3.5-lightning-free` on OpenCode).
+
+3. **Dynamic `/model` Command Routing:**
+   - Changing models interactively in Claude Code via `/model` sends Anthropic model aliases that OpenCode2API dynamically maps to the matching upstream tier (`opus` / `1m` $\to$ 1M model; `sonnet` / `haiku` $\to$ Sub-1M model).
 
 ## Authentication and shell policy
 

@@ -26,24 +26,24 @@
 
 ## Snapshot hiện tại
 
-Cập nhật gần nhất: **2026-08-31 21:20 +0700**
+Cập nhật gần nhất: **2026-09-01 19:15 +0700**
 
 ### Repo và service
 
 ```text
 Repo:          /home/light/GitHub/opencode2claude
-Branch:        integration/branch-audit — HEAD 8619bee
+Branch:        main (đồng bộ origin/main và origin/refactor/clean-architecture)
 Service URL:   http://127.0.0.1:4000
 Dashboard:     http://127.0.0.1:4000/dashboard
 Binary:        /home/light/.local/bin/opencode2api v0.5.0
 Controller:    /home/light/.local/bin/opencode2api
 Port:          4000
 Status:        running (managed supervisor)
-Active Model:  glm-5.3-flash (1,000,000 tokens context, 800,000 auto-compact, thinking enabled)
+Active Model:  glm-5.3-flash (1,000,000 tokens context, 800,000 auto-compact, alias claude-opus-5, thinking enabled)
 Upstream:      https://api.b.ai/v1 (OpenAI-compatible with Bearer auth)
-Fallbacks:     ["glm-5.3-flash", "qwen3.8-flash", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp", "mimo-v2.5"]
-Claude Code:   Direct 1-touch launch (`opencode2api`) with 1M context, ultra effort, and zero hardcoded global settings.
-Tests:         900 unit tests + 87 fast integration tests PASS (0 failures)
+Fallbacks:     ["deepseek-v4-flash", "deepseek-v4-flash-vision-exp"] (1M isolated tier)
+Claude Code:   Direct 1-touch launch (`opencode2api`) with claude-opus-5 alias, dynamic /model routing, and automatic $HOME/opencode2api.toml resolution.
+Tests:         915 unit tests PASS (0 failures)
 ```
 
 PID và uptime là snapshot tại thời điểm ghi; phải kiểm tra lại bằng:
@@ -4224,3 +4224,25 @@ docs/feature-matrix/config-boundary/infra-boundary/
 - Added cache round-trip/isolation/empty-overwrite regression. Loopback CLI E2E proved: cache miss normal list = 0 upstream requests; `--probe` = `/models`, `/models`, then completion probe; subsequent normal list returned the identical cached snapshot with no additional request.
 - Installed CLI UX now labels cache hits: `Using cached probe snapshot; no upstream network requests were sent`. Cache misses direct the operator to `provider models --probe`.
 - Verification: cache regression PASS, fmt/diff-check PASS, clippy -D warnings PASS, release build/install PASS, installed `list --probe` then `list` contract PASS, docs and feature-matrix checks PASS. Production `:4000` unchanged.
+
+## 2026-09-01 19:15 +0700 — 1M Context Tiering, Dynamic Claude Code /model Routing, Global Config Resolution, and Dual List
+
+- **Context-Aware Claude Code Aliases (`src/application/models.rs`, `src/application/integration.rs`):**
+  - Partitioned models into two clear context tiers: models with $\ge$ 1,000,000 context (`glm-5.3-flash`, `deepseek-v4-flash`, `deepseek-v4-flash-vision-exp`, `opencode/x-preview-f-free`) use `anthropic_alias = "claude-opus-5"`.
+  - Standard models ($<$ 1,000,000 context, such as `qwen3.8-flash` on `b.ai` and `mimo-v2.5-free` on OpenCode) use `anthropic_alias = "claude-sonnet-5"`, removing the deprecated "Sonnet 4 retired June 15, 2026" banner.
+  - Claude Code process launcher in `src/app/mod.rs` passes `--model <anthropic_alias>` to ensure Claude Code launches with "Opus 5" rather than defaulting to deprecated Sonnet 4.
+- **Isolated 1M Fallback Chains (`src/opencode/retry/policy.rs`):**
+  - Sessions started on a 1M model only fall back to other 1M models. Prunes sub-1M models from the retry chain automatically to prevent mid-conversation context truncation errors.
+- **Dynamic Claude Code `/model` Routing (`src/handlers/messages.rs`):**
+  - Updated `resolve_anonymous_model` and `system_claude_code` loopback admission: when Claude Code sends requests via `/model` selection (`opus`/`1m` vs `sonnet`/`haiku`), the gateway dynamically routes to the appropriate upstream model tier (Opus $\to$ `glm-5.3-flash`, Sonnet/Haiku $\to$ `qwen3.8-flash` on `b.ai`).
+- **Global Config Path Resolution (`src/config/loader.rs`):**
+  - When `./opencode2api.toml` is not present in the current working directory, `loader.rs` automatically searches `~/opencode2api.toml` and `~/.config/opencode2api/config.toml`, allowing `opencode2api` to be invoked from any project folder without config duplication. Hermetically gated during unit tests with `!cfg!(test)`.
+- **Dual-Provider Listing (`src/app/models.rs`):**
+  - When running against a custom upstream API, `opencode2api list` displays the active custom API models and renders a dedicated **OpenCode Free Models** table side-by-side with exact one-touch switch commands.
+- **Verification:**
+  - Live manual E2E check with real Claude Code CLI v2.1.252 in `~/GitHub/gpt` verified:
+    - Default launch: `claude-opus-5` $\to$ routed to `glm-5.3-flash` (HTTP 200).
+    - Model switch: `claude-sonnet-5` $\to$ routed to `qwen3.8-flash` (HTTP 200).
+  - All 915 unit & integration tests pass with 0 failures (`cargo test --lib`).
+  - Merged `refactor/clean-architecture` into `main` and pushed to `origin/main`.
+
