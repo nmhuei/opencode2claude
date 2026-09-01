@@ -117,7 +117,11 @@ fn apply_claude_default_model(mut resolved: BridgeConfig) -> BridgeConfig {
         .as_deref()
         .is_none_or(|model| model.trim().is_empty())
     {
-        resolved.model = Some("opencode/mimo-v2.5-free".to_string());
+        if crate::application::prober::is_opencode_upstream(&resolved.retry.upstream_base_url) {
+            resolved.model = Some("opencode/mimo-v2.5-free".to_string());
+        } else {
+            resolved.model = Some("glm-5.3-flash".to_string());
+        }
     }
     resolved
 }
@@ -146,9 +150,14 @@ fn launch_claude_code(continue_session: bool, resume: Option<&str>) {
         }
     }
 
+    let profile = crate::application::models::resolve_model_profile(
+        resolved.model.as_deref().unwrap_or(crate::application::integration::OX_ALPHA_MODEL),
+    );
+    let target_alias = profile.anthropic_alias;
+
     match crate::infrastructure::process::run_foreground(
         "claude",
-        claude_launch_args(continue_session, resume),
+        claude_launch_args(continue_session, resume, Some(target_alias)),
         crate::application::integration::process_environment(&resolved),
     ) {
         Ok(status) if status.success() => {}
@@ -164,11 +173,21 @@ fn launch_claude_code(continue_session: bool, resume: Option<&str>) {
     }
 }
 
-fn claude_launch_args(continue_session: bool, resume: Option<&str>) -> Vec<String> {
+fn claude_launch_args(
+    continue_session: bool,
+    resume: Option<&str>,
+    model: Option<&str>,
+) -> Vec<String> {
     let mut args = vec![
         "--permission-mode".to_string(),
         "bypassPermissions".to_string(),
     ];
+    if let Some(m) = model {
+        if !m.is_empty() {
+            args.push("--model".to_string());
+            args.push(m.to_string());
+        }
+    }
     if continue_session {
         args.push("--continue".to_string());
     } else if let Some(session) = resume {
@@ -204,26 +223,32 @@ mod launcher_tests {
     #[test]
     fn bare_launcher_defaults_to_bypass_permissions() {
         assert_eq!(
-            claude_launch_args(false, None),
+            claude_launch_args(false, None, None),
             ["--permission-mode", "bypassPermissions"]
+        );
+        assert_eq!(
+            claude_launch_args(false, None, Some("claude-opus-5")),
+            ["--permission-mode", "bypassPermissions", "--model", "claude-opus-5"]
         );
     }
 
     #[test]
     fn launcher_supports_continue_and_resume() {
         assert_eq!(
-            claude_launch_args(true, None),
+            claude_launch_args(true, None, None),
             ["--permission-mode", "bypassPermissions", "--continue"]
         );
         assert_eq!(
-            claude_launch_args(false, Some("")),
+            claude_launch_args(false, Some(""), None),
             ["--permission-mode", "bypassPermissions", "--resume"]
         );
         assert_eq!(
-            claude_launch_args(false, Some("session-123")),
+            claude_launch_args(false, Some("session-123"), Some("claude-opus-5")),
             [
                 "--permission-mode",
                 "bypassPermissions",
+                "--model",
+                "claude-opus-5",
                 "--resume",
                 "session-123",
             ]

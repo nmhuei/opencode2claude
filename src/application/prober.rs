@@ -5,7 +5,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModelStatus {
     Online,
     RateLimited,
@@ -24,7 +24,7 @@ impl std::fmt::Display for ModelStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProbedModel {
     pub id: String,
     pub label: String,
@@ -67,9 +67,47 @@ pub fn is_opencode_upstream(base_url: &str) -> bool {
         .is_some_and(|host| host == "opencode.ai" || host.ends_with(".opencode.ai"))
 }
 
+fn is_bai_upstream(base_url: &str) -> bool {
+    reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|host| host == "b.ai" || host.ends_with(".b.ai"))
+}
+
+/// The only custom b.ai models this bridge exposes for selection and probing.
+/// Keep this separate from Zen: they are different upstream products and their
+/// live catalogs change independently.
+const BAI_CURATED_MODELS: &[&str] = &[
+    "deepseek-v4-flash",
+    "deepseek-v4-flash-vision-exp",
+    "glm-5.3-flash",
+    "qwen3.8-flash",
+];
+
+/// Provider-specific listing policy applied to IDs returned by a live
+/// `/models` request. Zen auto-detects its free tier; b.ai deliberately
+/// exposes only the four curated API models; other custom APIs retain their
+/// complete discovery response.
+pub fn should_list_upstream_model(base_url: &str, id: &str) -> bool {
+    let clean = id.strip_prefix("opencode/").unwrap_or(id);
+    if is_opencode_upstream(base_url) {
+        is_free_model_id(clean)
+    } else if is_bai_upstream(base_url) {
+        BAI_CURATED_MODELS
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(clean))
+    } else {
+        true
+    }
+}
+
 fn static_catalog(base_url: &str) -> Vec<FreeModel> {
     if is_opencode_upstream(base_url) {
-        FREE_MODELS.to_vec()
+        FREE_MODELS
+            .iter()
+            .copied()
+            .filter(|model| is_free_model_id(model.id))
+            .collect()
     } else {
         Vec::new()
     }
@@ -218,6 +256,23 @@ fn clean_error_message(raw: &str) -> String {
     raw.chars().take(120).collect()
 }
 
+/// True when every curated candidate was rejected because the configured
+/// upstream credential is absent or invalid. This is distinct from a provider
+/// outage: `/models` can remain public while completions require a valid key.
+pub fn all_models_rejected_for_auth(models: &[ProbedModel]) -> bool {
+    !models.is_empty()
+        && models.iter().all(|model| {
+            model.status == ModelStatus::Unavailable
+                && model.error.as_deref().is_some_and(|error| {
+                    let error = error.to_ascii_lowercase();
+                    error.contains("invalid api key")
+                        || error.contains("missing api key")
+                        || error.contains("invalid authentication")
+                        || error.contains("authentication failed")
+                })
+        })
+}
+
 /// Fetch list of models from upstream, optionally probing their live availability.
 pub async fn fetch_and_probe_models(
     client: &Client,
@@ -226,7 +281,10 @@ pub async fn fetch_and_probe_models(
     probe_live: bool,
 ) -> Vec<ProbedModel> {
     let is_custom_upstream = !is_opencode_upstream(base_url);
-    let mut catalog_models = static_catalog(base_url);
+    // Zen's live endpoint is authoritative for the currently offered curated
+    // models. Starting from an empty list prevents retired static entries from
+    // being probed and presented as a misleading 0/N usable-model result.
+    let mut catalog_models: Vec<FreeModel> = Vec::new();
 
     let models_url = format!("{}/models", base_url.trim_end_matches('/'));
     let mut req = client.get(&models_url).timeout(Duration::from_secs(4));
@@ -237,8 +295,7 @@ pub async fn fetch_and_probe_models(
     if let Ok(resp) = req.send().await {
         if let Ok(parsed) = resp.json::<UpstreamModelsResponse>().await {
             for item in parsed.data {
-                let should_include =
-                    is_custom_upstream || api_key.is_some() || is_free_model_id(&item.id);
+                let should_include = should_list_upstream_model(base_url, &item.id);
 
                 if should_include
                     && !catalog_models.iter().any(|m| {
@@ -266,7 +323,7 @@ pub async fn fetch_and_probe_models(
     }
 
     if catalog_models.is_empty() && !is_custom_upstream {
-        catalog_models = FREE_MODELS.to_vec();
+        catalog_models = static_catalog(base_url);
     }
 
     if !probe_live {
@@ -448,6 +505,47 @@ mod tests {
     }
 
     #[test]
+    fn provider_specific_listing_policies_filter_live_catalogs() {
+        // Zen auto-detects its currently advertised free IDs only.
+        assert!(should_list_upstream_model(
+            "https://opencode.ai/zen/v1",
+            "mimo-v2.5-free"
+        ));
+        assert!(should_list_upstream_model(
+            "https://opencode.ai/zen/v1",
+            "big-pickle"
+        ));
+        assert!(!should_list_upstream_model(
+            "https://opencode.ai/zen/v1",
+            "deepseek-v4-flash"
+        ));
+
+        // b.ai is intentionally limited to the four curated API models.
+        for model in [
+            "deepseek-v4-flash",
+            "deepseek-v4-flash-vision-exp",
+            "glm-5.3-flash",
+            "qwen3.8-flash",
+        ] {
+            assert!(should_list_upstream_model("https://api.b.ai/v1", model));
+        }
+        assert!(!should_list_upstream_model(
+            "https://api.b.ai/v1",
+            "glm-5.2"
+        ));
+        assert!(!should_list_upstream_model(
+            "https://api.b.ai/v1",
+            "gpt-5.6-sol"
+        ));
+
+        // Other custom providers retain normal model discovery.
+        assert!(should_list_upstream_model(
+            "https://api.example/v1",
+            "custom-provider-model"
+        ));
+    }
+
+    #[test]
     fn test_clean_error_message() {
         let json_err = r#"{"error":{"message":"Model is unavailable."}}"#;
         assert_eq!(clean_error_message(json_err), "Model is unavailable.");
@@ -457,6 +555,30 @@ mod tests {
             clean_error_message(b_ai_err),
             "Access restricted. Deposit required to unlock premium models. (request id: 123)"
         );
+    }
+
+    #[test]
+    fn detects_when_every_curated_probe_rejects_the_credential() {
+        let unavailable = |error: &str| ProbedModel {
+            id: "deepseek-v4-flash".to_string(),
+            label: "DeepSeek V4 Flash".to_string(),
+            provider: "OpenCode".to_string(),
+            context_window: 1_000_000,
+            auto_compact_window: 800_000,
+            max_output_tokens: 384_000,
+            supports_thinking: true,
+            status: ModelStatus::Unavailable,
+            latency_ms: Some(1),
+            error: Some(error.to_string()),
+        };
+        assert!(all_models_rejected_for_auth(&[
+            unavailable("Invalid API key."),
+            unavailable("Missing API key."),
+        ]));
+        assert!(!all_models_rejected_for_auth(&[unavailable(
+            "Model unavailable."
+        )]));
+        assert!(!all_models_rejected_for_auth(&[]));
     }
 
     #[test]

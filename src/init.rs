@@ -40,6 +40,8 @@ schema_version = 1
 # OpenAI-compatible upstream base URL and authentication.
 # upstream_base_url = "https://opencode.ai/zen/v1"
 # upstream_api_key = "sk-example-upstream-key"
+# Optional TOML-only pool (CSV or string array); requests round-robin and 429 retries the next key.
+# upstream_api_keys = ["sk-primary", "sk-secondary"]
 # model_fallbacks = ["opencode/deepseek-v4-flash-free"]
 # enable_default_fallbacks = false
 # max_network_attempts = 5

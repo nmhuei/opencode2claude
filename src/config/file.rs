@@ -75,6 +75,7 @@ pub struct TomlConfig {
     pub max_sync_response_bytes: Option<usize>,
     pub upstream_base_url: Option<String>,
     pub upstream_api_key: Option<String>,
+    pub upstream_api_keys: Option<StringList>,
     pub model_fallbacks: Option<StringList>,
     pub enable_default_fallbacks: Option<bool>,
     pub max_network_attempts: Option<usize>,

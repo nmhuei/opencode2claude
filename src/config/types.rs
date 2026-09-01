@@ -62,7 +62,6 @@ impl fmt::Debug for CliOverrides {
             .finish()
     }
 }
-
 /// Secret value whose formatting never exposes the underlying bytes.
 #[derive(Clone, PartialEq, Eq)]
 pub struct SecretString(String);
@@ -145,6 +144,7 @@ impl ManagementConfig {
 pub struct RetryConfig {
     pub upstream_base_url: String,
     pub upstream_api_key: Option<SecretString>,
+    pub upstream_api_keys: Vec<SecretString>,
     pub model_fallbacks: Vec<String>,
     pub default_fallbacks_enabled: bool,
     pub max_network_attempts: usize,
@@ -345,6 +345,7 @@ impl Default for BridgeConfig {
             retry: RetryConfig {
                 upstream_base_url: "https://opencode.ai/zen/v1".to_string(),
                 upstream_api_key: None,
+                upstream_api_keys: Vec::new(),
                 model_fallbacks: Vec::new(),
                 default_fallbacks_enabled: false,
                 max_network_attempts: 8,

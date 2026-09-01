@@ -2,7 +2,7 @@ use crate::application::models::{
     model_default_output_tokens, model_pricing, resolve_model_profile,
 };
 use crate::application::prober::{
-    catalog_models_without_network, check_upstream_health, fetch_and_probe_models, ModelStatus,
+    all_models_rejected_for_auth, check_upstream_health, fetch_and_probe_models, ModelStatus,
     ProbedModel,
 };
 use crate::cli::{
@@ -13,11 +13,14 @@ use crate::config::{BridgeConfig, CliOverrides};
 use crate::infrastructure::file_store::{AtomicFileStore, FileStore};
 use crate::output::OutputFormat;
 use crate::presentation;
+use crate::runtime::RuntimePaths;
 use comfy_table::presets::NOTHING;
 use comfy_table::{Cell as CtCell, Color as CtColor, ContentArrangement, Table};
 use reqwest::Client;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 use yansi::Paint;
 
 fn format_number(n: usize) -> String {
@@ -31,6 +34,44 @@ fn format_number(n: usize) -> String {
         result.push(*c);
     }
     result
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ModelProbeCache {
+    upstream_base_url: String,
+    probed_at_unix_secs: u64,
+    models: Vec<ProbedModel>,
+}
+
+fn read_model_probe_cache(path: &Path, upstream_base_url: &str) -> Option<Vec<ProbedModel>> {
+    let bytes = AtomicFileStore.read(path).ok()?;
+    let cache = serde_json::from_slice::<ModelProbeCache>(&bytes).ok()?;
+    (cache.upstream_base_url == upstream_base_url).then_some(cache.models)
+}
+
+fn write_model_probe_cache(
+    path: &Path,
+    upstream_base_url: &str,
+    models: &[ProbedModel],
+) -> Result<(), String> {
+    let cache = ModelProbeCache {
+        upstream_base_url: upstream_base_url.to_string(),
+        probed_at_unix_secs: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        models: models.to_vec(),
+    };
+    let bytes = serde_json::to_vec_pretty(&cache)
+        .map_err(|error| format!("failed to serialize model probe cache: {error}"))?;
+    AtomicFileStore
+        .atomic_write(path, &bytes, false)
+        .map_err(|error| {
+            format!(
+                "failed to persist model probe cache {}: {error}",
+                path.display()
+            )
+        })
 }
 
 fn resolved_config_path(explicit: Option<String>) -> PathBuf {
@@ -202,10 +243,14 @@ fn apply_upstream_configuration_at(
             } else {
                 doc.remove("upstream_api_key");
             }
+            // The credential pool is TOML-only and provider-scoped; switching
+            // providers must not leak stale keys to the new upstream.
+            doc.remove("upstream_api_keys");
         }
         None => {
             doc.remove("upstream_base_url");
             doc.remove("upstream_api_key");
+            doc.remove("upstream_api_keys");
         }
     }
 
@@ -248,7 +293,6 @@ fn apply_upstream_configuration_at(
 
 pub async fn cmd_list(args: ListArgs, fmt: OutputFormat) {
     let config = BridgeConfig::from_env_and_cli(CliOverrides::default());
-    let client = Client::new();
     let upstream_url = args
         .upstream_base_url
         .as_deref()
@@ -263,24 +307,30 @@ pub async fn cmd_list(args: ListArgs, fmt: OutputFormat) {
         exit_cli_error(fmt, error);
     }
 
-    let is_custom_upstream = !crate::application::prober::is_opencode_upstream(upstream_url);
-    let should_probe = args.probe || (!args.no_probe && !is_custom_upstream);
-    let should_network = !args.no_probe;
-    let api_health = if should_network {
+    let cache_path = RuntimePaths::from_config(&config).model_probe_cache();
+    let should_probe = args.probe;
+    let mut cache_hit = false;
+    let (probed, api_health) = if should_probe {
+        let client = Client::new();
         if fmt == OutputFormat::Human {
-            eprintln!(
-                "{}",
-                "Checking upstream API health & models...".cyan().dim()
-            );
+            eprintln!("{}", "Probing upstream model availability...".cyan().dim());
         }
-        Some(check_upstream_health(&client, upstream_url, api_key).await)
+        let health = check_upstream_health(&client, upstream_url, api_key).await;
+        let models = match &health {
+            Ok(_) => fetch_and_probe_models(&client, upstream_url, api_key, true).await,
+            Err(_) => Vec::new(),
+        };
+        // A completed explicit probe replaces the snapshot even when no model
+        // survived. Retaining a previous non-empty result after an outage or a
+        // provider catalog change would present stale availability as current.
+        if let Err(error) = write_model_probe_cache(&cache_path, upstream_url, &models) {
+            eprintln!("warning: {error}");
+        }
+        (models, Some(health))
     } else {
-        None
-    };
-
-    let probed = match &api_health {
-        Some(Ok(_)) => fetch_and_probe_models(&client, upstream_url, api_key, should_probe).await,
-        Some(Err(_)) | None => catalog_models_without_network(upstream_url),
+        let cached = read_model_probe_cache(&cache_path, upstream_url);
+        cache_hit = cached.is_some();
+        (cached.unwrap_or_default(), None)
     };
 
     let active_model = config.model.as_deref().unwrap_or("opencode/mimo-v2.5-free");
@@ -324,7 +374,8 @@ pub async fn cmd_list(args: ListArgs, fmt: OutputFormat) {
                 }
             }
 
-            let display_models: Vec<&ProbedModel> = if should_probe && !args.all {
+            let has_probe_results = should_probe || cache_hit;
+            let display_models: Vec<&ProbedModel> = if has_probe_results && !args.all {
                 probed
                     .iter()
                     .filter(|m| {
@@ -336,10 +387,10 @@ pub async fn cmd_list(args: ListArgs, fmt: OutputFormat) {
             };
 
             if display_models.is_empty() {
-                let message = if args.no_probe {
-                    "No local static catalog is available for this upstream."
-                } else if is_custom_upstream && !should_probe {
-                    "No models were discovered from the active API provider."
+                let message = if !should_probe && !cache_hit {
+                    "No cached probe result for this upstream. Run `opencode2api provider models --probe` to check live availability."
+                } else if all_models_rejected_for_auth(&probed) {
+                    "Upstream credential was rejected for every curated model. Reconfigure the provider/key before retrying."
                 } else {
                     "No online models currently available on upstream endpoint."
                 };
@@ -359,7 +410,7 @@ pub async fn cmd_list(args: ListArgs, fmt: OutputFormat) {
                     "MAX OUT",
                     "THINKING",
                 ];
-                if should_probe {
+                if has_probe_results {
                     headers.push("STATUS");
                     headers.push("LATENCY");
                 }
@@ -427,7 +478,7 @@ pub async fn cmd_list(args: ListArgs, fmt: OutputFormat) {
             }
 
             println!("  {} Active model is marked with `*`", "ℹ".cyan().dim());
-            if should_probe {
+            if has_probe_results {
                 let online_count = probed
                     .iter()
                     .filter(|m| m.status == ModelStatus::Online)
@@ -439,7 +490,14 @@ pub async fn cmd_list(args: ListArgs, fmt: OutputFormat) {
                 let total_count = probed.len();
                 let dead_count = total_count.saturating_sub(online_count + busy_count);
 
-                if !args.all && dead_count > 0 {
+                if all_models_rejected_for_auth(&probed) {
+                    println!(
+                        "  {} {}/{} curated models usable (upstream credential rejected)",
+                        "ℹ".cyan().dim(),
+                        online_count + busy_count,
+                        total_count
+                    );
+                } else if !args.all && dead_count > 0 {
                     println!(
                         "  {} {}/{} models usable ({} dead/restricted hidden - use `--all` to view all)",
                         "ℹ".cyan().dim(),
@@ -455,14 +513,15 @@ pub async fn cmd_list(args: ListArgs, fmt: OutputFormat) {
                         total_count
                     );
                 }
-            } else if args.no_probe {
+            }
+            if !should_probe && cache_hit {
                 println!(
-                    "  {} Offline catalog mode: no upstream network requests were sent",
+                    "  {} Using cached probe snapshot; no upstream network requests were sent",
                     "ℹ".cyan().dim()
                 );
-            } else if is_custom_upstream {
+            } else if !should_probe {
                 println!(
-                    "  {} API model discovery completed; per-model completion probes were skipped (use --probe to run them)",
+                    "  {} Cached model availability only; no upstream network requests were sent",
                     "ℹ".cyan().dim()
                 );
             }
@@ -470,6 +529,76 @@ pub async fn cmd_list(args: ListArgs, fmt: OutputFormat) {
                 "  {} Use provider opencode/api to switch provider and model together\n",
                 "ℹ".cyan().dim()
             );
+
+            // ── OpenCode Free Models (always shown alongside custom API) ──
+            let is_opencode = crate::application::prober::is_opencode_upstream(upstream_url);
+            if !is_opencode {
+                use crate::application::models::FREE_MODELS;
+
+                println!("{}", "◆ OpenCode Free Models (opencode.ai/zen)".bold());
+                println!(
+                    "  {} {}\n",
+                    "Provider: https://opencode.ai/zen/v1".cyan().dim(),
+                    "[NO API KEY REQUIRED]".green().dim()
+                );
+
+                let mut oc_table = Table::new();
+                oc_table
+                    .load_preset(NOTHING)
+                    .set_content_arrangement(ContentArrangement::Dynamic)
+                    .set_width(presentation::content_width() as u16);
+
+                oc_table.set_header(
+                    ["MODEL ID", "CONTEXT", "MAX OUT", "THINKING", "TIER", "SWITCH COMMAND"]
+                        .into_iter()
+                        .map(|h| CtCell::new(h).fg(CtColor::Cyan)),
+                );
+
+                for m in FREE_MODELS {
+                    let clean_id = m.id.strip_prefix("opencode/").unwrap_or(m.id);
+                    let context_str = if m.context_window >= 1_000_000 {
+                        format!("{}M", m.context_window / 1_000_000)
+                    } else {
+                        format!("{}k", m.context_window / 1_000)
+                    };
+                    let max_out_str = format_number(m.max_output_tokens);
+                    let thinking_str = if m.supports_thinking {
+                        "✓ Yes".green().to_string()
+                    } else {
+                        "- No".dim().to_string()
+                    };
+                    let tier_str = if m.context_window >= 1_000_000 {
+                        "1M (Opus)".green().bold().to_string()
+                    } else {
+                        "Sub-1M (Sonnet)".to_string()
+                    };
+                    let cmd = format!("opencode2api provider opencode {}", clean_id);
+
+                    oc_table.add_row(vec![
+                        CtCell::new(format!("  {}", clean_id)),
+                        CtCell::new(context_str),
+                        CtCell::new(max_out_str),
+                        CtCell::new(thinking_str),
+                        CtCell::new(tier_str),
+                        CtCell::new(cmd).fg(CtColor::DarkGrey),
+                    ]);
+                }
+                println!("{oc_table}\n");
+
+                let one_m_count = FREE_MODELS.iter().filter(|m| m.context_window >= 1_000_000).count();
+                let sub_m_count = FREE_MODELS.len() - one_m_count;
+                println!(
+                    "  {} {} free models ({} × 1M context, {} × sub-1M)",
+                    "ℹ".cyan().dim(),
+                    FREE_MODELS.len(),
+                    one_m_count,
+                    sub_m_count
+                );
+                println!(
+                    "  {} Switch to OpenCode: opencode2api provider opencode <MODEL>\n",
+                    "ℹ".cyan().dim()
+                );
+            }
         }
     }
 }
@@ -1060,6 +1189,73 @@ mod persistence_tests {
                 0o600
             );
         }
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provider_switch_and_reset_clear_the_multi_key_pool() {
+        let root = temp_dir("clear-multi-key");
+        let config = root.join("opencode2api.toml");
+        let env = root.join(".env");
+        std::fs::write(
+            &config,
+            "upstream_base_url = \"https://old.example/v1\"\nupstream_api_keys = [\"OLD_SECRET_A\", \"OLD_SECRET_B\"]\nmodel = \"keep-me\"\n",
+        )
+        .unwrap();
+        std::fs::write(&env, "OTHER=keep\n").unwrap();
+
+        // Switching provider clears the TOML-only credential pool as well as
+        // the singular key, so stale credentials cannot leak to a new upstream.
+
+        apply_upstream_configuration_at(&config, &env, Some("https://new.example/v1"), None, None)
+            .unwrap();
+
+        let config_text = std::fs::read_to_string(&config).unwrap();
+        assert!(config_text.contains("model = \"keep-me\""));
+        assert!(!config_text.contains("upstream_api_keys"));
+        assert!(!config_text.contains("OLD_SECRET_A"));
+        assert!(!config_text.contains("OLD_SECRET_B"));
+
+        // Resetting the provider must also clear any remaining pool entries..
+        apply_upstream_configuration_at(&config, &env, None, None, None).unwrap();
+
+        let config_text = std::fs::read_to_string(&config).unwrap();
+        assert!(!config_text.contains("upstream_api_keys"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn model_probe_cache_round_trips_only_for_its_upstream() {
+        let root = temp_dir("model-probe-cache");
+        let cache = root.join("model-probe-cache.json");
+        let models = vec![ProbedModel {
+            id: "deepseek-v4-flash".to_string(),
+            label: "DeepSeek V4 Flash".to_string(),
+            provider: "b.ai".to_string(),
+            context_window: 1_000_000,
+            auto_compact_window: 800_000,
+            max_output_tokens: 384_000,
+            supports_thinking: true,
+            status: ModelStatus::Online,
+            latency_ms: Some(42),
+            error: None,
+        }];
+
+        write_model_probe_cache(&cache, "https://api.b.ai/v1", &models).unwrap();
+
+        assert_eq!(
+            read_model_probe_cache(&cache, "https://api.b.ai/v1").unwrap(),
+            models
+        );
+        assert!(read_model_probe_cache(&cache, "https://opencode.ai/zen/v1").is_none());
+
+        write_model_probe_cache(&cache, "https://api.b.ai/v1", &[]).unwrap();
+        assert_eq!(
+            read_model_probe_cache(&cache, "https://api.b.ai/v1").unwrap(),
+            Vec::<ProbedModel>::new()
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }

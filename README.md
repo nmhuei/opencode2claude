@@ -74,7 +74,8 @@ OpenCode2API now has one provider namespace for both supported source types.
 opencode2api provider opencode
 opencode2api provider opencode mimo-v2.5-free
 opencode2api provider status
-opencode2api provider models
+opencode2api provider models --probe  # live Zen free-tier check + refresh cache
+opencode2api provider models          # show last cached probe result; no network
 ~~~
 
 **2. Custom OpenAI-compatible API mode**
@@ -84,8 +85,8 @@ printf '%s\n' "$OPENCODE_UPSTREAM_API_KEY" | \
   opencode2api provider api https://api.example/v1 deepseek-v4-flash --api-key-stdin
 
 opencode2api provider api http://127.0.0.1:8000/v1 deepseek-v4-flash
-opencode2api provider models
-opencode2api provider models --probe
+opencode2api provider models --probe  # live b.ai/custom API check + refresh cache
+opencode2api provider models          # show last cached probe result; no network
 ~~~
 
 The legacy list, model, and upstream namespaces remain accepted for scripts but are hidden from the main help.
@@ -95,6 +96,7 @@ The legacy list, model, and upstream namespaces remain accepted for scripts but 
 | deepseek-v4-flash | 1,000,000 | 800,000 | 384,000 | provider-defined | Free (0 Credits) |
 | deepseek-v4-flash-vision-exp | 1,000,000 | 800,000 | 384,000 | provider-defined | Free (0 Credits) |
 | glm-5.3-flash | 1,000,000 | 800,000 | 131,072 | 65,536 | Free (0 Credits) |
+| qwen3.8-flash | 128,000 | 102,400 | 16,384 | provider-defined | Free (0 Credits) |
 
 Advanced deployments may still set OPENCODE_UPSTREAM_BASE_URL, OPENCODE_UPSTREAM_API_KEY, OPENCODE_MODEL, and OPENCODE_MODEL_FALLBACKS directly through environment/TOML.
 

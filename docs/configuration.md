@@ -28,10 +28,11 @@ opencode2api init --output opencode2api.toml
 | `OPENCODE_MODEL` | `model` | `claude-3-5-sonnet` | Default upstream model identifier. |
 | `OPENCODE_UPSTREAM_BASE_URL` | `upstream_base_url` | `https://opencode.ai/zen/v1` | OpenAI-compatible upstream base URL. |
 | `OPENCODE_UPSTREAM_API_KEY` | `upstream_api_key` | unset | Bearer credential for an external OpenAI-compatible upstream. Stored as a secret. |
+| — | `upstream_api_keys` | empty | TOML-only comma-separated string or array of Bearer credentials. Requests rotate across the list; `upstream_api_key`, when set, is tried first and deduplicated from the list. |
 
 `BRIDGE_UPSTREAM_BASE_URL` and `BRIDGE_UPSTREAM_API_KEY` are accepted as compatibility aliases. Prefer the `OPENCODE_*` names in new deployments.
 
-Upstream Bearer credentials are sent only over HTTPS, except for loopback HTTP endpoints (localhost, 127.0.0.1, ::1). Secret values are intentionally not accepted as ordinary CLI arguments. Prefer opencode2api provider opencode [MODEL] for OpenCode Zen or pipe a key to opencode2api provider api <URL> <MODEL> --api-key-stdin for a custom API. A one-off legacy --upstream-base-url override never inherits a stored key from another provider.
+Upstream Bearer credentials are sent only over HTTPS, except for loopback HTTP endpoints (localhost, 127.0.0.1, ::1). Secret values are intentionally not accepted as ordinary CLI arguments. Prefer opencode2api provider opencode [MODEL] for OpenCode Zen or pipe a key to opencode2api provider api <URL> <MODEL> --api-key-stdin for a custom API. A one-off legacy --upstream-base-url override never inherits a stored key from another provider. Use `upstream_api_keys` in TOML to rotate several credentials; a 429 retries the next configured key before normal model fallback.
 
 
 ### Curated custom-API model profiles
@@ -41,6 +42,7 @@ Upstream Bearer credentials are sent only over HTTPS, except for loopback HTTP e
 | deepseek-v4-flash | 1,000,000 | 800,000 | 384,000 | provider-defined | Free (0 Credits) |
 | deepseek-v4-flash-vision-exp | 1,000,000 | 800,000 | 384,000 | provider-defined | Free (0 Credits) |
 | glm-5.3-flash | 1,000,000 | 800,000 | 131,072 | 65,536 | Free (0 Credits) |
+| qwen3.8-flash | 128,000 | 102,400 | 16,384 | provider-defined | Free (0 Credits) |
 
 These exact profiles are applied to Claude Code environment tuning and to model discovery output when the API exposes the matching IDs.
 

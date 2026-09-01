@@ -62,6 +62,8 @@ pub struct AppState {
     pub event_tx: broadcast::Sender<DashboardEvent>,
     /// Unix timestamp (seconds) when the server started.
     pub started_at: Arc<AtomicU64>,
+    /// Shared atomic round-robin index for upstream API keys.
+    pub upstream_key_index: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Upper bound on the TCP/TLS connect phase of the shared HTTP client.
@@ -295,6 +297,7 @@ impl AppState {
             shell_delegations: Arc::new(ShellDelegations::new()),
             event_tx,
             started_at,
+            upstream_key_index: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 }

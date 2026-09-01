@@ -50,9 +50,9 @@ impl FreeModel {
             max_output_tokens: self.max_output_tokens,
             supports_thinking: self.supports_thinking,
             anthropic_alias: if self.context_window >= 1_000_000 {
-                "opus[1m]"
-            } else {
                 "claude-opus-5"
+            } else {
+                "claude-sonnet-5"
             },
         }
     }
@@ -99,8 +99,8 @@ pub const FREE_MODELS: &[FreeModel] = &[
         protocol: "openai_chat_completions",
         limited_time: true,
         privacy_notice: "Free-period prompts may be retained and used to improve the model.",
-        context_window: 128_000,
-        max_output_tokens: 16_384,
+        context_window: 1_000_000,
+        max_output_tokens: 384_000,
         supports_thinking: true,
     },
     FreeModel {
@@ -191,7 +191,7 @@ pub const API_MODEL_PROFILES: &[ModelProfile] = &[
         context_window: 1_000_000,
         max_output_tokens: 384_000,
         supports_thinking: true,
-        anthropic_alias: "deepseek-v4-flash",
+        anthropic_alias: "claude-opus-5",
     },
     ModelProfile {
         id: "deepseek-v4-flash-vision-exp",
@@ -200,7 +200,7 @@ pub const API_MODEL_PROFILES: &[ModelProfile] = &[
         context_window: 1_000_000,
         max_output_tokens: 384_000,
         supports_thinking: true,
-        anthropic_alias: "deepseek-v4-flash-vision-exp",
+        anthropic_alias: "claude-opus-5",
     },
     ModelProfile {
         id: "glm-5.3-flash",
@@ -209,17 +209,27 @@ pub const API_MODEL_PROFILES: &[ModelProfile] = &[
         context_window: 1_000_000,
         max_output_tokens: 131_072,
         supports_thinking: true,
-        anthropic_alias: "glm-5.3-flash",
+        anthropic_alias: "claude-opus-5",
+    },
+    ModelProfile {
+        id: "qwen3.8-flash",
+        label: "Qwen 3.8 Flash",
+        provider: "b.ai API",
+        context_window: 128_000,
+        max_output_tokens: 16_384,
+        supports_thinking: true,
+        anthropic_alias: "claude-sonnet-5",
     },
 ];
 pub fn model_pricing(model: &str) -> &'static str {
     let clean = model.strip_prefix("opencode/").unwrap_or(model);
-    if API_MODEL_PROFILES.iter().any(|profile| profile.id == clean) {
-        "Free (0 Credits)"
-    } else if is_supported_free_model(model) {
-        "Free tier"
-    } else {
-        "Provider-defined"
+    match clean {
+        "deepseek-v4-flash" | "deepseek-v4-flash-vision-exp" | "glm-5.3-flash" => {
+            "Free (0 Credits)"
+        }
+        "qwen3.8-flash" => "Free (0 Credits)",
+        _ if is_supported_free_model(model) => "Free tier",
+        _ => "Provider-defined",
     }
 }
 
@@ -274,7 +284,7 @@ pub fn resolve_model_profile(model: &str) -> ModelProfile {
             context_window: 1_000_000,
             max_output_tokens: 64_000,
             supports_thinking: true,
-            anthropic_alias: "opus[1m]",
+            anthropic_alias: "claude-opus-5",
         }
     } else if lower.contains("claude") {
         ModelProfile {
@@ -306,6 +316,16 @@ pub fn resolve_model_profile(model: &str) -> ModelProfile {
             supports_thinking: true,
             anthropic_alias: "claude-opus-5",
         }
+    } else if lower.contains("gpt-5.2") {
+        ModelProfile {
+            id: "gpt-5.2",
+            label: "GPT-5.2",
+            provider: "OpenAI",
+            context_window: 400_000,
+            max_output_tokens: 128_000,
+            supports_thinking: true,
+            anthropic_alias: "claude-sonnet-5",
+        }
     } else if lower.contains("qwen") {
         ModelProfile {
             id: "qwen3.8-flash",
@@ -314,7 +334,7 @@ pub fn resolve_model_profile(model: &str) -> ModelProfile {
             context_window: 128_000,
             max_output_tokens: 16_384,
             supports_thinking: true,
-            anthropic_alias: "claude-opus-5",
+            anthropic_alias: "claude-sonnet-5",
         }
     } else if lower.contains("mimo") {
         ModelProfile {
@@ -324,7 +344,7 @@ pub fn resolve_model_profile(model: &str) -> ModelProfile {
             context_window: 256_000,
             max_output_tokens: 64_000,
             supports_thinking: true,
-            anthropic_alias: "claude-opus-5",
+            anthropic_alias: "claude-sonnet-5",
         }
     } else {
         ModelProfile {
@@ -334,7 +354,7 @@ pub fn resolve_model_profile(model: &str) -> ModelProfile {
             context_window: 128_000,
             max_output_tokens: 16_384,
             supports_thinking: false,
-            anthropic_alias: "claude-opus-5",
+            anthropic_alias: "claude-sonnet-5",
         }
     }
 }
@@ -385,6 +405,11 @@ mod tests {
         assert_eq!(nemotron.auto_compact_window(), 102_400);
         assert!(nemotron.supports_thinking);
 
+        let deepseek_free = resolve_model_profile("opencode/deepseek-v4-flash-free");
+        assert_eq!(deepseek_free.context_window, 1_000_000);
+        assert_eq!(deepseek_free.max_output_tokens, 384_000);
+        assert_eq!(deepseek_free.auto_compact_window(), 800_000);
+
         let deepseek = resolve_model_profile("deepseek-v4-flash");
         assert_eq!(deepseek.context_window, 1_000_000);
         assert_eq!(deepseek.max_output_tokens, 384_000);
@@ -400,13 +425,37 @@ mod tests {
         assert_eq!(glm.max_output_tokens, 131_072);
         assert_eq!(glm.auto_compact_window(), 800_000);
 
+        let qwen = resolve_model_profile("qwen3.8-flash");
+        assert_eq!(qwen.context_window, 128_000);
+        assert_eq!(qwen.max_output_tokens, 16_384);
+        assert_eq!(qwen.auto_compact_window(), 102_400);
+
         assert_eq!(model_pricing("deepseek-v4-flash"), "Free (0 Credits)");
         assert_eq!(model_pricing("glm-5.3-flash"), "Free (0 Credits)");
+        assert_eq!(model_pricing("qwen3.8-flash"), "Free (0 Credits)");
         assert_eq!(model_default_output_tokens("glm-5.3-flash"), Some(65_536));
         assert_eq!(model_default_output_tokens("deepseek-v4-flash"), None);
 
         let unknown = resolve_model_profile("unknown-custom-model");
         assert_eq!(unknown.context_window, 128_000);
         assert_eq!(unknown.auto_compact_window(), 102_400);
+    }
+
+    #[test]
+    fn b_ai_curated_profiles_are_exactly_the_supported_four_models() {
+        let ids = API_MODEL_PROFILES
+            .iter()
+            .map(|profile| profile.id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec![
+                "deepseek-v4-flash",
+                "deepseek-v4-flash-vision-exp",
+                "glm-5.3-flash",
+                "qwen3.8-flash",
+            ]
+        );
+        assert_eq!(model_pricing("qwen3.8-flash"), "Free (0 Credits)");
     }
 }

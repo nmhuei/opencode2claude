@@ -761,6 +761,7 @@ pub(super) fn cmd_print_env(config: &BridgeConfig) {
         "compatibility key; authentication disabled"
     };
     let base_url = claude_code_base_url(config);
+    let profile = crate::application::models::resolve_model_profile(&model);
     let mut rows = vec![
         ("ANTHROPIC_API_KEY", api_key_status.to_string()),
         ("ANTHROPIC_BASE_URL", base_url.clone().cyan().to_string()),
@@ -769,6 +770,7 @@ pub(super) fn cmd_print_env(config: &BridgeConfig) {
             "OPENAI_BASE_URL",
             format!("{base_url}/v1").cyan().to_string(),
         ),
+        ("ANTHROPIC_MODEL", profile.anthropic_alias.to_string()),
         ("OPENCODE_MODEL", model.clone()),
     ];
     if model == crate::application::integration::OX_ALPHA_MODEL {

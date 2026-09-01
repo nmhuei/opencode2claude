@@ -56,16 +56,37 @@ pub(super) fn build_model_retry_list(
         .filter(|model| !model.is_empty())
         .collect::<Vec<_>>();
 
+    let starting_profile = crate::application::models::resolve_model_profile(model);
+    let is_1m = starting_profile.context_window >= 1_000_000;
+
     let mut models = vec![model.to_string()];
     if configured.is_empty() {
-        if retry.default_fallbacks_enabled
-            && !(stream && is_reasoning_heavy_model(model))
-            && (model.contains("deepseek-v4-flash-free") || model.contains("nemotron-3-ultra-free"))
-        {
-            models.extend([
-                "deepseek-v4-flash-free".to_string(),
-                "nemotron-3-ultra-free".to_string(),
-            ]);
+        if retry.default_fallbacks_enabled && !(stream && is_reasoning_heavy_model(model)) {
+            if is_1m {
+                if model != "deepseek-v4-flash-free" {
+                    models.push("deepseek-v4-flash-free".to_string());
+                }
+            } else if model.contains("deepseek-v4-flash-free")
+                || model.contains("nemotron-3-ultra-free")
+            {
+                models.extend([
+                    "deepseek-v4-flash-free".to_string(),
+                    "nemotron-3-ultra-free".to_string(),
+                ]);
+            }
+        }
+    } else if is_1m {
+        let filtered_1m: Vec<_> = configured
+            .iter()
+            .filter(|m| {
+                crate::application::models::resolve_model_profile(m).context_window >= 1_000_000
+            })
+            .cloned()
+            .collect();
+        if !filtered_1m.is_empty() {
+            models.extend(filtered_1m);
+        } else {
+            models.extend(configured);
         }
     } else {
         models.extend(configured);

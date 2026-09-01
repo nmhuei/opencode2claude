@@ -4114,3 +4114,113 @@ The harness used only isolated loopback stub/side-bridge processes and left prod
 - Note: `CARGO_TARGET_DIR=/home/light/Downloads/` in this environment — `./target/` holds a stale
   Aug-26 binary; always run the binary from `$CARGO_TARGET_DIR/debug/`.
 - Production bridge on :4000 NOT restarted; CLI/serve deployment pending the full-PTY matrix gate.
+
+## 2026-09-01 11:35 +0700 — Audit/fix new multi-key upstream work and remove orphaned parallel runtime
+
+**Scope and safety**
+
+- Audited all commits and working-tree source introduced on 2026-09-01 on `refactor/clean-architecture` at `265a16e`; preserved existing changes, did not stage or commit, and did not contact an external upstream.
+- Production `:4000` was not restarted, installed, or redeployed. The live-WARP identity test remained intentionally ignored because it requires local WARP SOCKS proxies and Internet access.
+
+**Verified fixes**
+
+- Retained multi-key upstream support in the existing production configuration/retry path (`src/config/{file,loader,types}.rs`, `src/state.rs`, `src/opencode/retry/execute/mod.rs`): TOML `upstream_api_keys` accepts CSV or arrays, trims/deduplicates entries, and preserves `upstream_api_key` as the first key when present.
+- Fixed ordinary request rotation: each production request reserves one atomic key-pool slot, while a 429 advances only within that request to the next configured key before model fallback. This prevents all successful traffic from permanently using the first credential.
+- Removed an unconfigured hard 4-second rate-limit retry cap. Rate-limit retries now honor the existing configured `base_backoff`/`max_backoff`; provider `Retry-After` values above the configured maximum still fail fast through the existing guard.
+- Added production-router regression coverage in `tests/fallback_api_opencode_matrix.rs` for successful key rotation, 429 key failover, and configured rate-limit backoff. Added a hermetic config regression for list normalization and single-key precedence.
+- Removed an unregistered duplicate `src/proxy_pool/maintenance/` directory split after confirming every implementation/test symbol duplicated the active `src/proxy_pool/maintenance.rs`; the active module remains the single compiled/tested source of truth.
+- Removed the standalone `gateway`/`provider`/`models`/runtime-engine/demo experiment because it was not composed by `src/server/routes.rs`, duplicated the established handlers/retry/SSE pipeline, and did not implement streaming. Restored `src/runtime.rs` to its runtime-path responsibility.
+- Updated `docs/configuration.md` and `src/init.rs` with the TOML-only multi-key configuration contract. No credential values were recorded.
+
+**Fresh verification evidence**
+
+```text
+cargo fmt --all -- --check                                      PASS
+git diff --check                                                PASS
+cargo clippy --all-targets --all-features -- -D warnings       PASS
+cargo test --all-targets --locked                               PASS
+  lib: 907 passed / 0 failed
+  fast integration: 87 passed / 0 failed
+  integration: 18 passed / 0 failed
+  protocol conformance: 46 passed / 0 failed
+  parser fuzz: 2 passed / 0 failed
+  live-WARP identity: 1 ignored (environment-required)
+cargo build --release --locked --bins                           PASS
+python3 scripts/check_{docs,feature_matrix,config_boundary,
+  infrastructure_boundary,version_consistency}.py              PASS
+```
+
+## 2026-09-01 12:05 +0700 — Second-wave logic audit of the multi-key work (independent review fan-out)
+
+**Scope and safety**
+
+- Four independent read-only reviewers audited today's multi-key/model-catalog changes against the existing sources of truth; every finding below was reproduced RED before being fixed. Production `:4000` untouched; nothing staged/committed.
+
+**Fixes (each RED → GREEN at the production boundary)**
+
+- HTTP 400 body-encoded rate limits now rotate to the next configured key before consuming the model-fallback/retry budget, mirroring the HTTP 429 path (`src/opencode/retry/execute/mod.rs`). Reproduced with a 400 `"rate limit exceeded"` upstream fixture: previously `[key-one, key-one]`, now `[key-one, key-two]`.
+- Key rotation on 429/400 retains the selected egress route (`retained_rate_limit_route = Some(route)`) instead of re-selecting — a provider quota hit must not advance the proxy pool round-robin.
+- `src/management/config_apply.rs`: added `upstream_api_keys` to `KNOWN_ROOT_KEYS`. Previously dashboard/REST config preview/save rejected the documented TOML key (and an existing pool blocked unrelated updates) with `unknown_config_keys`.
+- `src/app/models.rs`: `apply_upstream_configuration_at` now also removes `upstream_api_keys` when switching providers or resetting, so stale pool credentials cannot leak to a new upstream.
+- `src/application/models.rs`: narrowed the GPT-5 fallback matcher from `contains("gpt-5")` (which misassigned the curated GPT-5.2 profile/400k context to any GPT-5-family ID, e.g. `gpt-5.6-sol`) to `contains("gpt-5.2")` only.
+- `src/config/tests.rs`: multi-key config test now uses a process-unique temp path (cross-process cargo runs previously raced on a fixed filename).
+- Retry rotation delay extracted to named `KEY_ROTATION_BACKOFF_MS` with rationale (provider Retry-After belongs to the abandoned key).
+
+**Regression coverage added**
+
+- `tests/fallback_api_opencode_matrix.rs::body_encoded_rate_limit_retries_with_the_next_configured_upstream_api_key`
+- `src/management/config_apply.rs::upstream_api_keys_are_accepted_by_config_management`
+- `src/app/models.rs::provider_switch_and_reset_clear_the_multi_key_pool`
+- `src/application/models.rs::gpt_family_fallback_does_not_misclassify_other_gpt_5_models`
+
+**Verification (fail-fast gate, every step chained with `&&`)**
+
+```text
+cargo fmt --all -- --check + git diff --check      PASS (STEP1)
+cargo clippy --all-targets --all-features -D warn  PASS (STEP2)
+cargo test --all-targets --locked                  PASS (STEP3)
+  lib: 910 passed / 0 failed (+3 new unit tests)
+  fallback matrix: 11 passed (incl. new 400 rotation)
+  fast integration: 87 passed / 0 failed
+  integration: 18 passed / 0 failed
+  protocol conformance: 46 passed / 0 failed
+  parser fuzz: 2 passed / 0 failed
+  retry/stream gates: 1 + 2 passed
+  live-WARP identity: 1 ignored (environment-required)
+cargo build --release --locked --bins              PASS (STEP4, 3m24s)
+docs/feature-matrix/config-boundary/infra-boundary/
+  version-consistency                              PASS (STEP5)
+```
+
+## 2026-09-01 16:10 +0700 — Real Claude Code CLI E2E verification (isolated bridge)
+
+- Added `tests/claude_code_e2e.py`, a hermetic real-client gate using the actual `claude` executable, an isolated `opencode2api-serve` process built from the current working tree, and a loopback SSE upstream stub. It allocates random ports and a temporary runtime/config directory, so production `:4000`, Docker/WARP, persisted service config, and external upstreams are untouched.
+- Actual CLI run: `claude` v2.1.252; bridge executable `/home/light/Downloads/debug/opencode2api-serve`.
+- `plain_stream`: CLI exit 0, one turn, final result `E2E_REAL_OK`.
+- `tool_loop`: CLI exit 0, two turns, final result `TOOL_RESULT_ACCEPTED`; the stub evidence confirms the real CLI executed the offered Bash tool and returned a tool result through the bridge/upstream continuation.
+- Multi-key proof: the stub rejected `Bearer e2e-key-one` with 429 on every first attempt. It observed four immediate `key-one -> key-two` transitions; `key-two` completed with 200 and `key-one` never received a 200. The real CLI saw no rate-limit error.
+- Run result: `python3 tests/claude_code_e2e.py` exit 0. Evidence retained under `artifacts/claude-code-e2e/{summary.json,stub-requests.jsonl,bridge.log,raw/}`; no raw production credential is present (the keys are test-only literals).
+
+## 2026-09-01 16:40 +0700 — Curated live model listing and credential diagnosis
+
+- Reproduced `opencode2api list`: public Zen `/models` returned HTTP 200 with 63 IDs, while the old list path probed 66 stale/free/premium/trial candidates and hid all as unavailable.
+- Live evidence: the currently configured upstream credential was rejected with `Invalid API key.` by all completion probes. An unauthenticated completion probe returned `401 Missing API key.`; therefore the public `/models` health response is not proof that a model is usable for the configured credential.
+- Changed `src/application/prober.rs` so Zen listing takes candidates from live `/models` and keeps only curated `deepseek-*`, `glm-*`, and `qwen*` families. Premium/trial clutter (Claude/GPT/Gemini/MiniMax/Kimi/etc.) is not probed or listed. Static fallback remains curated-only.
+- Added explicit auth-rejection detection and corrected the human output: it now says the upstream credential was rejected for every curated model, rather than claiming ambiguous `0/66 dead/restricted` models.
+- Installed fresh release binaries through `./install-local.sh` without restarting the production bridge. Installed `opencode2api list` now reports `0/8 curated models usable (upstream credential rejected)`, which matches the direct completion-probe evidence.
+- Verification: prober unit tests 6/6 PASS, `cargo build --release --locked --bins` PASS, `git diff --check` PASS, installed CLI list command PASS (exit 0). Production `:4000` was not restarted.
+
+## 2026-09-01 17:05 +0700 — Provider-specific model listing policy
+
+- Replaced the shared DeepSeek/GLM/Qwen Zen filter with provider-specific discovery. Zen `/models` has only `id`/`owned_by` metadata, so free-model auto-detection uses live IDs ending in `-free` plus `big-pickle`; it does not list paid DeepSeek/GLM/Qwen entries merely because they share a model family.
+- b.ai is now explicitly constrained to exactly four curated API IDs when its authenticated `/models` endpoint is available: `deepseek-v4-flash`, `deepseek-v4-flash-vision-exp`, `glm-5.3-flash`, and `qwen3.8-flash`. Removed GPT-5.2 from the curated API profile/catalog and fallback fixture, and added Qwen 3.8 metadata/documentation.
+- Live Zen verification after install: 8 free IDs detected from the current `/models` response (`big-pickle`, `deepseek-v4-flash-free`, contributor/free MiMo/Ling/Nemotron/Laguna IDs); no GPT/Claude/Gemini/paid DeepSeek/GLM/Qwen IDs appear. b.ai `/models` correctly returns 401 without an API key, so its availability was not claimed without a valid credential.
+- Verification: b.ai exact-profile regression 1/1, provider-policy prober tests 6/6, fallback matrix 11/11, clippy -D warnings, release build/install, installed Zen auto-detect, docs and feature-matrix checks all PASS. Production `:4000` unchanged.
+
+## 2026-09-01 17:40 +0700 — Explicit live model probe cache
+
+- Changed `provider models` and legacy `list` semantics: normal invocation is cache-only and sends no upstream request. `provider models --probe` is the only command path that calls live `/models` discovery plus completion probes; after the run it atomically replaces `model-probe-cache.json` under the configured runtime directory.
+- Cache contains only upstream URL, probe timestamp, model metadata/status/latency/error; it never stores upstream credentials. A cache entry is accepted only for the exact same upstream URL. A completed empty probe overwrites a prior snapshot so stale usable models cannot survive an outage/catalog change.
+- Added cache round-trip/isolation/empty-overwrite regression. Loopback CLI E2E proved: cache miss normal list = 0 upstream requests; `--probe` = `/models`, `/models`, then completion probe; subsequent normal list returned the identical cached snapshot with no additional request.
+- Installed CLI UX now labels cache hits: `Using cached probe snapshot; no upstream network requests were sent`. Cache misses direct the operator to `provider models --probe`.
+- Verification: cache regression PASS, fmt/diff-check PASS, clippy -D warnings PASS, release build/install PASS, installed `list --probe` then `list` contract PASS, docs and feature-matrix checks PASS. Production `:4000` unchanged.

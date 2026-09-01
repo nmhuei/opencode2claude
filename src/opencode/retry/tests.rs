@@ -144,3 +144,23 @@ fn provider_retry_after_is_clamped_for_instant_arithmetic_safety() {
         Duration::from_secs(47_897)
     );
 }
+
+#[test]
+fn one_million_model_never_falls_back_to_sub_one_million_model() {
+    let mut retry = retry_config();
+    retry.model_fallbacks = vec![
+        "deepseek-v4-flash".to_string(),
+        "qwen3.8-flash".to_string(), // 128k model
+        "deepseek-v4-flash-vision-exp".to_string(),
+    ];
+    let models = build_model_retry_list("glm-5.3-flash", false, &retry, false);
+    assert_eq!(
+        models,
+        vec![
+            "glm-5.3-flash".to_string(),
+            "deepseek-v4-flash".to_string(),
+            "deepseek-v4-flash-vision-exp".to_string(),
+        ]
+    );
+    assert!(!models.contains(&"qwen3.8-flash".to_string()));
+}

@@ -107,6 +107,26 @@ opencode2api doctor
 
 `env` emits the Claude Code integration variables derived from resolved configuration. `doctor` evaluates configuration, port, runtime, Docker/proxy requirements, and other dependencies appropriate to the selected egress mode. Docker is not treated as required in direct mode.
 
+## Provider model availability cache
+
+```bash
+opencode2api provider models --probe  # run live discovery/completion probes and refresh cache
+opencode2api provider models          # read the last cached probe result only
+opencode2api list                     # legacy alias for the cached result
+```
+
+Normal model-list commands never contact an upstream. Only `--probe` performs
+live `/models` discovery and completion checks, then atomically replaces
+`model-probe-cache.json` in the configured runtime directory. The cache is
+bound to the exact upstream base URL; changing provider does not reuse another
+provider's result. If no snapshot exists, run `provider models --probe`.
+
+For OpenCode Zen, the live catalog is filtered to currently advertised free
+IDs (`*-free` plus `big-pickle`). For `api.b.ai`, listing is deliberately
+limited to `deepseek-v4-flash`, `deepseek-v4-flash-vision-exp`,
+`glm-5.3-flash`, and `qwen3.8-flash` when the authenticated provider catalog
+contains them.
+
 
 ## API keys
 

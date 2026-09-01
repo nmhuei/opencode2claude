@@ -47,6 +47,7 @@ const KNOWN_ROOT_KEYS: &[&str] = &[
     "max_sync_response_bytes",
     "upstream_base_url",
     "upstream_api_key",
+    "upstream_api_keys",
     "model_fallbacks",
     "enable_default_fallbacks",
     "max_network_attempts",
@@ -500,6 +501,22 @@ mod tests {
                 .code,
             "invalid_shell_policy"
         );
+    }
+
+    #[test]
+    fn upstream_api_keys_are_accepted_by_config_management() {
+        let store = Arc::new(MemoryStore::default());
+        *store.bytes.lock().unwrap() =
+            Some(b"upstream_api_keys = [\"key-a\", \"key-b\"]\n".to_vec());
+        let state = state(store);
+
+        // An unrelated management update must not be blocked by an existing pool.
+        let plan = preview_config(&state, "model = \"new\"\n").unwrap();
+        assert_eq!(plan.changed_keys, vec!["model"]);
+
+        // Submitting the pool key itself is valid.
+        let plan = preview_config(&state, "upstream_api_keys = [\"key-c\"]\n").unwrap();
+        assert!(plan.changed_keys.contains(&"upstream_api_keys".to_string()));
     }
 
     #[test]

@@ -89,7 +89,30 @@ pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
         .config_path
         .clone()
         .or_else(|| env_string("BRIDGE_CONFIG_PATH"))
-        .unwrap_or_else(|| "opencode2api.toml".to_string());
+        .unwrap_or_else(|| {
+            let local = std::path::Path::new("opencode2api.toml");
+            if local.exists() {
+                "opencode2api.toml".to_string()
+            } else if !cfg!(test) {
+                if let Some(home) = ambient_home() {
+                    let home_buf = std::path::PathBuf::from(home);
+                    let home_path = home_buf.join("opencode2api.toml");
+                    if home_path.exists() {
+                        return home_path.to_string_lossy().to_string();
+                    }
+                    let dot_config = home_buf
+                        .join(".config")
+                        .join("opencode2api")
+                        .join("config.toml");
+                    if dot_config.exists() {
+                        return dot_config.to_string_lossy().to_string();
+                    }
+                }
+                "opencode2api.toml".to_string()
+            } else {
+                "opencode2api.toml".to_string()
+            }
+        });
     let file = TomlConfig::from_file(&config_path);
 
     resolved.host = resolve_host(
@@ -430,7 +453,7 @@ pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
         .unwrap_or_else(|| "https://opencode.ai/zen/v1".to_string())
         .trim_end_matches('/')
         .to_string();
-    resolved.retry.upstream_api_key = if overrides.clear_upstream_api_key {
+    let single_upstream_key = if overrides.clear_upstream_api_key {
         None
     } else {
         secret_option(
@@ -441,6 +464,28 @@ pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
                 .or_else(|| file.as_ref().and_then(|cfg| cfg.upstream_api_key.clone())),
         )
     };
+    let mut upstream_keys = Vec::new();
+    if !overrides.clear_upstream_api_key {
+        if let Some(list) = file.as_ref().and_then(|cfg| cfg.upstream_api_keys.clone()) {
+            for k in list.into_vec() {
+                if let Some(secret) = secret_option(Some(k)) {
+                    if !upstream_keys
+                        .iter()
+                        .any(|existing: &SecretString| existing.expose() == secret.expose())
+                    {
+                        upstream_keys.push(secret);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(ref single) = single_upstream_key {
+        upstream_keys.retain(|existing| existing.expose() != single.expose());
+        upstream_keys.insert(0, single.clone());
+    }
+    resolved.retry.upstream_api_key =
+        single_upstream_key.or_else(|| upstream_keys.first().cloned());
+    resolved.retry.upstream_api_keys = upstream_keys;
     resolved.retry.model_fallbacks = env_string("OPENCODE_MODEL_FALLBACKS")
         .map(|value| parse_csv(&value))
         .or_else(|| {

@@ -18,6 +18,8 @@ pub const LOG_FILE_NAME: &str = "opencode2api.log";
 pub const HISTORY_DIR_NAME: &str = "history";
 /// Request-history SQLite database name.
 pub const HISTORY_DATABASE_NAME: &str = "request-history.sqlite3";
+/// Last successful interactive model-probe snapshot (contains no credentials).
+pub const MODEL_PROBE_CACHE_NAME: &str = "model-probe-cache.json";
 
 /// Manages paths for runtime artifacts under `~/.opencode2api/`.
 #[derive(Debug, Clone)]
@@ -91,6 +93,11 @@ impl RuntimePaths {
     /// Path to the request-history SQLite database.
     pub fn history_database(&self) -> PathBuf {
         self.history_dir().join(HISTORY_DATABASE_NAME)
+    }
+
+    /// Path to the persisted result of the latest explicit `provider models --probe` run.
+    pub fn model_probe_cache(&self) -> PathBuf {
+        self.runtime_dir().join(MODEL_PROBE_CACHE_NAME)
     }
 
     /// Ensure `~/.opencode2api/` directory and all subdirectories exist.

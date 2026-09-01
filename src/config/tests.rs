@@ -858,6 +858,76 @@ upstream_api_key = "sk-toml-upstream-key"
 }
 
 #[test]
+fn upstream_api_key_list_is_trimmed_deduplicated_and_prefers_the_single_key() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let previous = [
+        (
+            "OPENCODE_UPSTREAM_API_KEY",
+            env::var("OPENCODE_UPSTREAM_API_KEY").ok(),
+        ),
+        (
+            "BRIDGE_UPSTREAM_API_KEY",
+            env::var("BRIDGE_UPSTREAM_API_KEY").ok(),
+        ),
+        (
+            "OPENCODE_UPSTREAM_BASE_URL",
+            env::var("OPENCODE_UPSTREAM_BASE_URL").ok(),
+        ),
+        (
+            "BRIDGE_UPSTREAM_BASE_URL",
+            env::var("BRIDGE_UPSTREAM_BASE_URL").ok(),
+        ),
+    ];
+    for (name, _) in &previous {
+        env::remove_var(name);
+    }
+    let tmp = std::env::temp_dir().join(format!(
+        "opencode2api_upstream_keys_test_{}.toml",
+        std::process::id()
+    ));
+    std::fs::write(
+        &tmp,
+        r#"
+upstream_api_key = "single-key"
+upstream_api_keys = [" list-key ", "single-key", "list-key", ""]
+"#,
+    )
+    .expect("write test config");
+
+    let config = BridgeConfig::from_env_and_cli(CliOverrides {
+        config_path: Some(tmp.to_string_lossy().to_string()),
+        ..Default::default()
+    });
+
+    assert_eq!(
+        config
+            .retry
+            .upstream_api_keys
+            .iter()
+            .map(SecretString::expose)
+            .collect::<Vec<_>>(),
+        vec!["single-key", "list-key"]
+    );
+    assert_eq!(
+        config
+            .retry
+            .upstream_api_key
+            .as_ref()
+            .map(SecretString::expose),
+        Some("single-key")
+    );
+
+    let _ = std::fs::remove_file(tmp);
+    for (name, value) in previous {
+        if let Some(value) = value {
+            env::set_var(name, value);
+        } else {
+            env::remove_var(name);
+        }
+    }
+}
+
+#[test]
 fn search_chain_budget_default_matches_search_policy() {
     let config = BridgeConfig::default();
     assert_eq!(

@@ -17,6 +17,12 @@ use std::net::IpAddr;
 use std::time::Duration;
 use tracing::{info, warn};
 
+/// Debounce between rotating to a different upstream credential after a
+/// rate-limit response. The provider Retry-After belongs to the abandoned
+/// key, so the next-key attempt proceeds quickly instead of inheriting an
+/// unrelated backoff.
+const KEY_ROTATION_BACKOFF_MS: u64 = 200;
+
 struct SelectedRoute {
     client: Client,
     proxy_url: Option<String>,
@@ -205,10 +211,16 @@ async fn execute_retryable_request<T: RetryableOpenAiRequest>(
 
     let mut model_index = 0usize;
     let mut retry_count = 0u32;
+    let mut key_attempts = 0usize;
     let mut compat_sanitize_rounds = 0u32;
     let mut last_failed_proxy = None;
     let mut retained_rate_limit_route: Option<SelectedRoute> = None;
     let mut compatible_request = request.clone();
+    let upstream_key_start = (!state.config.retry.upstream_api_keys.is_empty()).then(|| {
+        state
+            .upstream_key_index
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    });
 
     loop {
         let current_model = models
@@ -230,14 +242,22 @@ async fn execute_retryable_request<T: RetryableOpenAiRequest>(
             retained_rate_limit_route.take(),
         )
         .await?;
-        let upstream_api_key = state
-            .config
-            .retry
-            .upstream_api_key
-            .as_ref()
-            .map(|k| k.expose());
+
+        let keys = &state.config.retry.upstream_api_keys;
+        let attempt_api_key = if !keys.is_empty() {
+            let idx = (upstream_key_start.unwrap_or_default() + key_attempts) % keys.len();
+            Some(keys[idx].expose())
+        } else {
+            state
+                .config
+                .retry
+                .upstream_api_key
+                .as_ref()
+                .map(|k| k.expose())
+        };
+
         let result =
-            prepare_upstream_request(&route, &upstream_url, &attempt_request, upstream_api_key)
+            prepare_upstream_request(&route, &upstream_url, &attempt_request, attempt_api_key)
                 .send()
                 .await;
 
@@ -250,6 +270,18 @@ async fn execute_retryable_request<T: RetryableOpenAiRequest>(
                 }
 
                 if classify_status(status, None) == FailureClass::RateLimit {
+                    let key_count = state.config.retry.upstream_api_keys.len();
+                    if key_count > 1 && key_attempts + 1 < key_count {
+                        key_attempts += 1;
+                        // Rotation switches credentials, not egress: retain the
+                        // same route so a provider quota hit never re-selects
+                        // (and advances) the proxy pool round-robin.
+                        retained_rate_limit_route = Some(route);
+                        tokio::time::sleep(Duration::from_millis(KEY_ROTATION_BACKOFF_MS)).await;
+                        continue;
+                    }
+                    key_attempts = 0;
+
                     if advance_model(
                         state,
                         &models,
@@ -332,6 +364,19 @@ async fn execute_retryable_request<T: RetryableOpenAiRequest>(
                             body = %body_text.chars().take(200).collect::<String>(),
                             "upstream encoded a rate limit as HTTP 400"
                         );
+                        // A body-encoded rate limit is still a credential quota
+                        // signal: rotate to the next configured key before the
+                        // model-fallback / retry budget is consumed.
+                        let key_count = state.config.retry.upstream_api_keys.len();
+                        if key_count > 1 && key_attempts + 1 < key_count {
+                            key_attempts += 1;
+                            retained_rate_limit_route = Some(route);
+                            tokio::time::sleep(Duration::from_millis(KEY_ROTATION_BACKOFF_MS))
+                                .await;
+                            continue;
+                        }
+                        key_attempts = 0;
+
                         if advance_model(
                             state,
                             &models,
@@ -552,6 +597,7 @@ fn prepare_upstream_request<T: Serialize>(
     if let Some(real_ip) = route.upstream_real_ip.as_deref() {
         builder = builder.header("x-real-ip", real_ip);
     }
+    builder = builder.header("user-agent", "opencode/0.5.0");
     builder
 }
 

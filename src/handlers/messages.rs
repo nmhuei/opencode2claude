@@ -50,6 +50,11 @@ pub async fn handle_messages(
     }
 
     let model = match &client {
+        Some(client) if client.key_id == "system_claude_code" => resolve_anonymous_model(
+            state.config.model.as_deref(),
+            payload.model.as_deref(),
+            &state.config.retry.upstream_base_url,
+        ),
         Some(client) => client
             .policy
             .resolve_model(
@@ -58,7 +63,11 @@ pub async fn handle_messages(
                 DEFAULT_MODEL,
             )
             .map_err(policy_error)?,
-        None => resolve_anonymous_model(state.config.model.as_deref(), payload.model.as_deref()),
+        None => resolve_anonymous_model(
+            state.config.model.as_deref(),
+            payload.model.as_deref(),
+            &state.config.retry.upstream_base_url,
+        ),
     };
 
     // Shell-policy verdicts are decidable pre-admission: reject before queueing on the permit.
@@ -517,17 +526,84 @@ async fn acquire_rate_permit(
     }
 }
 
-/// Model selection for anonymous (auth-disabled) callers. Mirrors the
-/// authenticated `resolve_model` semantics: a configured global model wins,
-/// and blank/whitespace values count as unspecified instead of being
-/// forwarded upstream as a deterministic failure.
-fn resolve_anonymous_model(configured: Option<&str>, requested: Option<&str>) -> String {
-    configured
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .or_else(|| requested.map(str::trim).filter(|value| !value.is_empty()))
-        .unwrap_or(DEFAULT_MODEL)
-        .to_string()
+/// Model selection for anonymous (auth-disabled) callers.
+/// Maps Claude Code model aliases (e.g. from `/model`) to upstream model tiers:
+/// - Opus / 1M models -> 1M group (glm-5.3-flash on b.ai, opencode/x-preview-f-free on OpenCode)
+/// - Sonnet / Haiku / standard models -> Sub-1M group (qwen3.8-flash on b.ai, mimo-v2.5-free on OpenCode)
+/// - Curated direct matches -> preserved
+/// - Other/unspecified -> configured global model or fallback
+fn resolve_anonymous_model(
+    configured: Option<&str>,
+    requested: Option<&str>,
+    upstream_base_url: &str,
+) -> String {
+    let configured_clean = configured.map(str::trim).filter(|value| !value.is_empty());
+    let requested_clean = requested.map(str::trim).filter(|value| !value.is_empty());
+
+    let is_opencode = crate::application::prober::is_opencode_upstream(upstream_base_url);
+
+    if let Some(req) = requested_clean {
+        let req_lower = req.to_ascii_lowercase();
+
+        // Check for Claude family aliases (from Claude Code CLI /model selection)
+        if req_lower.contains("opus") || req_lower.contains("1m") {
+            if is_opencode {
+                if let Some(cfg) = configured_clean {
+                    if crate::application::models::resolve_model_profile(cfg).context_window >= 1_000_000 {
+                        return cfg.to_string();
+                    }
+                }
+                return "opencode/x-preview-f-free".to_string();
+            } else {
+                if let Some(cfg) = configured_clean {
+                    if crate::application::models::resolve_model_profile(cfg).context_window >= 1_000_000 {
+                        return cfg.to_string();
+                    }
+                }
+                return "glm-5.3-flash".to_string();
+            }
+        }
+
+        if req_lower.contains("sonnet") || req_lower.contains("haiku") {
+            if is_opencode {
+                if let Some(cfg) = configured_clean {
+                    if crate::application::models::resolve_model_profile(cfg).context_window < 1_000_000 {
+                        return cfg.to_string();
+                    }
+                }
+                return "opencode/mimo-v2.5-free".to_string();
+            } else {
+                if let Some(cfg) = configured_clean {
+                    if crate::application::models::resolve_model_profile(cfg).context_window < 1_000_000 {
+                        return cfg.to_string();
+                    }
+                }
+                return "qwen3.8-flash".to_string();
+            }
+        }
+
+        // Exact match with known curated models
+        if is_opencode {
+            if crate::application::models::is_supported_free_model(req) {
+                return req.to_string();
+            }
+        } else {
+            for p in crate::application::models::API_MODEL_PROFILES {
+                if p.id.eq_ignore_ascii_case(req) {
+                    return p.id.to_string();
+                }
+            }
+        }
+
+        // Fallback for custom or unknown model: configured wins if present
+        configured_clean
+            .unwrap_or(req)
+            .to_string()
+    } else {
+        configured_clean
+            .unwrap_or(DEFAULT_MODEL)
+            .to_string()
+    }
 }
 
 fn log_request(payload: &MessagesRequest, model: &str, client: Option<&AuthenticatedClient>) {
@@ -759,7 +835,7 @@ mod model_resolution_tests {
     #[test]
     fn configured_global_model_still_wins_over_requested() {
         assert_eq!(
-            resolve_anonymous_model(Some("global-model"), Some("requested-model")),
+            resolve_anonymous_model(Some("global-model"), Some("requested-model"), "https://opencode.ai/zen/v1"),
             "global-model"
         );
     }
@@ -767,7 +843,7 @@ mod model_resolution_tests {
     #[test]
     fn requested_model_is_used_when_nothing_is_configured() {
         assert_eq!(
-            resolve_anonymous_model(None, Some("requested-model")),
+            resolve_anonymous_model(None, Some("requested-model"), "https://opencode.ai/zen/v1"),
             "requested-model"
         );
     }
@@ -775,19 +851,58 @@ mod model_resolution_tests {
     #[test]
     fn blank_models_fall_back_instead_of_reaching_upstream() {
         assert_eq!(
-            resolve_anonymous_model(None, Some("   ")),
+            resolve_anonymous_model(None, Some("   "), "https://opencode.ai/zen/v1"),
             DEFAULT_MODEL,
             "whitespace-only requested model must fall back, not forward garbage"
         );
         assert_eq!(
-            resolve_anonymous_model(Some(""), Some("requested-model")),
+            resolve_anonymous_model(Some(""), Some("requested-model"), "https://opencode.ai/zen/v1"),
             "requested-model",
             "blank configured model must be treated as unset"
         );
         assert_eq!(
-            resolve_anonymous_model(Some("  "), None),
+            resolve_anonymous_model(Some("  "), None, "https://opencode.ai/zen/v1"),
             DEFAULT_MODEL,
             "blank configured model with nothing else must use the default"
+        );
+    }
+
+    #[test]
+    fn claude_model_command_routes_to_respective_tiers() {
+        let b_ai = "https://api.b.ai/v1";
+        // Opus / 1M mapping on b.ai
+        assert_eq!(
+            resolve_anonymous_model(Some("glm-5.3-flash"), Some("claude-opus-5"), b_ai),
+            "glm-5.3-flash"
+        );
+        assert_eq!(
+            resolve_anonymous_model(Some("glm-5.3-flash"), Some("claude-3-opus-20240229"), b_ai),
+            "glm-5.3-flash"
+        );
+
+        // Sonnet & Haiku -> sub-1M (qwen3.8-flash) on b.ai
+        assert_eq!(
+            resolve_anonymous_model(Some("glm-5.3-flash"), Some("claude-3-7-sonnet-20250219"), b_ai),
+            "qwen3.8-flash"
+        );
+        assert_eq!(
+            resolve_anonymous_model(Some("glm-5.3-flash"), Some("claude-sonnet-5"), b_ai),
+            "qwen3.8-flash"
+        );
+        assert_eq!(
+            resolve_anonymous_model(Some("glm-5.3-flash"), Some("claude-3-5-haiku-20241022"), b_ai),
+            "qwen3.8-flash"
+        );
+
+        // OpenCode zen routing
+        let zen = "https://opencode.ai/zen/v1";
+        assert_eq!(
+            resolve_anonymous_model(Some("opencode/x-preview-f-free"), Some("claude-opus-5"), zen),
+            "opencode/x-preview-f-free"
+        );
+        assert_eq!(
+            resolve_anonymous_model(Some("opencode/x-preview-f-free"), Some("claude-3-7-sonnet-20250219"), zen),
+            "opencode/mimo-v2.5-free"
         );
     }
 }

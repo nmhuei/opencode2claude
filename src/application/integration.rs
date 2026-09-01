@@ -45,6 +45,7 @@ pub fn process_environment(config: &BridgeConfig) -> Vec<(String, Option<String>
         .filter(|value| !value.trim().is_empty())
         .unwrap_or(OX_ALPHA_MODEL)
         .to_string();
+    let profile = crate::application::models::resolve_model_profile(&effective_model);
 
     let mut vars = vec![
         ("ANTHROPIC_API_KEY".to_string(), Some(key.clone())),
@@ -52,11 +53,10 @@ pub fn process_environment(config: &BridgeConfig) -> Vec<(String, Option<String>
         ("OPENAI_API_KEY".to_string(), Some(key)),
         ("OPENAI_BASE_URL".to_string(), Some(format!("{base}/v1"))),
         ("ANTHROPIC_AUTH_TOKEN".to_string(), None),
-        ("ANTHROPIC_MODEL".to_string(), Some(effective_model.clone())),
+        ("ANTHROPIC_MODEL".to_string(), Some(profile.anthropic_alias.to_string())),
         ("OPENCODE_MODEL".to_string(), Some(effective_model.clone())),
     ];
 
-    let profile = crate::application::models::resolve_model_profile(&effective_model);
     for (k, v) in model_claude_code_vars(&profile) {
         vars.push((k.to_string(), Some(v)));
     }
@@ -73,6 +73,7 @@ pub fn environment(config: &BridgeConfig) -> IntegrationEnvironment {
         .filter(|value| !value.trim().is_empty())
         .unwrap_or(OX_ALPHA_MODEL)
         .to_string();
+    let profile = crate::application::models::resolve_model_profile(&effective_model);
 
     let shell_exports = process_environment(config)
         .into_iter()
@@ -86,7 +87,7 @@ pub fn environment(config: &BridgeConfig) -> IntegrationEnvironment {
         anthropic_base_url: base.clone(),
         openai_base_url: format!("{base}/v1"),
         api_key: key,
-        model: Some(effective_model),
+        model: Some(profile.anthropic_alias.to_string()),
         shell_exports,
     }
 }
@@ -132,7 +133,7 @@ pub fn model_claude_code_vars(
 
 pub fn ox_alpha_claude_code_exports() -> Vec<String> {
     let profile = crate::application::models::resolve_model_profile(OX_ALPHA_MODEL);
-    std::iter::once(("ANTHROPIC_MODEL", OX_ALPHA_MODEL.to_string()))
+    std::iter::once(("ANTHROPIC_MODEL", profile.anthropic_alias.to_string()))
         .chain(model_claude_code_vars(&profile))
         .map(|(key, value)| format!("export {key}={}", shell_quote(&value)))
         .collect()
@@ -176,7 +177,7 @@ mod tests {
         let exports = environment(&config_mimo).shell_exports;
         assert!(exports
             .iter()
-            .any(|line| line == "export ANTHROPIC_MODEL='opencode/mimo-v2.5-free'"));
+            .any(|line| line == "export ANTHROPIC_MODEL='claude-sonnet-5'"));
         assert!(exports
             .iter()
             .any(|line| line == "export CLAUDE_CODE_AUTO_COMPACT_WINDOW='204800'"));
@@ -249,5 +250,8 @@ mod tests {
         assert!(glm_exports
             .iter()
             .any(|line| line == "export CLAUDE_CODE_MAX_OUTPUT_TOKENS='131072'"));
+        assert!(glm_exports
+            .iter()
+            .any(|line| line == "export ANTHROPIC_MODEL='claude-opus-5'"));
     }
 }

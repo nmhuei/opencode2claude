@@ -561,11 +561,11 @@ pub struct ProviderApiArgs {
 /// List available models.
 #[derive(Args, Debug, Clone, Default)]
 pub struct ListArgs {
-    /// Probe every discovered model with a completion request (opt-in for custom providers)
+    /// Probe the live upstream and atomically refresh the cached model availability snapshot
     #[arg(long, short = 'p')]
     pub probe: bool,
 
-    /// Skip all upstream network checks and show only the local static catalog
+    /// Show the cached snapshot without contacting the upstream (default behavior)
     #[arg(long = "no-probe", conflicts_with = "probe")]
     pub no_probe: bool,
 
