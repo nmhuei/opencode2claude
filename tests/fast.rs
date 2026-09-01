@@ -830,6 +830,7 @@ async fn test_tc033_get_models_missing_bearer() {
 
 #[tokio::test]
 async fn test_tc034_post_messages_missing_messages_field() {
+    let _lock = ENV_MUTEX.lock().await;
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
     let resp = client
@@ -847,6 +848,7 @@ async fn test_tc034_post_messages_missing_messages_field() {
 
 #[tokio::test]
 async fn test_tc035_post_messages_empty_messages_array() {
+    let _lock = ENV_MUTEX.lock().await;
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
     let req_body = json!({
@@ -866,6 +868,7 @@ async fn test_tc035_post_messages_empty_messages_array() {
 
 #[tokio::test]
 async fn test_tc036_post_messages_non_streaming() {
+    let _lock = ENV_MUTEX.lock().await;
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
     let req_body = json!({
@@ -884,6 +887,7 @@ async fn test_tc036_post_messages_non_streaming() {
 
 #[tokio::test]
 async fn test_tc037_post_messages_streaming() {
+    let _lock = ENV_MUTEX.lock().await;
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
     let req_body = json!({
@@ -902,6 +906,7 @@ async fn test_tc037_post_messages_streaming() {
 
 #[tokio::test]
 async fn test_tc038_post_messages_unsupported_model_fallback() {
+    let _lock = ENV_MUTEX.lock().await;
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
     let req_body = json!({
@@ -919,6 +924,7 @@ async fn test_tc038_post_messages_unsupported_model_fallback() {
 
 #[tokio::test]
 async fn test_tc039_post_messages_large_payload() {
+    let _lock = ENV_MUTEX.lock().await;
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
     let large_payload = "A".repeat(1100000); // 1.1MB
@@ -934,6 +940,7 @@ async fn test_tc039_post_messages_large_payload() {
 
 #[tokio::test]
 async fn test_tc040_post_messages_malformed_json() {
+    let _lock = ENV_MUTEX.lock().await;
     let base = spawn_test_server_default().await;
     let client = reqwest::Client::new();
     let resp = client
