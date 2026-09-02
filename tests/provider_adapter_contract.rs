@@ -40,6 +40,7 @@ fn generic_adapter_uses_configured_auth_scheme() {
         messages: serde_json::json!([]),
         max_output_tokens: Some(100),
         stream: false,
+        body: None,
     };
     let prepared = adapter
         .prepare(
@@ -51,6 +52,33 @@ fn generic_adapter_uses_configured_auth_scheme() {
         .unwrap();
     assert_eq!(prepared.headers.get("x-api-key").unwrap(), "secret");
     assert!(!prepared.headers.contains_key("Authorization"));
+}
+
+#[test]
+fn generic_adapter_preserves_tool_and_request_fields_when_selecting_wire_model() {
+    let adapter = AdapterRegistry::for_provider(ProviderKind::OpenAiCompatible);
+    let request = ProviderRequest {
+        client_model: "default".into(),
+        messages: serde_json::json!([{"role":"user","content":"hello"}]),
+        max_output_tokens: Some(100),
+        stream: true,
+        body: Some(serde_json::json!({
+            "model": "client-alias",
+            "messages": [{"role":"user","content":"hello"}],
+            "tools": [{"type":"function","function":{"name":"lookup"}}],
+            "tool_choice": "auto",
+            "temperature": 0.2,
+            "stream": true,
+            "max_tokens": 100
+        })),
+    };
+    let prepared = adapter
+        .prepare(&provider(), &target(AuthScheme::None), &request, None)
+        .unwrap();
+    assert_eq!(prepared.body["model"], "wire-model");
+    assert_eq!(prepared.body["tools"][0]["function"]["name"], "lookup");
+    assert_eq!(prepared.body["tool_choice"], "auto");
+    assert_eq!(prepared.body["temperature"], 0.2);
 }
 
 #[test]

@@ -148,6 +148,31 @@ impl RouteState {
         self.cooldown_until(target).is_none_or(|until| until <= now)
     }
 
+    /// Return whether one concrete credential is cooling down without
+    /// requiring a model target. This keeps scheduler summaries able to show
+    /// per-pool member state while the route state remains the single owner
+    /// of cooldown policy.
+    pub fn credential_cooling(
+        &self,
+        provider: &crate::provider::types::ProviderId,
+        credential: &crate::provider::types::CredentialId,
+        now: Instant,
+    ) -> bool {
+        self.credential_cooldown_until(provider, credential)
+            .is_some_and(|until| until > now)
+    }
+
+    pub fn credential_retry_after(
+        &self,
+        provider: &crate::provider::types::ProviderId,
+        credential: &crate::provider::types::CredentialId,
+        now: Instant,
+    ) -> Option<Duration> {
+        self.credential_cooldown_until(provider, credential)
+            .map(|until| until.saturating_duration_since(now))
+            .filter(|remaining| !remaining.is_zero())
+    }
+
     fn cooldown_until(&self, target: &AttemptTarget) -> Option<Instant> {
         [
             self.credential_cooldowns
@@ -162,6 +187,16 @@ impl RouteState {
         .flatten()
         .max()
     }
+
+    fn credential_cooldown_until(
+        &self,
+        provider: &crate::provider::types::ProviderId,
+        credential: &crate::provider::types::CredentialId,
+    ) -> Option<Instant> {
+        self.credential_cooldowns
+            .get(&credential_key_for(provider, credential))
+            .copied()
+    }
 }
 
 fn credential_key(target: &AttemptTarget) -> CredentialKey {
@@ -173,9 +208,29 @@ fn credential_key(target: &AttemptTarget) -> CredentialKey {
     let mut hasher = Sha256::new();
     hasher.update(value.as_bytes());
     let digest = hasher.finalize();
+    credential_key_from_digest(&target.provider_id, digest)
+}
+
+fn credential_key_for(
+    provider: &crate::provider::types::ProviderId,
+    credential: &crate::provider::types::CredentialId,
+) -> CredentialKey {
+    let mut hasher = Sha256::new();
+    hasher.update(credential.as_ref().as_bytes());
+    credential_key_from_digest(provider, hasher.finalize())
+}
+
+fn credential_key_from_digest<D: AsRef<[u8]>>(
+    provider: &crate::provider::types::ProviderId,
+    digest: D,
+) -> CredentialKey {
     CredentialKey {
-        provider: target.provider_id.to_string(),
-        id_hash: digest.iter().map(|byte| format!("{byte:02x}")).collect(),
+        provider: provider.to_string(),
+        id_hash: digest
+            .as_ref()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
     }
 }
 

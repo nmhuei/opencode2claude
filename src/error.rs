@@ -38,6 +38,11 @@ pub enum BridgeError {
     #[error("Rate limited: {0}")]
     RateLimited(String),
 
+    #[error("Provider capacity exhausted")]
+    ProviderCapacityExhausted {
+        retry_after: Option<std::time::Duration>,
+    },
+
     #[error("Egress temporarily unavailable: {0}")]
     EgressUnavailable(String),
 
@@ -89,6 +94,11 @@ impl IntoResponse for BridgeError {
                 "rate_limit_error",
                 self.to_string(),
             ),
+            BridgeError::ProviderCapacityExhausted { .. } => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limit_error",
+                self.to_string(),
+            ),
             BridgeError::EgressUnavailable(_) => {
                 (StatusCode::BAD_REQUEST, "api_error", self.to_string())
             }
@@ -107,15 +117,40 @@ impl IntoResponse for BridgeError {
             }
         };
 
-        let body = json!({
-            "type": "error",
-            "error": {
-                "type": error_type,
-                "message": message,
+        let body = if matches!(self, BridgeError::ProviderCapacityExhausted { .. }) {
+            json!({
+                "type": "error",
+                "error": {
+                    "type": error_type,
+                    "code": "provider_capacity_exhausted",
+                    "message": message,
+                }
+            })
+        } else {
+            json!({
+                "type": "error",
+                "error": {
+                    "type": error_type,
+                    "message": message,
+                }
+            })
+        };
+        let retry_after = match &self {
+            BridgeError::ProviderCapacityExhausted { retry_after } => *retry_after,
+            _ => None,
+        };
+        let mut response = (status, Json(body)).into_response();
+        if let Some(retry_after) = retry_after {
+            if let Ok(value) = axum::http::HeaderValue::from_str(
+                &retry_after
+                    .as_secs()
+                    .clamp(1, u64::from(u32::MAX))
+                    .to_string(),
+            ) {
+                response.headers_mut().insert("retry-after", value);
             }
-        });
-
-        (status, Json(body)).into_response()
+        }
+        response
     }
 }
 
@@ -167,5 +202,15 @@ mod tests {
         let err = BridgeError::EgressUnavailable("proxy recovery running".to_string());
         let resp = err.into_response();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn provider_capacity_exhaustion_is_a_retryable_sanitized_429() {
+        let err = BridgeError::ProviderCapacityExhausted {
+            retry_after: Some(std::time::Duration::from_secs(12)),
+        };
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(resp.headers().get("retry-after").unwrap(), "12");
     }
 }

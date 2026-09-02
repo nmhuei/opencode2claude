@@ -223,7 +223,7 @@ async fn status(
 fn registry_snapshot(state: &AppState) -> Result<crate::provider::ProviderRegistry, ApiError> {
     if let Some(runtime) = state.provider_runtime.as_ref() {
         return Ok(crate::provider::ProviderRegistry::from_snapshot(
-            &runtime.snapshot(),
+            &runtime.snapshot().registry,
         ));
     }
     state
@@ -393,9 +393,14 @@ async fn provider_runtime(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     authorize(&headers, &state)?;
-    let registry = registry_snapshot(&state)?;
-    let route_state = state.provider_route_state.read().await;
-    let route_summary = route_state.summary(std::time::Instant::now());
+    let (registry, capacity) = if let Some(runtime) = state.provider_runtime.as_ref() {
+        let snapshot = runtime.snapshot();
+        let registry = crate::provider::ProviderRegistry::from_snapshot(&snapshot.registry);
+        let capacity = snapshot.scheduler.summary(std::time::Instant::now());
+        (registry, Some(capacity))
+    } else {
+        (registry_snapshot(&state)?, None)
+    };
     let providers: Vec<_> = registry
         .providers()
         .map(|provider| {
@@ -431,11 +436,12 @@ async fn provider_runtime(
         "providers": providers,
         "aliases": aliases,
         "route_state": {
-            "cooling_down": route_summary.cooling_down,
-            "credential_cooldowns": route_summary.credential_cooldowns,
-            "provider_cooldowns": route_summary.provider_cooldowns,
-            "model_cooldowns": route_summary.model_cooldowns,
-        }
+            "cooling_down": capacity.as_ref().map(|value| value.route_cooling_down).unwrap_or(0),
+            "credential_cooldowns": capacity.as_ref().map(|value| value.credential_cooldowns).unwrap_or(0),
+            "provider_cooldowns": capacity.as_ref().map(|value| value.provider_cooldowns).unwrap_or(0),
+            "model_cooldowns": capacity.as_ref().map(|value| value.model_cooldowns).unwrap_or(0),
+        },
+        "capacity": capacity,
     })))
 }
 
@@ -471,7 +477,6 @@ async fn reload_provider_runtime(
             error.to_string(),
         )
     })?;
-    state.provider_route_state.write().await.clear();
     Ok(Json(json!({
         "status": "ok",
         "reloaded": true,

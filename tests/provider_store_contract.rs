@@ -1,5 +1,8 @@
 use opencode2api::provider::store::{ProviderConfigStore, ProviderMutation};
-use opencode2api::provider::types::{Provider, ProviderKind, ProviderProtocol};
+use opencode2api::provider::types::{
+    AuthScheme, Credential, CredentialPool, CredentialPoolMember, PoolStrategy, Provider,
+    ProviderKind, ProviderProtocol, SecretSource,
+};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
@@ -121,5 +124,41 @@ fn provider_mutation_preserves_unrelated_bridge_configuration() {
     assert!(text.contains("port = 4567"));
     assert!(text.contains("model = \"legacy-model\""));
     assert!(text.contains("upstream_base_url = \"https://legacy.example/v1\""));
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn pool_mutation_round_trips_without_secret_values() {
+    let path = fixture_path("provider-store-pool", "toml");
+    fs::write(&path, v2_document()).unwrap();
+    let store = ProviderConfigStore::open(&path);
+    store
+        .transaction(ProviderMutation::SetCredential(Credential {
+            id: "key-a".into(),
+            provider_id: "bai".into(),
+            source: SecretSource::Env {
+                variable: "KEY_A".to_string(),
+            },
+            auth_scheme: AuthScheme::Bearer,
+        }))
+        .unwrap();
+    let pool = CredentialPool::new(
+        "free-1m",
+        "bai",
+        PoolStrategy::RoundRobin,
+        vec![
+            CredentialPoolMember::new("key-a", "account-a", 1, Some(20), Some(120000), 1).unwrap(),
+        ],
+    )
+    .unwrap();
+    store
+        .transaction(ProviderMutation::UpsertPool(pool))
+        .unwrap();
+    let reloaded = store.load().unwrap();
+    assert_eq!(reloaded.pool("free-1m").unwrap().members.len(), 1);
+    let rendered = fs::read_to_string(&path).unwrap();
+    assert!(rendered.contains("[credential_pools.free-1m]"));
+    assert!(rendered.contains("account-a"));
+    assert!(!rendered.contains("secret-value"));
     let _ = fs::remove_file(path);
 }

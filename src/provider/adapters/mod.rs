@@ -160,7 +160,34 @@ fn openai_request(
     let mut headers = provider.headers.clone();
     headers.insert("Content-Type".to_string(), "application/json".to_string());
     bearer(&mut headers, credential, scheme, provider)?;
-    let body = serde_json::json!({"model": target.wire_model_id, "messages": request.messages, "max_tokens": request.max_output_tokens, "stream": request.stream});
+    let mut body = request.body.clone().unwrap_or_else(|| {
+        serde_json::json!({
+            "model": target.wire_model_id,
+            "messages": request.messages,
+            "max_tokens": request.max_output_tokens,
+            "stream": request.stream
+        })
+    });
+    let Some(object) = body.as_object_mut() else {
+        return Err(AdapterError::Request(
+            "provider request body must be a JSON object".to_string(),
+        ));
+    };
+    object.insert(
+        "model".to_string(),
+        serde_json::Value::String(target.wire_model_id.clone()),
+    );
+    object.insert("messages".to_string(), request.messages.clone());
+    object.insert(
+        "stream".to_string(),
+        serde_json::Value::Bool(request.stream),
+    );
+    if let Some(max_output_tokens) = request.max_output_tokens {
+        object.insert(
+            "max_tokens".to_string(),
+            serde_json::Value::from(max_output_tokens),
+        );
+    }
     Ok(ProviderHttpRequest {
         url: format!("{}{}", provider.base_url.trim_end_matches('/'), suffix),
         headers,

@@ -3,7 +3,8 @@
 use super::config::{load_provider_registry, ProviderConfigError};
 use super::registry::{ProviderRegistry, RegistryError};
 use super::types::{
-    AliasId, AuthScheme, Credential, ModelAlias, ModelInfo, Provider, SecretSource,
+    AliasId, AuthScheme, Credential, CredentialPool, ModelAlias, ModelInfo, PoolStrategy, Provider,
+    SecretSource,
 };
 use crate::infrastructure::file_store::{AtomicFileStore, FileStore};
 use serde::Serialize;
@@ -30,6 +31,8 @@ pub enum ProviderStoreError {
 pub enum ProviderMutation {
     AddProvider(Provider),
     SetCredential(Credential),
+    UpsertPool(CredentialPool),
+    RemovePool(String),
     UpsertModel(ModelInfo),
     SetAlias(ModelAlias),
     EnableProvider { id: String, enabled: bool },
@@ -143,6 +146,7 @@ fn merge_provider_document(path: &Path, rendered: &str) -> Result<String, Provid
         "credentials",
         "models",
         "aliases",
+        "credential_pools",
     ] {
         document.remove(key);
         if let Some(item) = generated.get(key) {
@@ -159,6 +163,8 @@ fn apply_mutation(
     match mutation {
         ProviderMutation::AddProvider(provider) => registry.register_provider(provider),
         ProviderMutation::SetCredential(credential) => registry.upsert_credential(credential),
+        ProviderMutation::UpsertPool(pool) => registry.upsert_pool(pool),
+        ProviderMutation::RemovePool(id) => registry.remove_pool(id),
         ProviderMutation::UpsertModel(model) => {
             if registry.provider(&model.provider_id).is_none() {
                 return Err(RegistryError::UnknownProvider(
@@ -198,6 +204,7 @@ struct V3File<'a> {
     credentials: BTreeMap<String, V3Credential<'a>>,
     models: BTreeMap<String, BTreeMap<String, V3Model<'a>>>,
     aliases: BTreeMap<String, V3Alias<'a>>,
+    credential_pools: BTreeMap<String, V3Pool<'a>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -250,7 +257,28 @@ struct V3Candidate<'a> {
     model: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     credential: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    credential_pool: Option<&'a str>,
     priority: i32,
+}
+
+#[derive(Debug, Serialize)]
+struct V3Pool<'a> {
+    provider: &'a str,
+    strategy: PoolStrategy,
+    members: Vec<V3PoolMember<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+struct V3PoolMember<'a> {
+    credential: &'a str,
+    quota_scope: &'a str,
+    max_in_flight: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    requests_per_minute: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tokens_per_minute: Option<u64>,
+    weight: u32,
 }
 
 pub(crate) fn render_v3_registry(registry: &ProviderRegistry) -> Result<String, toml::ser::Error> {
@@ -316,7 +344,37 @@ pub(crate) fn render_v3_registry(registry: &ProviderRegistry) -> Result<String, 
                             provider: candidate.provider_id.as_ref(),
                             model: &candidate.model_id,
                             credential: candidate.credential_id.as_ref().map(|id| id.as_ref()),
+                            credential_pool: candidate
+                                .credential_pool_id
+                                .as_ref()
+                                .map(|id| id.as_ref()),
                             priority: candidate.priority,
+                        })
+                        .collect(),
+                },
+            )
+        })
+        .collect();
+    let credential_pools = registry
+        .pools()
+        .map(|pool| {
+            (
+                pool.id.to_string(),
+                V3Pool {
+                    provider: pool.provider_id.as_ref(),
+                    strategy: pool.strategy,
+                    members: pool
+                        .members
+                        .iter()
+                        .map(|member| V3PoolMember {
+                            credential: member.credential_id.as_ref(),
+                            quota_scope: &member.quota_scope,
+                            max_in_flight: member.max_in_flight.get(),
+                            requests_per_minute: member
+                                .requests_per_minute
+                                .map(|value| value.get()),
+                            tokens_per_minute: member.tokens_per_minute.map(|value| value.get()),
+                            weight: member.weight.get(),
                         })
                         .collect(),
                 },
@@ -333,6 +391,7 @@ pub(crate) fn render_v3_registry(registry: &ProviderRegistry) -> Result<String, 
         credentials,
         models,
         aliases,
+        credential_pools,
     })
 }
 

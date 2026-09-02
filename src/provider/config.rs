@@ -52,6 +52,8 @@ struct ProviderFileV3 {
     models: BTreeMap<String, BTreeMap<String, ModelV3Entry>>,
     #[serde(default)]
     aliases: BTreeMap<String, AliasV3Entry>,
+    #[serde(default)]
+    credential_pools: BTreeMap<String, CredentialPoolV3Entry>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -108,9 +110,44 @@ struct AliasV3Entry {
 struct CandidateV3Entry {
     provider: String,
     model: String,
+    #[serde(default)]
     credential: Option<String>,
     #[serde(default)]
+    credential_pool: Option<String>,
+    #[serde(default)]
     priority: i32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CredentialPoolV3Entry {
+    provider: String,
+    #[serde(default)]
+    strategy: PoolStrategy,
+    #[serde(default)]
+    members: Vec<CredentialPoolMemberV3Entry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CredentialPoolMemberV3Entry {
+    credential: String,
+    #[serde(default)]
+    quota_scope: Option<String>,
+    #[serde(default = "default_pool_max_in_flight")]
+    max_in_flight: u32,
+    #[serde(default)]
+    requests_per_minute: Option<u32>,
+    #[serde(default)]
+    tokens_per_minute: Option<u64>,
+    #[serde(default = "default_pool_weight")]
+    weight: u32,
+}
+
+fn default_pool_max_in_flight() -> u32 {
+    1
+}
+
+fn default_pool_weight() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -240,6 +277,7 @@ impl ProviderFileConfig {
                         provider_id: candidate.provider_id.into(),
                         model_id: candidate.model_id,
                         credential_id: candidate.credential_id.map(Into::into),
+                        credential_pool_id: None,
                         priority: candidate.priority,
                     })
                     .collect(),
@@ -297,6 +335,38 @@ impl ProviderFileV3 {
                 });
             }
         }
+        for (id, entry) in self.credential_pools {
+            let members = entry
+                .members
+                .into_iter()
+                .map(|member| {
+                    let credential = member.credential;
+                    let credential_id = CredentialId::from(credential.clone());
+                    let quota_scope = member
+                        .quota_scope
+                        .unwrap_or_else(|| format!("credential:{credential_id}"));
+                    CredentialPoolMember::new(
+                        credential_id,
+                        quota_scope,
+                        member.max_in_flight,
+                        member.requests_per_minute,
+                        member.tokens_per_minute,
+                        member.weight,
+                    )
+                    .map_err(|reason| RegistryError::InvalidPoolMember {
+                        pool: id.clone(),
+                        credential,
+                        reason,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let pool = CredentialPool::new(id.clone(), entry.provider, entry.strategy, members)
+                .map_err(|reason| RegistryError::InvalidPool {
+                    pool: id.clone(),
+                    reason,
+                })?;
+            registry.upsert_pool(pool)?;
+        }
         for (id, entry) in self.aliases {
             registry.register_alias(ModelAlias {
                 id: id.into(),
@@ -306,13 +376,24 @@ impl ProviderFileV3 {
                 candidates: entry
                     .candidates
                     .into_iter()
-                    .map(|candidate| ModelCandidate {
-                        provider_id: candidate.provider.into(),
-                        model_id: candidate.model,
-                        credential_id: candidate.credential.map(Into::into),
-                        priority: candidate.priority,
+                    .map(|candidate| {
+                        let pool = candidate.credential_pool.map(|pool| {
+                            CredentialPoolId::new(pool).map_err(|reason| {
+                                RegistryError::InvalidPool {
+                                    pool: "candidate".to_string(),
+                                    reason,
+                                }
+                            })
+                        });
+                        Ok(ModelCandidate {
+                            provider_id: candidate.provider.into(),
+                            model_id: candidate.model,
+                            credential_id: candidate.credential.map(Into::into),
+                            credential_pool_id: pool.transpose()?,
+                            priority: candidate.priority,
+                        })
                     })
-                    .collect(),
+                    .collect::<Result<Vec<_>, ProviderConfigError>>()?,
             })?;
         }
         registry.set_active_alias(self.router.active_alias.map(AliasId::from));

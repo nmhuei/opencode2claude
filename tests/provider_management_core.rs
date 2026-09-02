@@ -124,6 +124,7 @@ fn bai_adapter_uses_x_api_key_and_wire_model_id() {
         messages: serde_json::json!([]),
         max_output_tokens: Some(1024),
         stream: true,
+        body: None,
     };
     let prepared = adapter
         .prepare(provider, &target, &request, Some(&"secret".into()))
@@ -145,6 +146,7 @@ fn route_planner_keeps_fallback_order_and_context() {
         messages: serde_json::json!([]),
         max_output_tokens: Some(128000),
         stream: false,
+        body: None,
     };
     let targets = RoutePlanner::new(&registry)
         .plan(&request, "free-1m")
@@ -153,6 +155,29 @@ fn route_planner_keeps_fallback_order_and_context() {
     assert!(targets
         .iter()
         .all(|target| target.context_window >= 1_000_000));
+}
+
+#[test]
+fn route_planner_exposes_semantic_binding_without_selecting_a_pool_member() {
+    let registry = toml::from_str::<ProviderFileConfig>(CONFIG)
+        .unwrap()
+        .into_registry()
+        .unwrap();
+    let request = ProviderRequest {
+        client_model: "sonnet[1m]".into(),
+        messages: serde_json::json!([]),
+        max_output_tokens: Some(128000),
+        stream: false,
+        body: None,
+    };
+    let routes = RoutePlanner::new(&registry)
+        .plan_routes(&request, "free-1m")
+        .unwrap();
+    assert_eq!(routes.len(), 1);
+    assert!(matches!(
+        routes[0].binding,
+        opencode2api::provider::types::CredentialBinding::Direct(_)
+    ));
 }
 
 #[test]
@@ -168,6 +193,7 @@ fn disabled_provider_is_not_selected_for_a_request() {
         messages: serde_json::json!([]),
         max_output_tokens: Some(128000),
         stream: false,
+        body: None,
     };
     assert!(RoutePlanner::new(&registry)
         .plan(&request, "free-1m")
@@ -188,6 +214,7 @@ fn unsupported_wire_protocol_fails_closed_instead_of_sending_wrong_payload() {
         messages: serde_json::json!([]),
         max_output_tokens: Some(128),
         stream: false,
+        body: None,
     };
     let mut provider = provider.clone();
     provider.protocol = opencode2api::provider::types::ProviderProtocol::AnthropicMessages;
@@ -209,6 +236,14 @@ fn runtime_handle_replaces_only_after_snapshot_validation() {
         .aliases
         .keys()
         .any(|id| id.as_ref() == "free-1m"));
+    assert_eq!(
+        handle
+            .snapshot()
+            .scheduler
+            .summary(std::time::Instant::now())
+            .credential_pools,
+        0
+    );
 
     let renamed = CONFIG.replace("free-1m", "free-1m-v2");
     let second = toml::from_str::<ProviderFileConfig>(&renamed)
@@ -221,4 +256,49 @@ fn runtime_handle_replaces_only_after_snapshot_validation() {
         .aliases
         .keys()
         .any(|id| id.as_ref() == "free-1m-v2"));
+}
+
+#[test]
+fn runtime_reload_keeps_old_scheduler_lease_isolated_from_new_generation() {
+    let first = toml::from_str::<ProviderFileConfig>(CONFIG)
+        .unwrap()
+        .into_registry()
+        .unwrap();
+    let handle = ProviderRuntimeHandle::load(&first).unwrap();
+    let old = handle.snapshot();
+    let old_registry = ProviderRegistry::from_snapshot(&old.registry);
+    let old_routes = old_registry.resolve_routes("free-1m").unwrap();
+    let old_lease = old
+        .scheduler
+        .admit(
+            &old_routes,
+            opencode2api::provider::CapacityDemand::new(1, 1),
+            &std::collections::BTreeSet::new(),
+            std::time::Instant::now(),
+        )
+        .unwrap();
+    assert_eq!(
+        old.scheduler.summary(std::time::Instant::now()).in_flight,
+        1
+    );
+
+    let renamed = CONFIG.replace("free-1m", "free-1m-v2");
+    let second = toml::from_str::<ProviderFileConfig>(&renamed)
+        .unwrap()
+        .into_registry()
+        .unwrap();
+    handle.replace(&second).unwrap();
+    let current = handle.snapshot();
+    assert_eq!(
+        current
+            .scheduler
+            .summary(std::time::Instant::now())
+            .in_flight,
+        0
+    );
+    drop(old_lease);
+    assert_eq!(
+        old.scheduler.summary(std::time::Instant::now()).in_flight,
+        0
+    );
 }

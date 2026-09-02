@@ -5,6 +5,7 @@
 //! resolved only when an attempt is built.
 
 pub mod adapters;
+pub mod capacity;
 pub mod catalog;
 pub mod config;
 pub mod credentials;
@@ -15,9 +16,18 @@ pub mod routing;
 pub mod store;
 pub mod types;
 
-pub use registry::{ProviderRegistry, ProviderRuntimeHandle, ProviderSnapshot, RegistryError};
+pub use capacity::{
+    parse_rate_limit_feedback, AdmissionError, AttemptIdentity, CapacityObserver,
+    CapacityScheduler, CapacitySummary, DispatchLease, RateLimitFeedback, TokenUsage,
+};
+pub use registry::{
+    ProviderRegistry, ProviderRuntimeHandle, ProviderRuntimeSnapshot, ProviderSnapshot,
+    RegistryError,
+};
 pub use store::{ProviderConfigStore, ProviderMutation, ProviderStoreError, StoreMigrationReport};
 pub use types::{
-    AliasId, AttemptTarget, AuthScheme, Credential, CredentialId, ModelAlias, ModelCandidate,
-    ModelInfo, Provider, ProviderId, ProviderKind, ProviderProtocol, ProviderRequest,
+    AliasId, AttemptTarget, AuthScheme, CapacityDemand, Credential, CredentialBinding,
+    CredentialId, CredentialPool, CredentialPoolId, CredentialPoolMember, ModelAlias,
+    ModelCandidate, ModelInfo, PoolStrategy, Provider, ProviderId, ProviderKind, ProviderProtocol,
+    ProviderRequest, RouteTarget,
 };

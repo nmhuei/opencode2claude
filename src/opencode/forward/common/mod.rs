@@ -52,7 +52,7 @@ pub(crate) use schema::{
 };
 
 // --- Re-exports: token estimation (public API) ---
-pub use tokens::{estimate_input_tokens, estimate_string_tokens};
+pub use tokens::{estimate_input_tokens, estimate_provider_request_tokens, estimate_string_tokens};
 
 // --- Daemon / health helpers (remain in mod.rs) ---
 
@@ -74,22 +74,5 @@ pub(super) async fn read_bounded_body(
     response: crate::opencode::retry::LeasedResponse,
     max_bytes: usize,
 ) -> Result<Vec<u8>, crate::error::BridgeError> {
-    use futures_util::StreamExt;
-
-    let mut bytes = Vec::with_capacity(max_bytes.min(64 * 1024));
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| {
-            crate::error::BridgeError::UpstreamError(format!(
-                "Failed reading upstream response: {error}"
-            ))
-        })?;
-        if bytes.len().saturating_add(chunk.len()) > max_bytes {
-            return Err(crate::error::BridgeError::UpstreamError(format!(
-                "Upstream response exceeded configured limit of {max_bytes} bytes"
-            )));
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    Ok(bytes)
+    response.bounded_bytes(max_bytes).await
 }

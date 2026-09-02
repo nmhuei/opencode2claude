@@ -2,8 +2,9 @@
 
 use super::{emit, emit_error, CommandError};
 use crate::cli::{
-    ModelDiscoverArgs, ModelShowArgs, ModelSubcommand, ModelVerifyArgs, ProviderAddArgs,
-    ProviderAliasCommand, ProviderAliasRemoveArgs, ProviderAliasSetArgs, ProviderAliasShowArgs,
+    ModelDiscoverArgs, ModelShowArgs, ModelSubcommand, ModelVerifyArgs, PoolCommand,
+    PoolRemoveArgs, PoolSetArgs, PoolShowArgs, ProviderAddArgs, ProviderAliasCommand,
+    ProviderAliasRemoveArgs, ProviderAliasSetArgs, ProviderAliasShowArgs,
     ProviderCredentialCommand, ProviderCredentialRemoveArgs, ProviderCredentialSetArgs,
     ProviderCredentialTestArgs, ProviderModelAddArgs, ProviderModelCommand,
     ProviderModelRemoveArgs, ProviderRemoveArgs, ProviderShowArgs, ProviderSubcommand,
@@ -12,16 +13,18 @@ use crate::cli::{
 use crate::config::{BridgeConfig, CliOverrides, SecretString};
 use crate::output::OutputFormat;
 use crate::provider::adapters::{AdapterRegistry, FailureClass};
+use crate::provider::capacity::CapacityScheduler;
 use crate::provider::credentials::default_store;
 use crate::provider::routing::RoutePlanner;
 use crate::provider::types::{
-    auto_compact_window, AliasId, AuthScheme, Credential, ModelAlias, ModelCandidate, ModelInfo,
-    Provider, ProviderKind, ProviderProtocol, SecretSource,
+    auto_compact_window, AliasId, AuthScheme, CapacityDemand, Credential, CredentialPool,
+    CredentialPoolId, CredentialPoolMember, ModelAlias, ModelCandidate, ModelInfo, PoolStrategy,
+    Provider, ProviderKind, ProviderProtocol, ProviderRequest, SecretSource,
 };
 use crate::provider::{ProviderConfigStore, ProviderMutation};
 use reqwest::StatusCode;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::PathBuf;
 
@@ -107,6 +110,19 @@ pub async fn run_aliases(
     fmt: OutputFormat,
 ) {
     let result = run_alias_value(command, global_config);
+    match result {
+        Ok((title, quiet, value)) => emit(fmt, &title, &quiet, value),
+        Err(error) => emit_error(fmt, &error),
+    }
+}
+
+pub async fn run_pools(command: PoolCommand, global_config: Option<String>, fmt: OutputFormat) {
+    let result = match command {
+        PoolCommand::List(args) => list_pools(args.config.or(global_config)),
+        PoolCommand::Show(args) => show_pool(args, global_config),
+        PoolCommand::Set(args) => set_pool(args, global_config),
+        PoolCommand::Remove(args) => remove_pool(args, global_config),
+    };
     match result {
         Ok((title, quiet, value)) => emit(fmt, &title, &quiet, value),
         Err(error) => emit_error(fmt, &error),
@@ -807,7 +823,9 @@ fn show_alias(args: ProviderAliasShowArgs, global_config: Option<String>) -> Val
 
 fn set_alias(args: ProviderAliasSetArgs, global_config: Option<String>) -> ValueResult {
     if args.candidate.is_empty() {
-        return Err("at least one --candidate provider:model[:credential] is required".into());
+        return Err(
+            "at least one --candidate provider:model[:credential|pool=ID] is required".into(),
+        );
     }
     let candidates = args
         .candidate
@@ -1066,6 +1084,133 @@ fn retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<u64> {
         .map(|seconds| seconds.min(300) * 1_000)
 }
 
+fn pool_value(pool: &CredentialPool) -> Value {
+    json!({
+        "id": pool.id,
+        "provider": pool.provider_id,
+        "strategy": pool.strategy,
+        "members": pool.members.iter().map(|member| json!({
+            "credential": member.credential_id,
+            "quota_scope": member.quota_scope,
+            "max_in_flight": member.max_in_flight.get(),
+            "requests_per_minute": member.requests_per_minute.map(|value| value.get()),
+            "tokens_per_minute": member.tokens_per_minute.map(|value| value.get()),
+            "weight": member.weight.get(),
+        })).collect::<Vec<_>>(),
+    })
+}
+
+fn list_pools(explicit: Option<String>) -> ValueResult {
+    let registry = store(explicit).load().map_err(store_error)?;
+    let pools = registry.pools().map(pool_value).collect::<Vec<_>>();
+    Ok((
+        "Credential pools".to_string(),
+        pools
+            .first()
+            .and_then(|pool| pool["id"].as_str())
+            .unwrap_or_default()
+            .to_string(),
+        json!({"pools": pools}),
+    ))
+}
+
+fn show_pool(args: PoolShowArgs, global_config: Option<String>) -> ValueResult {
+    let registry = store(args.config.or(global_config))
+        .load()
+        .map_err(store_error)?;
+    let pool = registry
+        .pool(&args.id)
+        .ok_or_else(|| format!("credential pool {} not found", args.id))?;
+    Ok(("Credential pool".to_string(), args.id, pool_value(pool)))
+}
+
+fn set_pool(args: PoolSetArgs, global_config: Option<String>) -> ValueResult {
+    let strategy = parse_pool_strategy(&args.strategy)?;
+    let members = args
+        .member
+        .iter()
+        .map(|value| parse_pool_member(value))
+        .collect::<Result<Vec<_>, _>>()?;
+    let pool = CredentialPool::new(args.id.clone(), args.provider.clone(), strategy, members)
+        .map_err(CommandError::Message)?;
+    let path = config_path(args.config.or(global_config));
+    let registry = ProviderConfigStore::open(&path)
+        .transaction(ProviderMutation::UpsertPool(pool))
+        .map_err(store_error)?;
+    let pool = registry.pool(&args.id).expect("validated pool persisted");
+    Ok((
+        "Credential pool configured".to_string(),
+        args.id.clone(),
+        json!({"pool": pool_value(pool), "restart_required": true}),
+    ))
+}
+
+fn remove_pool(args: PoolRemoveArgs, global_config: Option<String>) -> ValueResult {
+    let id = args.id.clone();
+    let path = config_path(args.config.or(global_config));
+    ProviderConfigStore::open(&path)
+        .transaction(ProviderMutation::RemovePool(id.clone()))
+        .map_err(store_error)?;
+    Ok((
+        "Credential pool removed".to_string(),
+        id.clone(),
+        json!({"pool": id, "restart_required": true}),
+    ))
+}
+
+fn parse_pool_strategy(value: &str) -> Result<PoolStrategy, CommandError> {
+    match value {
+        "round_robin" | "round-robin" => Ok(PoolStrategy::RoundRobin),
+        "least_loaded" | "least-loaded" => Ok(PoolStrategy::LeastLoaded),
+        "weighted_round_robin" | "weighted-round-robin" => Ok(PoolStrategy::WeightedRoundRobin),
+        _ => Err(format!(
+            "unknown pool strategy {value}; use round_robin, least_loaded, or weighted_round_robin"
+        )
+        .into()),
+    }
+}
+
+fn parse_pool_member(value: &str) -> Result<CredentialPoolMember, CommandError> {
+    let fields = value.split(',').collect::<Vec<_>>();
+    if fields.len() != 6 {
+        return Err(format!(
+            "invalid pool member {value}; use CREDENTIAL,QUOTA_SCOPE,MAX_IN_FLIGHT,RPM,TPM,WEIGHT"
+        )
+        .into());
+    }
+    let parse_u32 = |field: &str, name: &str| {
+        field
+            .parse::<u32>()
+            .map_err(|_| format!("pool member {name} must be a positive integer"))
+    };
+    let parse_optional_u32 = |field: &str, name: &str| {
+        if field.trim().is_empty() {
+            Ok(None)
+        } else {
+            parse_u32(field, name).map(Some)
+        }
+    };
+    let rpm = parse_optional_u32(fields[3], "RPM")?;
+    let tpm = if fields[4].trim().is_empty() {
+        None
+    } else {
+        Some(
+            fields[4]
+                .parse::<u64>()
+                .map_err(|_| "pool member TPM must be a positive integer".to_string())?,
+        )
+    };
+    CredentialPoolMember::new(
+        fields[0],
+        fields[1],
+        parse_u32(fields[2], "MAX_IN_FLIGHT")?,
+        rpm,
+        tpm,
+        parse_u32(fields[5], "WEIGHT")?,
+    )
+    .map_err(CommandError::Message)
+}
+
 fn explain(args: RouteExplainArgs, global_config: Option<String>) -> ValueResult {
     let registry = store(args.config.or(global_config))
         .load()
@@ -1074,10 +1219,10 @@ fn explain(args: RouteExplainArgs, global_config: Option<String>) -> ValueResult
         .alias(&args.alias)
         .ok_or_else(|| format!("alias {} not found", args.alias))?;
     let targets = RoutePlanner::new(&registry)
-        .plan_for_context(&args.alias, alias.context_window)
+        .plan_routes_for_context(&args.alias, alias.context_window)
         .map_err(|error| error.to_string())?;
     let all = registry
-        .resolve_alias(&args.alias)
+        .resolve_routes(&args.alias)
         .map_err(|error| error.to_string())?;
     let excluded: Vec<Value> = all
         .iter()
@@ -1086,12 +1231,29 @@ fn explain(args: RouteExplainArgs, global_config: Option<String>) -> ValueResult
         .collect();
     let selected: Vec<Value> = targets
         .iter()
-        .map(|target| json!({"candidate_index": target.candidate_index, "provider": target.provider_id, "model": target.model_id, "wire_model": target.wire_model_id, "credential": target.credential_id, "context_window": target.context_window}))
+        .map(|target| {
+            let pool = target
+                .binding
+                .pool_id()
+                .and_then(|id| registry.pool(id))
+                .map(pool_value);
+            json!({
+                "candidate_index": target.candidate_index,
+                "provider": target.provider_id,
+                "model": target.model_id,
+                "wire_model": target.wire_model_id,
+                "binding": target.binding,
+                "pool": pool,
+                "context_window": target.context_window,
+                "max_output_tokens": target.max_output_tokens,
+            })
+        })
         .collect();
+    let configured_pools = registry.pools().map(pool_value).collect::<Vec<_>>();
     Ok((
         "Route explanation".to_string(),
         args.alias,
-        json!({"alias": alias.id, "client_model": alias.client_model, "context_window": alias.context_window, "auto_compact_window": alias.auto_compact_window(), "selected": selected, "excluded": excluded}),
+        json!({"alias": alias.id, "client_model": alias.client_model, "context_window": alias.context_window, "auto_compact_window": alias.auto_compact_window(), "selected": selected, "excluded": excluded, "configured_pools": configured_pools}),
     ))
 }
 
@@ -1118,34 +1280,96 @@ fn simulate(args: RouteSimulateArgs, global_config: Option<String>) -> ValueResu
     let registry = store(args.config.or(global_config))
         .load()
         .map_err(store_error)?;
-    let targets = registry
-        .resolve_alias(&args.alias)
+    let alias = registry
+        .alias(&args.alias)
+        .ok_or_else(|| format!("alias {} not found", args.alias))?;
+    let request = ProviderRequest {
+        client_model: alias.client_model.clone(),
+        messages: serde_json::json!([]),
+        max_output_tokens: None,
+        stream: false,
+        body: None,
+    };
+    let routes = RoutePlanner::new(&registry)
+        .plan_routes(&request, &args.alias)
         .map_err(|error| error.to_string())?;
     let status =
         StatusCode::from_u16(args.status.unwrap_or(429)).map_err(|_| "invalid HTTP status")?;
     let adapter = AdapterRegistry::for_provider(ProviderKind::OpenAiCompatible);
     let failure = adapter.classify_failure(Some(status), &reqwest::header::HeaderMap::new(), "");
     let provider = args.from.unwrap_or_default();
-    let next = targets
+    let next = routes
         .iter()
         .find(|target| target.provider_id.as_ref() != provider)
         .map(|target| target.provider_id.to_string());
+    let scheduler = CapacityScheduler::from_registry(&registry);
+    let mut leases = Vec::new();
+    let mut admissions = Vec::new();
+    for index in 0..args.concurrent {
+        match scheduler.admit(
+            &routes,
+            CapacityDemand::new(100, 0),
+            &BTreeSet::new(),
+            std::time::Instant::now(),
+        ) {
+            Ok(lease) => {
+                admissions.push(json!({
+                    "index": index,
+                    "provider": lease.target().provider_id,
+                    "model": lease.target().model_id,
+                    "credential": lease.target().credential_id,
+                    "status": "admitted",
+                }));
+                leases.push(lease);
+            }
+            Err(error) => admissions.push(json!({
+                "index": index,
+                "status": "capacity-exhausted",
+                "reason": format!("{error:?}"),
+            })),
+        }
+    }
+    let capacity = scheduler.summary(std::time::Instant::now());
+    drop(leases);
     Ok((
         "Route simulation".to_string(),
         args.alias,
-        json!({"status": status.as_u16(), "failure_class": format!("{failure:?}"), "from": provider, "next_provider": next, "target_count": targets.len()}),
+        json!({
+            "status": status.as_u16(),
+            "failure_class": format!("{failure:?}"),
+            "from": provider,
+            "next_provider": next,
+            "target_count": routes.len(),
+            "concurrent": args.concurrent,
+            "admissions": admissions,
+            "capacity": capacity,
+        }),
     ))
 }
 
 fn parse_candidate(value: &str, priority: i32) -> Result<ModelCandidate, CommandError> {
     let parts: Vec<&str> = value.split(':').collect();
     if !(2..=3).contains(&parts.len()) || parts.iter().take(2).any(|part| part.trim().is_empty()) {
-        return Err(format!("invalid candidate {value}; use provider:model[:credential]").into());
+        return Err(
+            format!("invalid candidate {value}; use provider:model[:credential|pool=ID]").into(),
+        );
     }
+    let (credential_id, credential_pool_id) = match parts.get(2).copied() {
+        None => (None, None),
+        Some(value) if value.trim().is_empty() => {
+            return Err("candidate credential or pool id must not be empty".into())
+        }
+        Some(value) if let Some(pool) = value.strip_prefix("pool=") => {
+            let pool = CredentialPoolId::new(pool).map_err(CommandError::Message)?;
+            (None, Some(pool))
+        }
+        Some(value) => (Some(value.into()), None),
+    };
     Ok(ModelCandidate {
         provider_id: parts[0].into(),
         model_id: parts[1].to_string(),
-        credential_id: parts.get(2).map(|id| (*id).into()),
+        credential_id,
+        credential_pool_id,
         priority,
     })
 }

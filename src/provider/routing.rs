@@ -1,5 +1,5 @@
 use super::registry::{ProviderRegistry, RegistryError};
-use super::types::{AttemptTarget, ProviderRequest};
+use super::types::{AttemptTarget, ProviderRequest, RouteTarget};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetryDecision {
@@ -44,6 +44,43 @@ impl<'a> RoutePlanner<'a> {
         Ok(self
             .registry
             .resolve_alias(alias)?
+            .into_iter()
+            .filter(|target| {
+                self.registry
+                    .provider(&target.provider_id)
+                    .is_some_and(|provider| provider.enabled)
+                    && target.context_window >= required_context
+            })
+            .collect())
+    }
+
+    pub fn plan_routes(
+        &self,
+        request: &ProviderRequest,
+        alias: impl AsRef<str>,
+    ) -> Result<Vec<RouteTarget>, RegistryError> {
+        let required = request.max_output_tokens.unwrap_or(0);
+        Ok(self
+            .registry
+            .resolve_routes(alias)?
+            .into_iter()
+            .filter(|target| {
+                self.registry
+                    .provider(&target.provider_id)
+                    .is_some_and(|provider| provider.enabled)
+                    && target.context_window >= required
+            })
+            .collect())
+    }
+
+    pub fn plan_routes_for_context(
+        &self,
+        alias: impl AsRef<str>,
+        required_context: usize,
+    ) -> Result<Vec<RouteTarget>, RegistryError> {
+        Ok(self
+            .registry
+            .resolve_routes(alias)?
             .into_iter()
             .filter(|target| {
                 self.registry

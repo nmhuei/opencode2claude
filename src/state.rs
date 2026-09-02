@@ -57,8 +57,6 @@ pub struct AppState {
     /// Immutable provider registry snapshot used by request execution and
     /// replaceable by a validated management reload.
     pub provider_runtime: Option<Arc<crate::provider::ProviderRuntimeHandle>>,
-    /// Ephemeral provider/credential cooldowns; never persisted as config.
-    pub provider_route_state: Arc<RwLock<crate::provider::resilience::RouteState>>,
     /// Persistent request, prompt, reasoning and response history.
     pub history: Arc<HistoryStore>,
     /// Single-use tickets binding echoed local-shell results to bridge-issued delegations.
@@ -310,9 +308,6 @@ impl AppState {
             metrics,
             audit_log,
             provider_runtime,
-            provider_route_state: Arc::new(RwLock::new(
-                crate::provider::resilience::RouteState::default(),
-            )),
             history,
             shell_delegations: Arc::new(ShellDelegations::new()),
             event_tx,

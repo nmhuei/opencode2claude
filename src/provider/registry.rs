@@ -1,3 +1,4 @@
+use super::capacity::CapacityScheduler;
 use super::types::*;
 use crate::config::SecretString;
 use std::collections::BTreeMap;
@@ -15,11 +16,35 @@ pub enum RegistryError {
     UnknownModel { provider: String, model: String },
     #[error("unknown credential: {0}")]
     UnknownCredential(String),
+    #[error("unknown credential pool: {0}")]
+    UnknownPool(String),
     #[error("credential {credential} does not belong to provider {provider}")]
     CrossProviderCredential {
         credential: String,
         provider: String,
     },
+    #[error("credential pool {pool} is invalid: {reason}")]
+    InvalidPool { pool: String, reason: String },
+    #[error("credential {credential} in pool {pool} is invalid: {reason}")]
+    InvalidPoolMember {
+        pool: String,
+        credential: String,
+        reason: String,
+    },
+    #[error("credential {credential} is already assigned to pools {first_pool} and {second_pool}")]
+    CredentialInMultiplePools {
+        credential: String,
+        first_pool: String,
+        second_pool: String,
+    },
+    #[error("pool {pool} provider {pool_provider} does not match candidate provider {candidate_provider}")]
+    CrossProviderPool {
+        pool: String,
+        pool_provider: String,
+        candidate_provider: String,
+    },
+    #[error("candidate has both credential and credential_pool bindings")]
+    CandidateBindingConflict,
     #[error("alias {alias} has no candidates")]
     EmptyAlias { alias: String },
     #[error("strict alias {alias} candidate {model} has unknown context metadata")]
@@ -36,12 +61,17 @@ pub enum RegistryError {
     ReferencedProvider(String),
     #[error("credential {0} is referenced by an alias")]
     ReferencedCredential(String),
+    #[error("credential {credential} is referenced by pool {pool}")]
+    ReferencedCredentialPool { credential: String, pool: String },
+    #[error("credential pool {pool} is referenced by aliases: {aliases}")]
+    ReferencedPool { pool: String, aliases: String },
 }
 
 #[derive(Debug, Clone)]
 pub struct ProviderRegistry {
     providers: BTreeMap<ProviderId, Provider>,
     credentials: BTreeMap<CredentialId, Credential>,
+    pools: BTreeMap<CredentialPoolId, CredentialPool>,
     models: BTreeMap<(ProviderId, String), ModelInfo>,
     aliases: BTreeMap<AliasId, ModelAlias>,
     active_alias: Option<AliasId>,
@@ -51,32 +81,61 @@ pub struct ProviderRegistry {
 pub struct ProviderSnapshot {
     pub providers: Arc<BTreeMap<ProviderId, Provider>>,
     pub credentials: Arc<BTreeMap<CredentialId, Credential>>,
+    pub pools: Arc<BTreeMap<CredentialPoolId, CredentialPool>>,
     pub models: Arc<BTreeMap<(ProviderId, String), ModelInfo>>,
     pub aliases: Arc<BTreeMap<AliasId, ModelAlias>>,
     pub active_alias: Option<AliasId>,
+}
+
+/// One immutable generation of provider configuration and the mutable
+/// process-local scheduler attached to that generation. Requests keep this
+/// Arc until their response lease is released, so reload cannot invalidate an
+/// in-flight reservation.
+#[derive(Debug, Clone)]
+pub struct ProviderRuntimeSnapshot {
+    pub registry: Arc<ProviderSnapshot>,
+    pub scheduler: Arc<CapacityScheduler>,
+}
+
+impl std::ops::Deref for ProviderRuntimeSnapshot {
+    type Target = ProviderSnapshot;
+
+    fn deref(&self) -> &Self::Target {
+        &self.registry
+    }
 }
 
 /// Atomic runtime boundary. A request takes one immutable snapshot; replacing
 /// the handle never mutates a request already in flight.
 #[derive(Debug, Clone)]
 pub struct ProviderRuntimeHandle {
-    current: Arc<RwLock<Arc<ProviderSnapshot>>>,
+    current: Arc<RwLock<Arc<ProviderRuntimeSnapshot>>>,
 }
 
 impl ProviderRuntimeHandle {
     pub fn load(registry: &ProviderRegistry) -> Result<Self, RegistryError> {
+        let snapshot = Arc::new(registry.compile_snapshot()?);
+        let scheduler = CapacityScheduler::from_snapshot(&snapshot);
         Ok(Self {
-            current: Arc::new(RwLock::new(Arc::new(registry.compile_snapshot()?))),
+            current: Arc::new(RwLock::new(Arc::new(ProviderRuntimeSnapshot {
+                registry: snapshot,
+                scheduler,
+            }))),
         })
     }
-    pub fn snapshot(&self) -> Arc<ProviderSnapshot> {
+    pub fn snapshot(&self) -> Arc<ProviderRuntimeSnapshot> {
         self.current
             .read()
             .expect("provider runtime lock poisoned")
             .clone()
     }
     pub fn replace(&self, registry: &ProviderRegistry) -> Result<(), RegistryError> {
-        let next = Arc::new(registry.compile_snapshot()?);
+        let snapshot = Arc::new(registry.compile_snapshot()?);
+        let scheduler = CapacityScheduler::from_snapshot(&snapshot);
+        let next = Arc::new(ProviderRuntimeSnapshot {
+            registry: snapshot,
+            scheduler,
+        });
         *self
             .current
             .write()
@@ -90,6 +149,7 @@ impl ProviderRegistry {
         Self {
             providers: BTreeMap::new(),
             credentials: BTreeMap::new(),
+            pools: BTreeMap::new(),
             models: BTreeMap::new(),
             aliases: BTreeMap::new(),
             active_alias: None,
@@ -99,6 +159,7 @@ impl ProviderRegistry {
         Self {
             providers: (*snapshot.providers).clone(),
             credentials: (*snapshot.credentials).clone(),
+            pools: (*snapshot.pools).clone(),
             models: (*snapshot.models).clone(),
             aliases: (*snapshot.aliases).clone(),
             active_alias: snapshot.active_alias.clone(),
@@ -109,6 +170,12 @@ impl ProviderRegistry {
     }
     pub fn credentials(&self) -> impl Iterator<Item = &Credential> {
         self.credentials.values()
+    }
+    pub fn pools(&self) -> impl Iterator<Item = &CredentialPool> {
+        self.pools.values()
+    }
+    pub fn pool(&self, id: impl AsRef<str>) -> Option<&CredentialPool> {
+        self.pools.get(&CredentialPoolId::new(id.as_ref()).ok()?)
     }
     pub fn aliases(&self) -> impl Iterator<Item = &ModelAlias> {
         self.aliases.values()
@@ -145,6 +212,16 @@ impl ProviderRegistry {
                 .any(|candidate| candidate.credential_id.as_ref() == Some(&id))
         }) {
             return Err(RegistryError::ReferencedCredential(id.to_string()));
+        }
+        if let Some(pool) = self
+            .pools
+            .values()
+            .find(|pool| pool.members.iter().any(|member| member.credential_id == id))
+        {
+            return Err(RegistryError::ReferencedCredentialPool {
+                credential: id.to_string(),
+                pool: pool.id.to_string(),
+            });
         }
         self.credentials
             .remove(&id)
@@ -185,6 +262,38 @@ impl ProviderRegistry {
                 provider: "alias".to_string(),
                 model: id.to_string(),
             })
+    }
+
+    pub fn upsert_pool(&mut self, pool: CredentialPool) -> Result<(), RegistryError> {
+        self.validate_pool(&pool)?;
+        self.pools.insert(pool.id.clone(), pool);
+        Ok(())
+    }
+
+    pub fn remove_pool(&mut self, id: impl AsRef<str>) -> Result<(), RegistryError> {
+        let id = CredentialPoolId::new(id.as_ref())
+            .map_err(|_| RegistryError::UnknownPool(id.as_ref().to_string()))?;
+        let aliases = self
+            .aliases
+            .values()
+            .filter(|alias| {
+                alias
+                    .candidates
+                    .iter()
+                    .any(|candidate| candidate.credential_pool_id.as_ref() == Some(&id))
+            })
+            .map(|alias| alias.id.to_string())
+            .collect::<Vec<_>>();
+        if !aliases.is_empty() {
+            return Err(RegistryError::ReferencedPool {
+                pool: id.to_string(),
+                aliases: aliases.join(", "),
+            });
+        }
+        self.pools
+            .remove(&id)
+            .map(|_| ())
+            .ok_or_else(|| RegistryError::UnknownPool(id.to_string()))
     }
     pub fn remove_provider(&mut self, id: impl AsRef<str>) -> Result<(), RegistryError> {
         let id = ProviderId::from(id.as_ref());
@@ -280,15 +389,96 @@ impl ProviderRegistry {
         for alias in self.aliases.values() {
             self.validate_alias(alias)?;
         }
+        for pool in self.pools.values() {
+            self.validate_pool(pool)?;
+        }
+        let mut shared_scopes = BTreeMap::<String, (Option<u32>, Option<u64>)>::new();
+        for pool in self.pools.values() {
+            for member in &pool.members {
+                let budget = (
+                    member.requests_per_minute.map(|value| value.get()),
+                    member.tokens_per_minute.map(|value| value.get()),
+                );
+                if let Some(previous) = shared_scopes.insert(member.quota_scope.clone(), budget) {
+                    if previous != budget {
+                        return Err(RegistryError::InvalidPool {
+                            pool: pool.id.to_string(),
+                            reason: format!(
+                                "members sharing quota scope {} across pools must use identical RPM/TPM limits",
+                                member.quota_scope
+                            ),
+                        });
+                    }
+                }
+            }
+        }
         Ok(ProviderSnapshot {
             providers: Arc::new(self.providers.clone()),
             credentials: Arc::new(self.credentials.clone()),
+            pools: Arc::new(self.pools.clone()),
             models: Arc::new(self.models.clone()),
             aliases: Arc::new(self.aliases.clone()),
             active_alias: self.active_alias.clone(),
         })
     }
     pub fn resolve_alias(&self, id: impl AsRef<str>) -> Result<Vec<AttemptTarget>, RegistryError> {
+        let alias = self
+            .alias(id.as_ref())
+            .ok_or_else(|| RegistryError::UnknownModel {
+                provider: "alias".to_string(),
+                model: id.as_ref().to_string(),
+            })?;
+        let mut candidates: Vec<_> = alias.candidates.iter().enumerate().collect();
+        candidates.sort_by_key(|(_, candidate)| candidate.priority);
+        let mut targets = Vec::new();
+        for (candidate_index, (_, candidate)) in candidates.into_iter().enumerate() {
+            let info = self
+                .models
+                .get(&(candidate.provider_id.clone(), candidate.model_id.clone()))
+                .ok_or_else(|| RegistryError::UnknownModel {
+                    provider: candidate.provider_id.to_string(),
+                    model: candidate.model_id.clone(),
+                })?;
+            let credential_ids = match candidate
+                .binding()
+                .map_err(|_| RegistryError::CandidateBindingConflict)?
+            {
+                CredentialBinding::Anonymous => vec![None],
+                CredentialBinding::Direct(id) => vec![Some(id)],
+                CredentialBinding::Pool(pool_id) => self
+                    .pools
+                    .get(&pool_id)
+                    .ok_or_else(|| RegistryError::UnknownPool(pool_id.to_string()))?
+                    .members
+                    .iter()
+                    .map(|member| Some(member.credential_id.clone()))
+                    .collect(),
+            };
+            for credential_id in credential_ids {
+                targets.push(AttemptTarget {
+                    alias_id: alias.id.clone(),
+                    client_model: alias.client_model.clone(),
+                    provider_id: info.provider_id.clone(),
+                    model_id: info.model_id.clone(),
+                    wire_model_id: info.wire_model_id.clone(),
+                    auth_scheme: credential_id
+                        .as_ref()
+                        .and_then(|id| {
+                            self.credentials
+                                .get(id)
+                                .map(|credential| credential.auth_scheme)
+                        })
+                        .unwrap_or(AuthScheme::None),
+                    credential_id,
+                    context_window: info.context_window.unwrap_or_default(),
+                    candidate_index,
+                });
+            }
+        }
+        Ok(targets)
+    }
+
+    pub fn resolve_routes(&self, id: impl AsRef<str>) -> Result<Vec<RouteTarget>, RegistryError> {
         let alias = self
             .alias(id.as_ref())
             .ok_or_else(|| RegistryError::UnknownModel {
@@ -308,23 +498,18 @@ impl ProviderRegistry {
                         provider: candidate.provider_id.to_string(),
                         model: candidate.model_id.clone(),
                     })?;
-                Ok(AttemptTarget {
+                let binding = candidate
+                    .binding()
+                    .map_err(|_| RegistryError::CandidateBindingConflict)?;
+                Ok(RouteTarget {
                     alias_id: alias.id.clone(),
                     client_model: alias.client_model.clone(),
                     provider_id: info.provider_id.clone(),
                     model_id: info.model_id.clone(),
                     wire_model_id: info.wire_model_id.clone(),
-                    credential_id: candidate.credential_id.clone(),
-                    auth_scheme: candidate
-                        .credential_id
-                        .as_ref()
-                        .and_then(|id| {
-                            self.credentials
-                                .get(id)
-                                .map(|credential| credential.auth_scheme)
-                        })
-                        .unwrap_or(AuthScheme::None),
+                    binding,
                     context_window: info.context_window.unwrap_or_default(),
+                    max_output_tokens: info.max_output_tokens,
                     candidate_index,
                 })
             })
@@ -377,6 +562,7 @@ impl ProviderRegistry {
                 provider_id,
                 model_id: model,
                 credential_id,
+                credential_pool_id: None,
                 priority: 0,
             }],
         });
@@ -402,16 +588,35 @@ impl ProviderRegistry {
                     provider: candidate.provider_id.to_string(),
                     model: candidate.model_id.clone(),
                 })?;
-            if let Some(credential) = &candidate.credential_id {
-                let credential_obj = self
-                    .credentials
-                    .get(credential)
-                    .ok_or_else(|| RegistryError::UnknownCredential(credential.to_string()))?;
-                if credential_obj.provider_id != candidate.provider_id {
-                    return Err(RegistryError::CrossProviderCredential {
-                        credential: credential.to_string(),
-                        provider: candidate.provider_id.to_string(),
-                    });
+            let binding = candidate
+                .binding()
+                .map_err(|_| RegistryError::CandidateBindingConflict)?;
+            match binding {
+                CredentialBinding::Anonymous => {}
+                CredentialBinding::Direct(credential) => {
+                    let credential_obj = self
+                        .credentials
+                        .get(&credential)
+                        .ok_or_else(|| RegistryError::UnknownCredential(credential.to_string()))?;
+                    if credential_obj.provider_id != candidate.provider_id {
+                        return Err(RegistryError::CrossProviderCredential {
+                            credential: credential.to_string(),
+                            provider: candidate.provider_id.to_string(),
+                        });
+                    }
+                }
+                CredentialBinding::Pool(pool) => {
+                    let pool_obj = self
+                        .pools
+                        .get(&pool)
+                        .ok_or_else(|| RegistryError::UnknownPool(pool.to_string()))?;
+                    if pool_obj.provider_id != candidate.provider_id {
+                        return Err(RegistryError::CrossProviderPool {
+                            pool: pool.to_string(),
+                            pool_provider: pool_obj.provider_id.to_string(),
+                            candidate_provider: candidate.provider_id.to_string(),
+                        });
+                    }
                 }
             }
             if alias.strict_context {
@@ -436,6 +641,95 @@ impl ProviderRegistry {
                             model: candidate.model_id.clone(),
                         })
                     }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_pool(&self, pool: &CredentialPool) -> Result<(), RegistryError> {
+        if !self.providers.contains_key(&pool.provider_id) {
+            return Err(RegistryError::UnknownProvider(pool.provider_id.to_string()));
+        }
+        if pool.members.is_empty() {
+            return Err(RegistryError::InvalidPool {
+                pool: pool.id.to_string(),
+                reason: "pool must contain at least one member".to_string(),
+            });
+        }
+        let mut seen = BTreeMap::<CredentialId, ()>::new();
+        let mut scopes = BTreeMap::<String, (Option<u32>, Option<u64>)>::new();
+        for member in &pool.members {
+            if seen.insert(member.credential_id.clone(), ()).is_some() {
+                return Err(RegistryError::InvalidPoolMember {
+                    pool: pool.id.to_string(),
+                    credential: member.credential_id.to_string(),
+                    reason: "credential is duplicated in the pool".to_string(),
+                });
+            }
+            let credential = self.credentials.get(&member.credential_id).ok_or_else(|| {
+                RegistryError::UnknownCredential(member.credential_id.to_string())
+            })?;
+            if credential.provider_id != pool.provider_id {
+                return Err(RegistryError::CrossProviderCredential {
+                    credential: member.credential_id.to_string(),
+                    provider: pool.provider_id.to_string(),
+                });
+            }
+            if member.quota_scope.trim().is_empty() {
+                return Err(RegistryError::InvalidPoolMember {
+                    pool: pool.id.to_string(),
+                    credential: member.credential_id.to_string(),
+                    reason: "quota scope must not be empty".to_string(),
+                });
+            }
+            if member.max_in_flight.get() > 1024
+                || member
+                    .requests_per_minute
+                    .is_some_and(|value| value.get() > 10_000_000)
+                || member
+                    .tokens_per_minute
+                    .is_some_and(|value| value.get() > 10_000_000_000)
+                || member.weight.get() > 1000
+                || (pool.strategy != PoolStrategy::WeightedRoundRobin && member.weight.get() != 1)
+            {
+                return Err(RegistryError::InvalidPoolMember {
+                    pool: pool.id.to_string(),
+                    credential: member.credential_id.to_string(),
+                    reason: "member limits or strategy weight are out of range".to_string(),
+                });
+            }
+            let budget = (
+                member.requests_per_minute.map(|value| value.get()),
+                member.tokens_per_minute.map(|value| value.get()),
+            );
+            if let Some(previous) = scopes.insert(member.quota_scope.clone(), budget) {
+                if previous != budget {
+                    return Err(RegistryError::InvalidPool {
+                        pool: pool.id.to_string(),
+                        reason: format!(
+                            "members sharing quota scope {} must use identical RPM/TPM limits",
+                            member.quota_scope
+                        ),
+                    });
+                }
+            }
+        }
+        for (other_id, other) in &self.pools {
+            if other_id == &pool.id {
+                continue;
+            }
+            for member in &pool.members {
+                if other
+                    .members
+                    .iter()
+                    .any(|candidate| candidate.credential_id == member.credential_id)
+                {
+                    return Err(RegistryError::CredentialInMultiplePools {
+                        credential: member.credential_id.to_string(),
+                        first_pool: other_id.to_string(),
+                        second_pool: pool.id.to_string(),
+                    });
                 }
             }
         }
@@ -503,6 +797,7 @@ mod tests {
                     provider_id: "bai".into(),
                     model_id: "small".into(),
                     credential_id: None,
+                    credential_pool_id: None,
                     priority: 0,
                 }],
             ))
@@ -531,10 +826,59 @@ mod tests {
                     provider_id: "kilo".into(),
                     model_id: "x".into(),
                     credential_id: Some("bai-key".into()),
+                    credential_pool_id: None,
                     priority: 0,
                 }],
             ))
             .unwrap_err();
         assert!(matches!(err, RegistryError::CrossProviderCredential { .. }));
+    }
+
+    #[test]
+    fn resolve_alias_materializes_pool_members_for_legacy_callers() {
+        let mut r = ProviderRegistry::new();
+        r.register_provider(provider("bai")).unwrap();
+        r.insert_model(model("bai", "model-x", Some(1_000_000)));
+        for id in ["key-a", "key-b"] {
+            r.register_credential(Credential {
+                id: id.into(),
+                provider_id: "bai".into(),
+                source: SecretSource::Managed { id: id.into() },
+                auth_scheme: AuthScheme::Bearer,
+            })
+            .unwrap();
+        }
+        r.upsert_pool(
+            CredentialPool::new(
+                "pool",
+                "bai",
+                PoolStrategy::RoundRobin,
+                vec![
+                    CredentialPoolMember::new("key-a", "account-a", 1, None, None, 1).unwrap(),
+                    CredentialPoolMember::new("key-b", "account-b", 1, None, None, 1).unwrap(),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        r.register_alias(ModelAlias::one_million(
+            "alias",
+            vec![ModelCandidate {
+                provider_id: "bai".into(),
+                model_id: "model-x".into(),
+                credential_id: None,
+                credential_pool_id: Some("pool".into()),
+                priority: 0,
+            }],
+        ))
+        .unwrap();
+        let targets = r.resolve_alias("alias").unwrap();
+        assert_eq!(
+            targets
+                .iter()
+                .map(|target| target.credential_id.as_ref().unwrap().as_ref())
+                .collect::<Vec<_>>(),
+            ["key-a", "key-b"]
+        );
     }
 }

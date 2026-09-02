@@ -126,6 +126,9 @@ pub enum Command {
     /// Manage stable client-facing aliases and their fallback candidates.
     Alias(ProviderAliasArgs),
 
+    /// Manage named credential pools and their local capacity limits.
+    Pool(PoolArgs),
+
     /// Explain, test, or simulate route selection without hiding provider state.
     Route(RouteArgs),
 
@@ -898,8 +901,73 @@ pub struct RouteSimulateArgs {
     pub from: Option<String>,
     #[arg(long)]
     pub status: Option<u16>,
+    /// Number of simultaneous local admissions to simulate.
+    #[arg(long, default_value_t = 1, value_parser = parse_concurrency)]
+    pub concurrent: usize,
     #[arg(short, long)]
     pub config: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct PoolArgs {
+    #[command(subcommand)]
+    pub command: PoolCommand,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum PoolCommand {
+    /// List configured credential pools.
+    List(PoolListArgs),
+    /// Show one configured credential pool.
+    Show(PoolShowArgs),
+    /// Create or replace a credential pool.
+    Set(PoolSetArgs),
+    /// Remove a pool that is not referenced by an alias.
+    Remove(PoolRemoveArgs),
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct PoolListArgs {
+    #[arg(short, long)]
+    pub config: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct PoolShowArgs {
+    pub id: String,
+    #[arg(short, long)]
+    pub config: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct PoolSetArgs {
+    pub id: String,
+    #[arg(long)]
+    pub provider: String,
+    #[arg(long, default_value = "round_robin")]
+    pub strategy: String,
+    /// CREDENTIAL,QUOTA_SCOPE,MAX_IN_FLIGHT,RPM,TPM,WEIGHT
+    #[arg(long = "member", required = true)]
+    pub member: Vec<String>,
+    #[arg(short, long)]
+    pub config: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct PoolRemoveArgs {
+    pub id: String,
+    #[arg(short, long)]
+    pub config: Option<String>,
+}
+
+fn parse_concurrency(value: &str) -> Result<usize, String> {
+    let value = value
+        .parse::<usize>()
+        .map_err(|_| "concurrent must be an integer in 1..=128".to_string())?;
+    (1..=128)
+        .contains(&value)
+        .then_some(value)
+        .ok_or_else(|| "concurrent must be in 1..=128".to_string())
 }
 
 #[derive(Args, Debug, Clone)]
@@ -1103,6 +1171,44 @@ mod tests {
             panic!("expected upstream set");
         };
         assert!(set.api_key_stdin);
+    }
+
+    #[test]
+    fn pool_commands_accept_capacity_configuration_without_secret_values() {
+        let parsed = parse(&[
+            "pool",
+            "set",
+            "free-1m",
+            "--provider",
+            "bai",
+            "--strategy",
+            "round_robin",
+            "--member",
+            "key-a,account-a,1,20,120000,1",
+        ])
+        .expect("pool set");
+        let Command::Pool(args) = parsed.command.unwrap() else {
+            panic!("expected pool command");
+        };
+        let PoolCommand::Set(args) = args.command else {
+            panic!("expected pool set");
+        };
+        assert_eq!(args.member.len(), 1);
+        assert_eq!(args.provider, "bai");
+        assert_eq!(args.member[0], "key-a,account-a,1,20,120000,1");
+    }
+
+    #[test]
+    fn route_simulate_accepts_bounded_concurrency() {
+        let parsed = parse(&["route", "simulate", "free-1m", "--concurrent", "3"])
+            .expect("route simulation");
+        let Command::Route(args) = parsed.command.unwrap() else {
+            panic!("expected route command");
+        };
+        let RouteCommand::Simulate(args) = args.command else {
+            panic!("expected simulation");
+        };
+        assert_eq!(args.concurrent, 3);
     }
 
     #[test]

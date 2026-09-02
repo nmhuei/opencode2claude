@@ -98,6 +98,9 @@ pub async fn run_cli() {
         Some(Command::Alias(args)) => {
             command::provider::run_aliases(args.command, global_config.clone(), fmt).await
         }
+        Some(Command::Pool(args)) => {
+            command::provider::run_pools(args.command, global_config.clone(), fmt).await
+        }
         Some(Command::Route(args)) => {
             command::provider::run_route(args.command, global_config.clone(), fmt).await
         }

@@ -54,3 +54,32 @@ pub fn estimate_input_tokens(payload: &MessagesRequest) -> u32 {
         total_tokens
     }
 }
+
+/// Estimate tokens for an OpenAI-compatible messages JSON value. Walking the
+/// complete value intentionally includes tool calls, tool results, and nested
+/// arguments, which the older typed Anthropic helper cannot see.
+pub fn estimate_provider_request_tokens(messages: &serde_json::Value) -> u64 {
+    let encoded = serde_json::to_string(messages).unwrap_or_default();
+    let estimate = estimate_string_tokens(&encoded) as u64;
+    if estimate == 0 {
+        100
+    } else {
+        estimate
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::estimate_provider_request_tokens;
+
+    #[test]
+    fn provider_estimator_includes_nested_tool_arguments() {
+        let plain = estimate_provider_request_tokens(&serde_json::json!([
+            {"role": "user", "content": "hello"}
+        ]));
+        let with_tool = estimate_provider_request_tokens(&serde_json::json!([
+            {"role": "user", "content": "hello", "tool_calls": [{"arguments": {"path": "/very/long/path"}}]}
+        ]));
+        assert!(with_tool > plain);
+    }
+}

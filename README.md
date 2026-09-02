@@ -87,6 +87,13 @@ opencode2api alias set free-1m --client-model 'sonnet[1m]' \
   --context-window 1000000 --candidate bai:deepseek-v4-flash:main
 opencode2api alias use free-1m
 opencode2api route explain free-1m
+
+# Optional local capacity pool: credentials are references, not secret values.
+opencode2api pool set free-1m --provider bai --strategy round_robin \
+  --member main,bai-account-main,1,20,120000,1
+opencode2api alias set free-1m --client-model 'sonnet[1m]' \
+  --context-window 1000000 --candidate bai:deepseek-v4-flash:pool=free-1m
+opencode2api route simulate free-1m --concurrent 3
 ```
 
 The provider, credential, model, alias, route, health, and config commands are

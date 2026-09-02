@@ -87,6 +87,14 @@ Readiness remains false until fresh identity probes satisfy the policy.
 
 The retry policy separates rate limits, provider client errors, provider server errors, and transport failures. Check authenticated metrics for the relevant counter. Configure explicit compatible fallback models rather than relying on implicit fallback for reasoning streams.
 
+For provider pools, distinguish a local `provider_capacity_exhausted` 429 from
+an upstream 429: the former means the scheduler declined to send because all
+eligible local slots/buckets were full, while the latter means a request was
+sent and the provider limited it. Inspect `GET /api/v1/provider-runtime` or
+`opencode2api health` for pool in-flight, cooldown, rejection, and fallback
+counters. A pool is process-local and fail-fast; it is not a distributed quota
+coordinator.
+
 Do not treat a provider `400` or `500` as proof that a proxy is unhealthy. The bridge does not penalize transport for ordinary provider failures.
 
 ## Streaming ends early

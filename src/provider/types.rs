@@ -2,6 +2,7 @@ use crate::config::SecretString;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::num::{NonZeroU32, NonZeroU64};
 
 macro_rules! id_type {
     ($name:ident) => {
@@ -34,6 +35,47 @@ macro_rules! id_type {
 id_type!(ProviderId);
 id_type!(CredentialId);
 id_type!(AliasId);
+
+/// Stable identifier for a named set of credentials sharing one routing
+/// policy. Pool ids are kept separate from credential ids so CLI/config
+/// bindings cannot silently resolve to the wrong namespace.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CredentialPoolId(pub String);
+
+impl CredentialPoolId {
+    pub fn new(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            return Err("credential pool id must not be empty".to_string());
+        }
+        Ok(Self(value))
+    }
+}
+
+impl From<&str> for CredentialPoolId {
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
+    }
+}
+
+impl From<String> for CredentialPoolId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl AsRef<str> for CredentialPoolId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for CredentialPoolId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -201,8 +243,187 @@ pub struct ModelCandidate {
     pub provider_id: ProviderId,
     pub model_id: String,
     pub credential_id: Option<CredentialId>,
+    /// V3 uses this field instead of `credential_id`; keeping both optional
+    /// fields preserves the schema-v2 Rust representation while validation
+    /// guarantees that at most one is populated.
+    #[serde(default)]
+    pub credential_pool_id: Option<CredentialPoolId>,
     #[serde(default)]
     pub priority: i32,
+}
+
+impl ModelCandidate {
+    pub fn binding(&self) -> Result<CredentialBinding, String> {
+        match (&self.credential_id, &self.credential_pool_id) {
+            (None, None) => Ok(CredentialBinding::Anonymous),
+            (Some(credential), None) => Ok(CredentialBinding::Direct(credential.clone())),
+            (None, Some(pool)) => Ok(CredentialBinding::Pool(pool.clone())),
+            (Some(_), Some(_)) => {
+                Err("candidate cannot define both credential and credential_pool".to_string())
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PoolStrategy {
+    #[default]
+    RoundRobin,
+    LeastLoaded,
+    WeightedRoundRobin,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialPoolMember {
+    pub credential_id: CredentialId,
+    pub quota_scope: String,
+    pub max_in_flight: NonZeroU32,
+    pub requests_per_minute: Option<NonZeroU32>,
+    pub tokens_per_minute: Option<NonZeroU64>,
+    pub weight: NonZeroU32,
+}
+
+impl CredentialPoolMember {
+    pub fn new(
+        credential_id: impl Into<CredentialId>,
+        quota_scope: impl Into<String>,
+        max_in_flight: u32,
+        requests_per_minute: Option<u32>,
+        tokens_per_minute: Option<u64>,
+        weight: u32,
+    ) -> Result<Self, String> {
+        let credential_id: CredentialId = credential_id.into();
+        if credential_id.as_ref().trim().is_empty() {
+            return Err("pool member credential id must not be empty".to_string());
+        }
+        let quota_scope = quota_scope.into();
+        if quota_scope.trim().is_empty() {
+            return Err("pool member quota scope must not be empty".to_string());
+        }
+        let max_in_flight = NonZeroU32::new(max_in_flight)
+            .filter(|value| value.get() <= 1024)
+            .ok_or_else(|| "max_in_flight must be in 1..=1024".to_string())?;
+        let requests_per_minute = match requests_per_minute {
+            None => None,
+            Some(value) => Some(
+                NonZeroU32::new(value)
+                    .filter(|value| value.get() <= 10_000_000)
+                    .ok_or_else(|| "requests_per_minute must be in 1..=10000000".to_string())?,
+            ),
+        };
+        let tokens_per_minute = match tokens_per_minute {
+            None => None,
+            Some(value) => Some(
+                NonZeroU64::new(value)
+                    .filter(|value| value.get() <= 10_000_000_000)
+                    .ok_or_else(|| "tokens_per_minute must be in 1..=10000000000".to_string())?,
+            ),
+        };
+        let weight = NonZeroU32::new(weight)
+            .filter(|value| value.get() <= 1000)
+            .ok_or_else(|| "weight must be in 1..=1000".to_string())?;
+        Ok(Self {
+            credential_id,
+            quota_scope,
+            max_in_flight,
+            requests_per_minute,
+            tokens_per_minute,
+            weight,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialPool {
+    pub id: CredentialPoolId,
+    pub provider_id: ProviderId,
+    pub strategy: PoolStrategy,
+    pub members: Vec<CredentialPoolMember>,
+}
+
+impl CredentialPool {
+    pub fn new(
+        id: impl Into<String>,
+        provider_id: impl Into<ProviderId>,
+        strategy: PoolStrategy,
+        members: Vec<CredentialPoolMember>,
+    ) -> Result<Self, String> {
+        if members.is_empty() {
+            return Err("credential pool must contain at least one member".to_string());
+        }
+        let id = CredentialPoolId::new(id.into())?;
+        let provider_id = provider_id.into();
+        if provider_id.as_ref().trim().is_empty() {
+            return Err("credential pool provider must not be empty".to_string());
+        }
+        Ok(Self {
+            id,
+            provider_id,
+            strategy,
+            members,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CredentialBinding {
+    Anonymous,
+    Direct(CredentialId),
+    Pool(CredentialPoolId),
+}
+
+impl CredentialBinding {
+    pub fn credential_id(&self) -> Option<&CredentialId> {
+        match self {
+            Self::Direct(id) => Some(id),
+            Self::Anonymous | Self::Pool(_) => None,
+        }
+    }
+
+    pub fn pool_id(&self) -> Option<&CredentialPoolId> {
+        match self {
+            Self::Pool(id) => Some(id),
+            Self::Anonymous | Self::Direct(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RouteTarget {
+    pub alias_id: AliasId,
+    pub client_model: String,
+    pub provider_id: ProviderId,
+    pub model_id: String,
+    pub wire_model_id: String,
+    pub binding: CredentialBinding,
+    pub context_window: usize,
+    pub max_output_tokens: Option<usize>,
+    pub candidate_index: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapacityDemand {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub estimated_tokens: u64,
+}
+
+impl CapacityDemand {
+    pub fn new(input_tokens: u64, output_tokens: u64) -> Self {
+        let total = input_tokens.saturating_add(output_tokens);
+        let estimated_tokens = total
+            .checked_mul(125)
+            .and_then(|value| value.checked_add(99))
+            .map(|value| value / 100)
+            .unwrap_or(u64::MAX)
+            .max(1);
+        Self {
+            input_tokens,
+            output_tokens,
+            estimated_tokens,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -261,6 +482,10 @@ pub struct ProviderRequest {
     pub messages: serde_json::Value,
     pub max_output_tokens: Option<usize>,
     pub stream: bool,
+    /// Original OpenAI-shaped request when available. Adapters use this to
+    /// preserve tools, tool choice, sampling, response format, and vendor
+    /// extensions while replacing only the selected wire model.
+    pub body: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -281,4 +506,54 @@ pub struct NormalizedResponse {
 pub(crate) fn redacted_secret(secret: &SecretString) -> String {
     let _ = secret;
     "[REDACTED]".to_string()
+}
+
+#[cfg(test)]
+mod capacity_types_tests {
+    use super::*;
+
+    #[test]
+    fn pool_member_and_route_binding_are_explicit() {
+        let member = CredentialPoolMember::new("key-a", "account-a", 2, None, None, 3).unwrap();
+        let pool = CredentialPool::new(
+            "free-1m",
+            "bai",
+            PoolStrategy::WeightedRoundRobin,
+            vec![member.clone()],
+        )
+        .unwrap();
+
+        assert_eq!(pool.id.as_ref(), "free-1m");
+        assert_eq!(pool.provider_id.as_ref(), "bai");
+        assert_eq!(pool.members[0].credential_id.as_ref(), "key-a");
+        assert_eq!(pool.members[0].weight.get(), 3);
+        assert_eq!(
+            CredentialBinding::Pool(pool.id.clone()).pool_id(),
+            Some(&pool.id)
+        );
+        assert!(CredentialBinding::Anonymous.pool_id().is_none());
+        let key = CredentialId::from("key-a");
+        assert_eq!(
+            CredentialBinding::Direct(key.clone()).credential_id(),
+            Some(&key)
+        );
+    }
+
+    #[test]
+    fn capacity_demand_uses_saturating_ceil_with_minimum_one() {
+        assert_eq!(CapacityDemand::new(0, 0).estimated_tokens, 1);
+        assert_eq!(CapacityDemand::new(1, 1).estimated_tokens, 3);
+        assert_eq!(
+            CapacityDemand::new(u64::MAX, u64::MAX).estimated_tokens,
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn invalid_pool_values_are_rejected() {
+        assert!(CredentialPoolId::new("").is_err());
+        assert!(CredentialPoolMember::new("key", "scope", 0, None, None, 1).is_err());
+        assert!(CredentialPoolMember::new("key", "scope", 1, Some(0), None, 1).is_err());
+        assert!(CredentialPoolMember::new("key", "scope", 1, None, None, 0).is_err());
+    }
 }

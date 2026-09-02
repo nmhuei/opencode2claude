@@ -10,14 +10,17 @@ use crate::error::BridgeError;
 use crate::observability::{EgressRouteMetricClass, RetryMetricClass};
 use crate::opencode::types::{OpenAiInboundRequest, OpenAiRequest};
 use crate::provider::adapters::AdapterRegistry;
+use crate::provider::capacity::{AdmissionError, AttemptIdentity, CapacityScheduler};
 use crate::provider::credentials::default_store;
 use crate::provider::routing::RoutePlanner;
-use crate::provider::types::ProviderRequest;
+use crate::provider::types::{CapacityDemand, ProviderRequest, RouteTarget};
 use crate::proxy_pool::{EgressLease, EgressRole, RouteKind, RouteMetadata};
 use crate::state::AppState;
 use reqwest::{Client, RequestBuilder, StatusCode};
 use serde::Serialize;
+use std::collections::BTreeSet;
 use std::net::IpAddr;
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
 
@@ -53,6 +56,7 @@ trait RetryableOpenAiRequest: Serialize + Clone {
                 .and_then(serde_json::Value::as_u64)
                 .map(|value| value as usize),
             stream: self.stream(),
+            body: Some(value),
         }
     }
 }
@@ -208,7 +212,7 @@ async fn execute_retryable_request<T: RetryableOpenAiRequest>(
 ) -> Result<LeasedResponse, BridgeError> {
     if let Some(runtime) = state.provider_runtime.as_ref() {
         let snapshot = runtime.snapshot();
-        let runtime_registry = crate::provider::ProviderRegistry::from_snapshot(&snapshot);
+        let runtime_registry = crate::provider::ProviderRegistry::from_snapshot(&snapshot.registry);
         let alias_id = state
             .config
             .active_alias
@@ -222,15 +226,16 @@ async fn execute_retryable_request<T: RetryableOpenAiRequest>(
             });
         if let Some(alias_id) = alias_id {
             let planner = RoutePlanner::new(&runtime_registry);
-            let targets = planner
-                .plan(&request.provider_request(), &alias_id)
+            let routes = planner
+                .plan_routes(&request.provider_request(), &alias_id)
                 .map_err(|error| BridgeError::UpstreamError(error.to_string()))?;
             return execute_provider_targets(
                 state,
                 routing_key,
                 request,
                 &runtime_registry,
-                targets,
+                snapshot.scheduler.clone(),
+                routes,
             )
             .await;
         }
@@ -608,51 +613,47 @@ async fn execute_provider_targets<T: RetryableOpenAiRequest>(
     routing_key: &str,
     request: &T,
     registry: &crate::provider::ProviderRegistry,
-    targets: Vec<crate::provider::AttemptTarget>,
+    scheduler: Arc<CapacityScheduler>,
+    routes: Vec<RouteTarget>,
 ) -> Result<LeasedResponse, BridgeError> {
-    if targets.is_empty() {
+    if routes.is_empty() {
         return Err(BridgeError::UpstreamError(
             "no provider candidate satisfies the alias context requirement".to_string(),
         ));
     }
     let request_body = request.provider_request();
+    let input_tokens = crate::opencode::forward::common::estimate_provider_request_tokens(
+        request_body.body.as_ref().unwrap_or(&request_body.messages),
+    );
+    let output_tokens = request_body
+        .max_output_tokens
+        .map(|value| value as u64)
+        .or_else(|| {
+            routes
+                .iter()
+                .filter_map(|route| route.max_output_tokens.map(|value| value as u64))
+                .max()
+        })
+        .unwrap_or(0);
+    let demand = CapacityDemand::new(input_tokens, output_tokens);
     let secret_store = default_store(&state.config.management.config_path);
     let mut last_status = None;
-    let mut attempted = vec![false; targets.len()];
+    let mut attempted = BTreeSet::<AttemptIdentity>::new();
     loop {
-        // RouteState knows cooldowns, while this request-local mask knows
-        // which candidates have already been consumed. Passing the full list
-        // to `choose` would select an already-attempted target again whenever
-        // its failure class deliberately has no cooldown (for example a
-        // provider-specific billing error), silently ending fallback early.
-        let remaining_indices: Vec<usize> = targets
-            .iter()
-            .enumerate()
-            .filter_map(|(index, _)| (!attempted[index]).then_some(index))
-            .collect();
-        if remaining_indices.is_empty() {
-            break;
-        }
-        let remaining_targets: Vec<_> = remaining_indices
-            .iter()
-            .map(|index| targets[*index].clone())
-            .collect();
-        let selected = {
-            let route_state = state.provider_route_state.read().await;
-            route_state.choose(&remaining_targets, std::time::Instant::now())
-        };
-        let target_index = match selected {
-            crate::provider::resilience::RouteAction::UseTarget(index) => remaining_indices[index],
-            crate::provider::resilience::RouteAction::AllCoolingDown { retry_after } => {
-                return Err(BridgeError::EgressUnavailable(format!(
-                    "all provider candidates are cooling down; retry after {} second(s)",
-                    retry_after.max(Duration::from_secs(1)).as_secs()
-                )))
+        let now = std::time::Instant::now();
+        let mut capacity = match scheduler.admit(&routes, demand, &attempted, now) {
+            Ok(lease) => lease,
+            Err(AdmissionError::NoEligibleRoutes) => break,
+            Err(AdmissionError::DemandTooLarge { .. }) => {
+                return Err(BridgeError::ProviderCapacityExhausted { retry_after: None })
             }
-            crate::provider::resilience::RouteAction::NoEligibleTargets => break,
+            Err(AdmissionError::Exhausted { retry_after }) if attempted.is_empty() => {
+                return Err(BridgeError::ProviderCapacityExhausted { retry_after })
+            }
+            Err(AdmissionError::Exhausted { .. }) => break,
         };
-        attempted[target_index] = true;
-        let target = &targets[target_index];
+        let target = capacity.target().clone();
+        attempted.insert(AttemptIdentity::from_target(&target));
         let provider = registry.provider(&target.provider_id).ok_or_else(|| {
             BridgeError::UpstreamError("provider disappeared from snapshot".to_string())
         })?;
@@ -661,11 +662,11 @@ async fn execute_provider_targets<T: RetryableOpenAiRequest>(
             .as_ref()
             .and_then(|id| registry.credentials().find(|candidate| &candidate.id == id));
         let secret = match credential {
+            Some(credential) if credential.auth_scheme == crate::provider::AuthScheme::None => None,
             Some(credential) => match secret_store.resolve(credential) {
                 Ok(secret) => Some(secret),
                 Err(_error) => {
-                    state.provider_route_state.write().await.record_failure(
-                        target,
+                    capacity.fail(
                         crate::provider::adapters::FailureClass::CredentialRejected,
                         None,
                         std::time::Instant::now(),
@@ -682,8 +683,15 @@ async fn execute_provider_targets<T: RetryableOpenAiRequest>(
         };
         let adapter = AdapterRegistry::for_provider(provider.kind);
         let prepared = adapter
-            .prepare(provider, target, &request_body, secret.as_ref())
-            .map_err(|error| BridgeError::UpstreamError(error.to_string()))?;
+            .prepare(provider, &target, &request_body, secret.as_ref())
+            .map_err(|error| {
+                capacity.fail(
+                    crate::provider::adapters::FailureClass::ClientRequest,
+                    None,
+                    std::time::Instant::now(),
+                );
+                BridgeError::UpstreamError(error.to_string())
+            })?;
         let mut route = select_route_for_attempt(state, routing_key, None, None).await?;
         let mut builder = route.client.post(prepared.url).json(&prepared.body);
         for (key, value) in prepared.headers {
@@ -696,15 +704,11 @@ async fn execute_provider_targets<T: RetryableOpenAiRequest>(
         match builder.send().await {
             Ok(response) if response.status().is_success() => {
                 record_transport_success(state, route.proxy_index).await;
-                state
-                    .provider_route_state
-                    .write()
-                    .await
-                    .record_success(target);
-                return Ok(LeasedResponse::new(
+                return Ok(LeasedResponse::new_with_capacity(
                     response,
                     route.lease.take(),
                     route.metadata.clone(),
+                    Some(capacity),
                 ));
             }
             Ok(response) => {
@@ -717,22 +721,17 @@ async fn execute_provider_targets<T: RetryableOpenAiRequest>(
                     &headers,
                     &body.chars().take(8_192).collect::<String>(),
                 );
-                if failure == crate::provider::adapters::FailureClass::ClientRequest {
-                    return Err(BridgeError::UpstreamError(format!(
-                        "provider returned HTTP {status}"
-                    )));
-                }
                 let retry_after = headers
                     .get("retry-after")
                     .and_then(|value| value.to_str().ok())
                     .and_then(|value| parse_retry_after(value, std::time::SystemTime::now()))
                     .map(clamp_provider_retry_after);
-                state.provider_route_state.write().await.record_failure(
-                    target,
-                    failure,
-                    retry_after,
-                    std::time::Instant::now(),
-                );
+                capacity.fail(failure, retry_after, std::time::Instant::now());
+                if failure == crate::provider::adapters::FailureClass::ClientRequest {
+                    return Err(BridgeError::UpstreamError(format!(
+                        "provider returned HTTP {status}"
+                    )));
+                }
                 if failure != crate::provider::adapters::FailureClass::RateLimit {
                     if let Some(index) = route.proxy_index {
                         state.proxy_pool.write().await.record_failure(index);
@@ -751,8 +750,7 @@ async fn execute_provider_targets<T: RetryableOpenAiRequest>(
                 if let Some(index) = route.proxy_index {
                     state.proxy_pool.write().await.record_failure(index);
                 }
-                state.provider_route_state.write().await.record_failure(
-                    target,
+                capacity.fail(
                     crate::provider::adapters::FailureClass::Transport,
                     None,
                     std::time::Instant::now(),

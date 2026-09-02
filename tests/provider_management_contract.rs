@@ -114,6 +114,7 @@ fn configured_non_million_alias_exports_its_context_and_eighty_percent_compactio
                 provider_id: "local".into(),
                 model_id: "small".into(),
                 credential_id: None,
+                credential_pool_id: None,
                 priority: 0,
             }],
         })

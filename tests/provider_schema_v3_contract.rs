@@ -127,3 +127,93 @@ model = "small"
     );
     let _ = fs::remove_file(path);
 }
+
+#[test]
+fn v3_pool_binding_resolves_to_named_provider_pool() {
+    let path = fixture_path(
+        "provider-v3-pool",
+        r#"
+schema_version = 3
+[providers.bai]
+kind = "bai"
+base_url = "https://api.b.ai/v1"
+[credentials.key-a]
+provider = "bai"
+source = "env:KEY_A"
+[credentials.key-b]
+provider = "bai"
+source = "env:KEY_B"
+[models.bai.deepseek]
+wire_model = "deepseek"
+context_window = 1000000
+verified_context = true
+[credential_pools.free_1m]
+provider = "bai"
+strategy = "round_robin"
+[[credential_pools.free_1m.members]]
+credential = "key-a"
+quota_scope = "account-a"
+max_in_flight = 1
+requests_per_minute = 20
+tokens_per_minute = 120000
+[[credential_pools.free_1m.members]]
+credential = "key-b"
+quota_scope = "account-b"
+max_in_flight = 1
+[aliases.free-1m]
+client_model = "sonnet[1m]"
+context_window = 1000000
+strict_context = true
+[[aliases.free-1m.candidates]]
+provider = "bai"
+model = "deepseek"
+credential_pool = "free_1m"
+"#,
+    );
+    let registry = load_provider_registry(&path).unwrap();
+    let pool = registry.pool("free_1m").unwrap();
+    assert_eq!(pool.provider_id.as_ref(), "bai");
+    assert_eq!(pool.members.len(), 2);
+    let candidate = &registry.alias("free-1m").unwrap().candidates[0];
+    assert_eq!(
+        candidate.credential_pool_id.as_ref().unwrap().as_ref(),
+        "free_1m"
+    );
+    assert!(candidate.credential_id.is_none());
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn v3_candidate_rejects_direct_and_pool_binding_together() {
+    let path = fixture_path(
+        "provider-v3-both-bindings",
+        r#"
+schema_version = 3
+[providers.bai]
+kind = "bai"
+base_url = "https://api.b.ai/v1"
+[credentials.key-a]
+provider = "bai"
+source = "env:KEY_A"
+[models.bai.deepseek]
+context_window = 1000000
+verified_context = true
+[credential_pools.free_1m]
+provider = "bai"
+[[credential_pools.free_1m.members]]
+credential = "key-a"
+[aliases.free-1m]
+client_model = "sonnet[1m]"
+context_window = 1000000
+strict_context = true
+[[aliases.free-1m.candidates]]
+provider = "bai"
+model = "deepseek"
+credential = "key-a"
+credential_pool = "free_1m"
+"#,
+    );
+    let error = load_provider_registry(&path).unwrap_err();
+    assert!(error.to_string().contains("both"));
+    let _ = fs::remove_file(path);
+}

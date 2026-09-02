@@ -21,6 +21,7 @@ opencode2api
 ├── model list|show|discover|verify
 ├── alias list|show|set|remove|use
 ├── route explain|test|simulate
+├── pool list|show|set|remove
 ├── health [PROVIDER] [--watch]
 ├── config path|show|validate|migrate
 ├── server
@@ -55,6 +56,13 @@ Use `opencode2api <command> --help` as the executable source of truth.
 
 The schema-v3 provider workflow (with schema-v2 compatibility), credential storage rules, and Claude Code 1M
 alias contract are documented in [provider-management.md](provider-management.md).
+
+Pool admission is configured with `pool set POOL_ID --provider PROVIDER` and
+repeatable `--member CREDENTIAL,QUOTA_SCOPE,MAX_IN_FLIGHT,RPM,TPM,WEIGHT`.
+Aliases bind a pool explicitly as `provider:model:pool=POOL_ID`; bare third
+segments remain direct credential ids. `route simulate ALIAS --concurrent N`
+uses the same local scheduler without contacting an upstream or resolving a
+secret.
 
 ## Global output
 
