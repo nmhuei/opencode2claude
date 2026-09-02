@@ -306,7 +306,9 @@ pub fn resolve_model_profile(model: &str) -> ModelProfile {
     }
 
     let lower = clean.to_ascii_lowercase();
-    if lower.contains("gemini") {
+    if lower == "claude-sonnet-5[1m]" {
+        ModelProfile::from_context("claude-sonnet-5[1m]", 1_000_000, 128_000, true)
+    } else if lower.contains("gemini") {
         ModelProfile {
             id: "gemini-3.7-flash",
             label: "Gemini Flash",

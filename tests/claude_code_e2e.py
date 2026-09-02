@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import shutil
 import socket
 import subprocess
@@ -44,6 +45,9 @@ MARKER_TEXT = "E2E_REAL_OK"
 TOOL_ACCEPTED = "TOOL_RESULT_ACCEPTED"
 
 STUB_MODEL = "deepseek-v4-flash"
+CLAUDE_TIMEOUT_SECONDS = 180
+CLAUDE_VERSION_TIMEOUT_SECONDS = 10
+LAUNCHER_ENV_TIMEOUT_SECONDS = 30
 
 ENV_STRIP_EXACT = {
     "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
@@ -85,6 +89,16 @@ def resolve_serve_bin() -> Path:
         if candidate.exists():
             return candidate
     raise SystemExit("opencode2api-serve not found; build first (cargo build)")
+
+
+def resolve_cli_bin(serve_bin: Path) -> Path:
+    override = os.environ.get("E2E_CLI_BIN")
+    if override:
+        return Path(override)
+    candidate = serve_bin.with_name("opencode2api")
+    if candidate.exists():
+        return candidate
+    raise SystemExit("opencode2api CLI not found beside the serve binary; build first (cargo build)")
 
 
 def chunk(delta: dict, finish_reason: str | None = None) -> str:
@@ -213,21 +227,38 @@ def wait_health(port: int, timeout: float = 20.0) -> None:
 
 def write_claude_settings(profile: Path, bridge_port: int, *, model: str = MODEL_PROFILE,
                            auth_token: str | None = None, context_tokens: str = "200000",
-                           max_output_tokens: str = "128000",
-                           auto_compact_window: str = "200000") -> Path:
+                           max_output_tokens: str = "128000", auto_compact_window: str = "200000",
+                           launcher_env: dict[str, str] | None = None) -> Path:
     profile.mkdir(parents=True, exist_ok=True)
-    env_block = {
-        "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{bridge_port}",
-        "ANTHROPIC_API_KEY": CLIENT_TOKEN if auth_token is None else "",
-        "CLAUDE_CODE_MAX_CONTEXT_TOKENS": context_tokens,
-        "CLAUDE_CODE_MAX_OUTPUT_TOKENS": max_output_tokens,
-        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": auto_compact_window,
-        "CLAUDE_CODE_DISABLE_1M_CONTEXT": "0" if context_tokens == "1000000" else "1",
-        "MAX_THINKING_TOKENS": "8000",
-    }
-    if auth_token is not None:
-        env_block["ANTHROPIC_AUTH_TOKEN"] = auth_token
-    settings = {"model": model, "alwaysThinkingEnabled": False, "env": env_block}
+    if launcher_env is None:
+        env_block = {
+            "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{bridge_port}",
+            "ANTHROPIC_API_KEY": CLIENT_TOKEN if auth_token is None else "",
+            "CLAUDE_CODE_MAX_CONTEXT_TOKENS": context_tokens,
+            "CLAUDE_CODE_MAX_OUTPUT_TOKENS": max_output_tokens,
+            "CLAUDE_CODE_AUTO_COMPACT_WINDOW": auto_compact_window,
+            "CLAUDE_CODE_DISABLE_1M_CONTEXT": "0" if context_tokens == "1000000" else "1",
+            "MAX_THINKING_TOKENS": "8000",
+        }
+        if auth_token is not None:
+            env_block["ANTHROPIC_AUTH_TOKEN"] = auth_token
+        settings = {"model": model, "alwaysThinkingEnabled": False, "env": env_block}
+    else:
+        required = {
+            "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_MODEL", "OPENCODE_MODEL", "CLAUDE_CODE_DISABLE_1M_CONTEXT",
+            "CLAUDE_CODE_MAX_CONTEXT_TOKENS", "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+            "CLAUDE_CODE_AUTO_COMPACT_WINDOW", "MAX_THINKING_TOKENS",
+        }
+        missing = sorted(required.difference(launcher_env))
+        if missing:
+            raise RuntimeError(f"launcher environment is missing: {', '.join(missing)}")
+        env_block = {key: launcher_env[key] for key in sorted(required)}
+        settings = {
+            "model": launcher_env["ANTHROPIC_MODEL"],
+            "alwaysThinkingEnabled": False,
+            "env": env_block,
+        }
     path = profile / "settings.json"
     path.write_text(json.dumps(settings, indent=2) + "\n")
     return path
@@ -235,7 +266,8 @@ def write_claude_settings(profile: Path, bridge_port: int, *, model: str = MODEL
 
 def run_claude(case: str, profile: Path, prompt: str, *, max_turns: int,
                tools: list[str], work_dir: Path | None, model: str = MODEL_PROFILE,
-               bare: bool = False) -> tuple[subprocess.CompletedProcess[str], int]:
+               bare: bool = False, process_environment: dict[str, str] | None = None
+               ) -> tuple[subprocess.CompletedProcess[str], int]:
     cmd = [
         shutil.which("claude") or "claude",
         "-p", prompt,
@@ -260,11 +292,13 @@ def run_claude(case: str, profile: Path, prompt: str, *, max_turns: int,
             env.pop(key)
     no_proxy = env.get("NO_PROXY", "")
     env["NO_PROXY"] = f"{no_proxy},127.0.0.1,localhost" if no_proxy else "127.0.0.1,localhost"
+    if process_environment is not None:
+        env.update(process_environment)
 
     started = time.monotonic()
     proc = subprocess.run(cmd, cwd=work_dir or ROOT, env=env, text=True,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                          timeout=180, check=False)
+                          timeout=CLAUDE_TIMEOUT_SECONDS, check=False)
     elapsed = int((time.monotonic() - started) * 1000)
     (OUT / "raw" / f"{case}.stdout").write_text(proc.stdout)
     (OUT / "raw" / f"{case}.stderr").write_text(proc.stderr)
@@ -289,10 +323,50 @@ def parse_single_json(stdout: str) -> dict[str, Any]:
 
 
 def summary_version(claude_bin: str) -> str:
-    version = subprocess.run(
-        [claude_bin, "--version"], capture_output=True, text=True, check=False
-    )
+    try:
+        version = subprocess.run(
+            [claude_bin, "--version"], capture_output=True, text=True,
+            timeout=CLAUDE_VERSION_TIMEOUT_SECONDS, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return f"unknown version (timed out after {CLAUDE_VERSION_TIMEOUT_SECONDS}s)"
+    except OSError as error:
+        return f"unknown version ({error})"
     return (version.stdout or version.stderr).strip() or "unknown version"
+
+
+def generated_launcher_environment(
+    cli_bin: Path, bridge_port: int, upstream_model: str
+) -> dict[str, str]:
+    env = strip_bridge_env(dict(os.environ))
+    env["BRIDGE_PORT"] = str(bridge_port)
+    env["BRIDGE_AUTH_TOKEN"] = CLIENT_TOKEN
+    env["OPENCODE_MODEL"] = upstream_model
+    env["NO_PROXY"] = "*"
+    try:
+        result = subprocess.run(
+            [str(cli_bin), "--quiet", "env"], cwd=ROOT, env=env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=LAUNCHER_ENV_TIMEOUT_SECONDS, check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(f"launcher environment timed out: {error}") from error
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"launcher environment failed with exit {result.returncode}: {result.stderr.strip()}"
+        )
+
+    values: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        if not line.startswith("export "):
+            continue
+        assignment = line.removeprefix("export ")
+        key, raw_value = assignment.split("=", 1)
+        parsed = shlex.split(raw_value)
+        if len(parsed) != 1:
+            raise RuntimeError(f"could not parse launcher export: {line}")
+        values[key] = parsed[0]
+    return values
 
 
 def parse_args() -> argparse.Namespace:
@@ -317,6 +391,7 @@ def main() -> int:
         print("UNAVAILABLE: Claude Code CLI not found on PATH", file=sys.stderr)
         return 2
     serve_bin = resolve_serve_bin()
+    cli_bin = resolve_cli_bin(serve_bin)
 
     stub_port = free_port()
     bridge_port = free_port()
@@ -390,16 +465,13 @@ upstream_api_keys = ["{KEY_ONE}", "{KEY_TWO}"]
                 print(f"  ✗ {case}: TIMEOUT")
 
         if args.provider_alias == "free-1m":
-            alias = "claude-sonnet-5[1m]"
+            launcher_env = generated_launcher_environment(cli_bin, bridge_port, STUB_MODEL)
+            alias = launcher_env.get("ANTHROPIC_MODEL", "")
             profile = tmp / "profiles" / "provider_alias_free_1m"
             write_claude_settings(
                 profile,
                 bridge_port,
-                model=alias,
-                auth_token=CLIENT_TOKEN,
-                context_tokens="1000000",
-                max_output_tokens="128000",
-                auto_compact_window="800000",
+                launcher_env=launcher_env,
             )
             try:
                 proc, elapsed = run_claude(
@@ -411,6 +483,7 @@ upstream_api_keys = ["{KEY_ONE}", "{KEY_TWO}"]
                     work_dir=work_dir,
                     model=alias,
                     bare=True,
+                    process_environment=launcher_env,
                 )
                 displayed = f"{proc.stdout}\n{proc.stderr}"
                 passed = (
@@ -473,8 +546,7 @@ upstream_api_keys = ["{KEY_ONE}", "{KEY_TWO}"]
 
         summary = {
             "generated_at_epoch": int(time.time()),
-            "claude_version": subprocess.run([claude_bin, "--version"], capture_output=True,
-                                             text=True).stdout.strip(),
+            "claude_version": summary_version(claude_bin),
             "serve_bin": str(serve_bin),
             "bridge_port": bridge_port, "stub_port": stub_port,
             "cases": results,

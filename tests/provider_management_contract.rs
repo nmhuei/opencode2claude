@@ -1,4 +1,7 @@
-use opencode2api::application::integration::{model_claude_code_vars, process_environment};
+use opencode2api::application::client_config::{generate, ClientConfigFormat};
+use opencode2api::application::integration::{
+    environment, model_claude_code_vars, process_environment,
+};
 use opencode2api::application::models::ModelProfile;
 use opencode2api::config::BridgeConfig;
 
@@ -46,4 +49,26 @@ fn launcher_environment_preserves_upstream_id_and_exposes_1m_client_contract() {
         process_value(&process_vars, "ANTHROPIC_MODEL"),
         "claude-sonnet-5[1m]"
     );
+}
+
+#[test]
+fn generated_claude_code_settings_use_alias_and_1m_environment() {
+    let config = BridgeConfig {
+        bridge_port: 4567,
+        model: Some("opencode/deepseek-v4-flash-free".to_string()),
+        ..Default::default()
+    };
+    let generated = generate(
+        ClientConfigFormat::ClaudeCode,
+        &environment(&config),
+        "sk-oc2-test",
+        true,
+    );
+    let settings: serde_json::Value = serde_json::from_str(&generated.content).unwrap();
+
+    assert_eq!(settings["model"], "claude-sonnet-5[1m]");
+    assert_eq!(settings["env"]["ANTHROPIC_MODEL"], "claude-sonnet-5[1m]");
+    assert_eq!(settings["env"]["CLAUDE_CODE_DISABLE_1M_CONTEXT"], "0");
+    assert_eq!(settings["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "1000000");
+    assert_eq!(settings["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "800000");
 }

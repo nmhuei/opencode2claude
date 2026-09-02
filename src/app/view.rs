@@ -761,7 +761,12 @@ pub(super) fn cmd_print_env(config: &BridgeConfig) {
         "compatibility key; authentication disabled"
     };
     let base_url = claude_code_base_url(config);
-    let profile = crate::application::models::resolve_model_profile(&model);
+    let effective_model = config
+        .model
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(crate::application::integration::OX_ALPHA_MODEL);
+    let profile = crate::application::models::resolve_model_profile(effective_model);
     let mut rows = vec![
         ("ANTHROPIC_API_KEY", api_key_status.to_string()),
         ("ANTHROPIC_BASE_URL", base_url.clone().cyan().to_string()),
@@ -770,34 +775,12 @@ pub(super) fn cmd_print_env(config: &BridgeConfig) {
             "OPENAI_BASE_URL",
             format!("{base_url}/v1").cyan().to_string(),
         ),
-        ("ANTHROPIC_MODEL", profile.anthropic_alias.to_string()),
+        ("ANTHROPIC_MODEL", profile.client_model_alias().to_string()),
         ("OPENCODE_MODEL", model.clone()),
     ];
-    if model == crate::application::integration::OX_ALPHA_MODEL {
-        rows.extend([
-            (
-                "ANTHROPIC_MODEL",
-                crate::application::integration::OX_ALPHA_MODEL.to_string(),
-            ),
-            ("CLAUDE_CODE_DISABLE_1M_CONTEXT", "0".to_string()),
-            ("CLAUDE_CODE_MAX_CONTEXT_TOKENS", "1000000".to_string()),
-            (
-                "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
-                crate::application::integration::OX_ALPHA_MAX_OUTPUT_TOKENS.to_string(),
-            ),
-            (
-                "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
-                crate::application::integration::OX_ALPHA_AUTO_COMPACT_WINDOW.to_string(),
-            ),
-            ("CLAUDE_CODE_DISABLE_THINKING", "0".to_string()),
-            ("CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING", "0".to_string()),
-            ("CLAUDE_CODE_ALWAYS_ENABLE_EFFORT", "1".to_string()),
-            (
-                "MAX_THINKING_TOKENS",
-                crate::application::integration::OX_ALPHA_MAX_THINKING_TOKENS.to_string(),
-            ),
-        ]);
-    }
+    rows.extend(crate::application::integration::model_claude_code_vars(
+        &profile,
+    ));
     println!("{}", presentation::facts(&rows));
 
     print_section("Shell setup");
