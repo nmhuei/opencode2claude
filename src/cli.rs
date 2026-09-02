@@ -647,7 +647,7 @@ pub struct ProviderAliasShowArgs {
 #[derive(Args, Debug, Clone)]
 pub struct ProviderAliasSetArgs {
     pub id: String,
-    #[arg(long, default_value = "claude-sonnet-5[1m]")]
+    #[arg(long, default_value = "sonnet[1m]")]
     pub client_model: String,
     #[arg(long, default_value_t = 1_000_000)]
     pub context_window: usize,

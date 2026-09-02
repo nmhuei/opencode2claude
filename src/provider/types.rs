@@ -197,7 +197,7 @@ impl ModelAlias {
     pub fn one_million(id: impl Into<AliasId>, candidates: Vec<ModelCandidate>) -> Self {
         Self {
             id: id.into(),
-            client_model: "claude-sonnet-5[1m]".to_string(),
+            client_model: "sonnet[1m]".to_string(),
             context_window: 1_000_000,
             strict_context: true,
             candidates,

@@ -1344,7 +1344,7 @@ mod persistence_tests {
             label: "DeepSeek V4 Flash".to_string(),
             provider: "b.ai".to_string(),
             context_window: 1_000_000,
-            auto_compact_window: 800_000,
+            auto_compact_window: 1_000_000,
             max_output_tokens: 384_000,
             supports_thinking: true,
             status: ModelStatus::Online,

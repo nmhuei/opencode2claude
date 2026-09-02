@@ -184,8 +184,11 @@ assert_json "dashboard stopped status is machine-readable" "d.get('running') is 
 section "Non-destructive proxy commands"
 assert_json "proxy list returns JSON array" "isinstance(d, list)" "$BIN" --json proxy ps
 assert_json "proxy logs returns typed JSON envelope" "isinstance(d, dict) and isinstance(d.get('logs'), list) and isinstance(d.get('errors'), list)" "$BIN" --json proxy logs
-assert_json "proxy restart dry-run reflects isolated empty pool" "d.get('dry_run') is True and d.get('action') == 'restart' and d.get('ports') == []" "$BIN" --json proxy restart --dry-run
-assert_json "proxy purge dry-run reflects isolated empty pool" "d.get('dry_run') is True and d.get('action') == 'purge and recreate' and d.get('ports') == []" "$BIN" --json proxy purge --yes --dry-run
+# An empty proxy list is intentionally treated as "not configured" by the
+# resolver, so the safe built-in managed port remains visible in a plan. The
+# dry-run must report that effective topology without touching Docker.
+assert_json "proxy restart dry-run reflects effective default pool" "d.get('dry_run') is True and d.get('action') == 'restart' and d.get('ports') == [40001]" "$BIN" --json proxy restart --dry-run
+assert_json "proxy purge dry-run reflects effective default pool" "d.get('dry_run') is True and d.get('action') == 'purge and recreate' and d.get('ports') == [40001]" "$BIN" --json proxy purge --yes --dry-run
 
 section "Config initialization and migration surface"
 assert_success "init creates config" "$BIN" init --output "$INIT_FILE"

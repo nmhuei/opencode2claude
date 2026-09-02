@@ -222,10 +222,10 @@ mod tests {
             parsed["$schema"],
             "https://json.schemastore.org/claude-code-settings.json"
         );
-        assert_eq!(parsed["model"], "claude-sonnet-5[1m]");
-        assert_eq!(parsed["env"]["ANTHROPIC_MODEL"], "claude-sonnet-5[1m]");
+        assert_eq!(parsed["model"], "sonnet[1m]");
+        assert_eq!(parsed["env"]["ANTHROPIC_MODEL"], "sonnet[1m]");
         assert_eq!(parsed["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "1000000");
-        assert_eq!(parsed["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "800000");
+        assert_eq!(parsed["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "1000000");
         assert_eq!(parsed["ultracode"], true);
     }
 

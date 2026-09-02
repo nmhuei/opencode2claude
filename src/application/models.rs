@@ -30,7 +30,7 @@ impl ModelProfile {
             max_output_tokens,
             supports_thinking,
             anthropic_alias: if context_window >= 1_000_000 {
-                "claude-sonnet-5[1m]"
+                "sonnet[1m]"
             } else {
                 "claude-sonnet-5"
             },
@@ -40,7 +40,7 @@ impl ModelProfile {
     #[inline]
     pub const fn client_model_alias(&self) -> &str {
         if self.context_window >= 1_000_000 {
-            "claude-sonnet-5[1m]"
+            "sonnet[1m]"
         } else {
             "claude-sonnet-5"
         }
@@ -48,7 +48,11 @@ impl ModelProfile {
 
     #[inline]
     pub const fn auto_compact_window(&self) -> usize {
-        (self.context_window * 80) / 100
+        if self.context_window >= 1_000_000 {
+            self.context_window
+        } else {
+            (self.context_window * 80) / 100
+        }
     }
 }
 
@@ -68,7 +72,11 @@ pub struct FreeModel {
 impl FreeModel {
     #[inline]
     pub const fn auto_compact_window(&self) -> usize {
-        (self.context_window * 80) / 100
+        if self.context_window >= 1_000_000 {
+            self.context_window
+        } else {
+            (self.context_window * 80) / 100
+        }
     }
 
     pub fn to_profile(&self) -> ModelProfile {
@@ -80,7 +88,7 @@ impl FreeModel {
             max_output_tokens: self.max_output_tokens,
             supports_thinking: self.supports_thinking,
             anthropic_alias: if self.context_window >= 1_000_000 {
-                "claude-sonnet-5[1m]"
+                "sonnet[1m]"
             } else {
                 "claude-sonnet-5"
             },
@@ -221,7 +229,7 @@ pub const API_MODEL_PROFILES: &[ModelProfile] = &[
         context_window: 1_000_000,
         max_output_tokens: 384_000,
         supports_thinking: true,
-        anthropic_alias: "claude-sonnet-5[1m]",
+        anthropic_alias: "sonnet[1m]",
     },
     ModelProfile {
         id: "deepseek-v4-flash-vision-exp",
@@ -230,7 +238,7 @@ pub const API_MODEL_PROFILES: &[ModelProfile] = &[
         context_window: 1_000_000,
         max_output_tokens: 384_000,
         supports_thinking: true,
-        anthropic_alias: "claude-sonnet-5[1m]",
+        anthropic_alias: "sonnet[1m]",
     },
     ModelProfile {
         id: "glm-5.3-flash",
@@ -239,7 +247,7 @@ pub const API_MODEL_PROFILES: &[ModelProfile] = &[
         context_window: 1_000_000,
         max_output_tokens: 131_072,
         supports_thinking: true,
-        anthropic_alias: "claude-sonnet-5[1m]",
+        anthropic_alias: "sonnet[1m]",
     },
     ModelProfile {
         id: "qwen3.8-flash",
@@ -306,8 +314,8 @@ pub fn resolve_model_profile(model: &str) -> ModelProfile {
     }
 
     let lower = clean.to_ascii_lowercase();
-    if lower == "claude-sonnet-5[1m]" {
-        ModelProfile::from_context("claude-sonnet-5[1m]", 1_000_000, 128_000, true)
+    if lower == "sonnet[1m]" || lower == "claude-sonnet-5[1m]" {
+        ModelProfile::from_context("sonnet[1m]", 1_000_000, 128_000, true)
     } else if lower.contains("gemini") {
         ModelProfile {
             id: "gemini-3.7-flash",
@@ -316,7 +324,7 @@ pub fn resolve_model_profile(model: &str) -> ModelProfile {
             context_window: 1_000_000,
             max_output_tokens: 64_000,
             supports_thinking: true,
-            anthropic_alias: "claude-sonnet-5[1m]",
+            anthropic_alias: "sonnet[1m]",
         }
     } else if lower.contains("claude") {
         ModelProfile {
@@ -336,7 +344,7 @@ pub fn resolve_model_profile(model: &str) -> ModelProfile {
             context_window: 1_000_000,
             max_output_tokens: 384_000,
             supports_thinking: true,
-            anthropic_alias: "claude-sonnet-5[1m]",
+            anthropic_alias: "sonnet[1m]",
         }
     } else if lower.contains("glm") {
         ModelProfile {
@@ -346,7 +354,7 @@ pub fn resolve_model_profile(model: &str) -> ModelProfile {
             context_window: 1_000_000,
             max_output_tokens: 131_072,
             supports_thinking: true,
-            anthropic_alias: "claude-sonnet-5[1m]",
+            anthropic_alias: "sonnet[1m]",
         }
     } else if lower.contains("gpt-5.2") {
         ModelProfile {
@@ -420,7 +428,11 @@ mod tests {
             assert!(model.limited_time);
             assert_eq!(
                 model.auto_compact_window(),
-                (model.context_window * 80) / 100
+                if model.context_window >= 1_000_000 {
+                    model.context_window
+                } else {
+                    (model.context_window * 80) / 100
+                }
             );
         }
     }
@@ -440,22 +452,22 @@ mod tests {
         let deepseek_free = resolve_model_profile("opencode/deepseek-v4-flash-free");
         assert_eq!(deepseek_free.context_window, 1_000_000);
         assert_eq!(deepseek_free.max_output_tokens, 384_000);
-        assert_eq!(deepseek_free.auto_compact_window(), 800_000);
+        assert_eq!(deepseek_free.auto_compact_window(), 1_000_000);
 
         let deepseek = resolve_model_profile("deepseek-v4-flash");
         assert_eq!(deepseek.context_window, 1_000_000);
         assert_eq!(deepseek.max_output_tokens, 384_000);
-        assert_eq!(deepseek.auto_compact_window(), 800_000);
+        assert_eq!(deepseek.auto_compact_window(), 1_000_000);
 
         let vision = resolve_model_profile("deepseek-v4-flash-vision-exp");
         assert_eq!(vision.context_window, 1_000_000);
         assert_eq!(vision.max_output_tokens, 384_000);
-        assert_eq!(vision.auto_compact_window(), 800_000);
+        assert_eq!(vision.auto_compact_window(), 1_000_000);
 
         let glm = resolve_model_profile("glm-5.3-flash");
         assert_eq!(glm.context_window, 1_000_000);
         assert_eq!(glm.max_output_tokens, 131_072);
-        assert_eq!(glm.auto_compact_window(), 800_000);
+        assert_eq!(glm.auto_compact_window(), 1_000_000);
 
         let qwen = resolve_model_profile("qwen3.8-flash");
         assert_eq!(qwen.context_window, 128_000);
@@ -494,13 +506,13 @@ mod tests {
     #[test]
     fn one_million_profile_uses_a_known_1m_client_identity() {
         let profile = ModelProfile::from_context("route/free-1m", 1_000_000, 128_000, true);
-        assert_eq!(profile.client_model_alias(), "claude-sonnet-5[1m]");
+        assert_eq!(profile.client_model_alias(), "sonnet[1m]");
         let vars = crate::application::integration::model_claude_code_vars(&profile);
         assert!(vars.iter().any(|(key, value)| {
             *key == "CLAUDE_CODE_MAX_CONTEXT_TOKENS" && value == "1000000"
         }));
         assert!(vars.iter().any(|(key, value)| {
-            *key == "CLAUDE_CODE_AUTO_COMPACT_WINDOW" && value == "800000"
+            *key == "CLAUDE_CODE_AUTO_COMPACT_WINDOW" && value == "1000000"
         }));
     }
 }

@@ -40,7 +40,7 @@ verified_context = true
 
 [[aliases]]
 id = "free-1m"
-client_model = "claude-sonnet-5[1m]"
+client_model = "sonnet[1m]"
 context_window = 1000000
 strict_context = true
 
@@ -65,7 +65,7 @@ fn schema_v2_keeps_provider_scoped_models_and_strict_aliases() {
     );
     let target = registry.resolve_alias("free-1m").unwrap();
     assert_eq!(target[0].wire_model_id, "deepseek-1m");
-    assert_eq!(target[0].client_model, "claude-sonnet-5[1m]");
+    assert_eq!(target[0].client_model, "sonnet[1m]");
 }
 
 #[test]
@@ -141,7 +141,7 @@ fn route_planner_keeps_fallback_order_and_context() {
         .into_registry()
         .unwrap();
     let request = ProviderRequest {
-        client_model: "claude-sonnet-5[1m]".into(),
+        client_model: "sonnet[1m]".into(),
         messages: serde_json::json!([]),
         max_output_tokens: Some(128000),
         stream: false,

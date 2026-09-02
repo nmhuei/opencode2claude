@@ -40,11 +40,11 @@ Upstream Bearer credentials are sent only over HTTPS, except for loopback HTTP e
 
 ### Curated custom-API model profiles
 
-| Model | Context window | 80% auto-compact | Max output | Default output | Billing |
+| Model | Context window | Auto-compact window | Max output | Default output | Billing |
 |---|---:|---:|---:|---:|---|
-| deepseek-v4-flash | 1,000,000 | 800,000 | 384,000 | provider-defined | Free (0 Credits) |
-| deepseek-v4-flash-vision-exp | 1,000,000 | 800,000 | 384,000 | provider-defined | Free (0 Credits) |
-| glm-5.3-flash | 1,000,000 | 800,000 | 131,072 | 65,536 | Free (0 Credits) |
+| deepseek-v4-flash | 1,000,000 | 1,000,000 | 384,000 | provider-defined | Free (0 Credits) |
+| deepseek-v4-flash-vision-exp | 1,000,000 | 1,000,000 | 384,000 | provider-defined | Free (0 Credits) |
+| glm-5.3-flash | 1,000,000 | 1,000,000 | 131,072 | 65,536 | Free (0 Credits) |
 | qwen3.8-flash | 128,000 | 102,400 | 16,384 | provider-defined | Free (0 Credits) |
 
 These exact profiles are applied to Claude Code environment tuning and to model discovery output when the API exposes the matching IDs.
@@ -53,10 +53,10 @@ These exact profiles are applied to Claude Code environment tuning and to model 
 
 OpenCode2API organizes upstream models into two isolated context tiers to safeguard against catastrophic context truncation during long Claude Code sessions:
 
-1. **1M Tier (`claude-opus-5`):**
+1. **1M Tier (`sonnet[1m]`):**
    - Applied to models with $\ge$ 1,000,000 token context windows (`glm-5.3-flash`, `deepseek-v4-flash`, `deepseek-v4-flash-vision-exp` on custom APIs; `opencode/x-preview-f-free`, `opencode/deepseek-v4-flash-free` on OpenCode).
    - **Fallback Isolation:** Sessions started on a 1M model only fall back to other 1M models. Sub-1M models are pruned from the retry chain automatically.
-   - Claude Code launches with `--model claude-opus-5` so it displays "Opus 5" rather than defaulting to deprecated Sonnet 4.
+   - Claude Code launches with the documented `sonnet[1m]` model alias. The gateway keeps this client identity separate from each provider's wire model.
 
 2. **Sub-1M Tier (`claude-sonnet-5`):**
    - Applied to standard models with $<$ 1,000,000 token context windows (`qwen3.8-flash` on `b.ai`; `opencode/mimo-v2.5-free`, `opencode/nemotron-3.5-lightning-free` on OpenCode).

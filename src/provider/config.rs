@@ -200,5 +200,5 @@ pub fn load_provider_registry(config_path: &Path) -> Result<ProviderRegistry, Pr
 }
 
 pub fn schema_v2_example() -> &'static str {
-    "schema_version = 2\n\n[[providers]]\nid = \"bai\"\nname = \"B.AI\"\nkind = \"bai\"\nbase_url = \"https://api.b.ai/v1\"\n\n[[credentials]]\nid = \"bai-main\"\nprovider_id = \"bai\"\nenv = \"BAI_API_KEY\"\n\n[[models]]\nprovider_id = \"bai\"\nmodel_id = \"deepseek-1m\"\ncontext_window = 1000000\nverified_context = true\n\n[[aliases]]\nid = \"free-1m\"\nclient_model = \"claude-sonnet-5[1m]\"\ncontext_window = 1000000\nstrict_context = true\n\n[[aliases.candidates]]\nprovider_id = \"bai\"\nmodel_id = \"deepseek-1m\"\ncredential_id = \"bai-main\"\npriority = 0\n"
+    "schema_version = 2\n\n[[providers]]\nid = \"bai\"\nname = \"B.AI\"\nkind = \"bai\"\nbase_url = \"https://api.b.ai/v1\"\n\n[[credentials]]\nid = \"bai-main\"\nprovider_id = \"bai\"\nenv = \"BAI_API_KEY\"\n\n[[models]]\nprovider_id = \"bai\"\nmodel_id = \"deepseek-1m\"\ncontext_window = 1000000\nverified_context = true\n\n[[aliases]]\nid = \"free-1m\"\nclient_model = \"sonnet[1m]\"\ncontext_window = 1000000\nstrict_context = true\n\n[[aliases.candidates]]\nprovider_id = \"bai\"\nmodel_id = \"deepseek-1m\"\ncredential_id = \"bai-main\"\npriority = 0\n"
 }

@@ -106,7 +106,7 @@ async fn strict_one_million_alias_falls_across_providers_without_downgrading_con
     let config = BridgeConfig {
         active_alias: Some("free-1m".into()),
         provider_registry: Some(Arc::new(registry)),
-        model: Some("claude-sonnet-5[1m]".into()),
+        model: Some("sonnet[1m]".into()),
         egress: opencode2api::config::EgressConfig {
             mode: EgressMode::Direct,
             ..defaults.egress
@@ -118,7 +118,7 @@ async fn strict_one_million_alias_falls_across_providers_without_downgrading_con
         ..defaults
     };
     let app = build_router(AppState::new(config));
-    let response = app.oneshot(Request::builder().method("POST").uri("/v1/messages").header("content-type", "application/json").body(Body::from(serde_json::to_vec(&json!({"model":"claude-sonnet-5[1m]","messages":[{"role":"user","content":"large context"}],"max_tokens":128})).unwrap())).unwrap()).await.unwrap();
+    let response = app.oneshot(Request::builder().method("POST").uri("/v1/messages").header("content-type", "application/json").body(Body::from(serde_json::to_vec(&json!({"model":"sonnet[1m]","messages":[{"role":"user","content":"large context"}],"max_tokens":128})).unwrap())).unwrap()).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(first_requests.lock().await[0]["model"], "wire-deepseek");
     assert_eq!(second_requests.lock().await[0]["model"], "wire-glm");

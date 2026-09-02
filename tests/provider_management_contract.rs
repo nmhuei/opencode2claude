@@ -25,11 +25,11 @@ fn launcher_environment_preserves_upstream_id_and_exposes_1m_client_contract() {
     let vars = model_claude_code_vars(&profile);
 
     assert_eq!(profile.id, "route/free-1m");
-    assert_eq!(profile.client_model_alias(), "claude-sonnet-5[1m]");
+    assert_eq!(profile.client_model_alias(), "sonnet[1m]");
     assert_eq!(value(&vars, "CLAUDE_CODE_DISABLE_1M_CONTEXT"), "0");
     assert_eq!(value(&vars, "CLAUDE_CODE_MAX_CONTEXT_TOKENS"), "1000000");
     assert_eq!(value(&vars, "CLAUDE_CODE_MAX_OUTPUT_TOKENS"), "128000");
-    assert_eq!(value(&vars, "CLAUDE_CODE_AUTO_COMPACT_WINDOW"), "800000");
+    assert_eq!(value(&vars, "CLAUDE_CODE_AUTO_COMPACT_WINDOW"), "1000000");
 
     let config = BridgeConfig {
         bridge_port: 4567,
@@ -47,7 +47,7 @@ fn launcher_environment_preserves_upstream_id_and_exposes_1m_client_contract() {
     );
     assert_eq!(
         process_value(&process_vars, "ANTHROPIC_MODEL"),
-        "claude-sonnet-5[1m]"
+        "sonnet[1m]"
     );
 }
 
@@ -66,9 +66,12 @@ fn generated_claude_code_settings_use_alias_and_1m_environment() {
     );
     let settings: serde_json::Value = serde_json::from_str(&generated.content).unwrap();
 
-    assert_eq!(settings["model"], "claude-sonnet-5[1m]");
-    assert_eq!(settings["env"]["ANTHROPIC_MODEL"], "claude-sonnet-5[1m]");
+    assert_eq!(settings["model"], "sonnet[1m]");
+    assert_eq!(settings["env"]["ANTHROPIC_MODEL"], "sonnet[1m]");
     assert_eq!(settings["env"]["CLAUDE_CODE_DISABLE_1M_CONTEXT"], "0");
     assert_eq!(settings["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "1000000");
-    assert_eq!(settings["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "800000");
+    assert_eq!(
+        settings["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"],
+        "1000000"
+    );
 }

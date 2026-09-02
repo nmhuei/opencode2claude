@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import shutil
 import socket
@@ -54,6 +55,7 @@ ENV_STRIP_EXACT = {
     "ANTHROPIC_MODEL", "BRIDGE_PORT", "BRIDGE_HOST", "BRIDGE_AUTH_TOKEN",
     "BRIDGE_CONFIG_PATH", "BRIDGE_EGRESS_MODE", "BRIDGE_PRIMARY_PROXIES",
     "BRIDGE_WARM_STANDBY_PROXIES", "BRIDGE_PROXIES", "RUNTIME_DIR",
+    "BRIDGE_ENV_PATH",
     "OPENCODE_PORT", "OPENCODE_MODEL", "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
     "CLAUDE_CODE_MAX_OUTPUT_TOKENS", "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
     "CLAUDE_CODE_DISABLE_1M_CONTEXT", "MAX_THINKING_TOKENS",
@@ -69,6 +71,11 @@ def strip_bridge_env(env: dict[str, str]) -> dict[str, str]:
             continue
         cleaned[key] = value
     return cleaned
+
+
+def hermetic_env_path() -> str:
+    """Use the comment-only example file to block ancestor .env discovery."""
+    return str(ROOT / ".env.example")
 
 
 def free_port() -> int:
@@ -342,6 +349,7 @@ def generated_launcher_environment(
     env["BRIDGE_PORT"] = str(bridge_port)
     env["BRIDGE_AUTH_TOKEN"] = CLIENT_TOKEN
     env["OPENCODE_MODEL"] = upstream_model
+    env["BRIDGE_ENV_PATH"] = hermetic_env_path()
     env["NO_PROXY"] = "*"
     try:
         result = subprocess.run(
@@ -422,6 +430,7 @@ upstream_api_keys = ["{KEY_ONE}", "{KEY_TWO}"]
 
     bridge_log = (OUT / "bridge.log").open("w")
     bridge_env = strip_bridge_env(dict(os.environ))
+    bridge_env["BRIDGE_ENV_PATH"] = hermetic_env_path()
     bridge_env["NO_PROXY"] = "*"
     bridge = subprocess.Popen(
         [str(serve_bin), "--config", str(config_path), "--port", str(bridge_port)],
@@ -485,11 +494,23 @@ upstream_api_keys = ["{KEY_ONE}", "{KEY_TWO}"]
                     bare=True,
                     process_environment=launcher_env,
                 )
-                displayed = f"{proc.stdout}\n{proc.stderr}"
+                payload = parse_single_json(proc.stdout)
+                displayed = "\n".join(
+                    part for part in (
+                        payload.get("result") if isinstance(payload.get("result"), str) else "",
+                        proc.stdout,
+                        proc.stderr,
+                    ) if part
+                )
+                normalized = displayed.lower().replace(",", "")
+                has_one_million_window = bool(
+                    re.search(r"/\s*(?:1m|1000000)(?:\s+tokens?)?\s*(?:\(|$)", normalized)
+                    or re.search(r"auto-compact window:\s*(?:1m|1000000)", normalized)
+                )
                 passed = (
                     proc.returncode == 0
-                    and "[1m]" in displayed
-                    and ("1m" in displayed or "1000000" in displayed)
+                    and alias == "sonnet[1m]"
+                    and has_one_million_window
                 )
                 results.append({
                     "case": "provider_alias_free_1m",
@@ -506,7 +527,7 @@ upstream_api_keys = ["{KEY_ONE}", "{KEY_TWO}"]
                 if not passed:
                     print(
                         f"    compatibility failure: Claude Code {summary_version(claude_bin)} "
-                        f"did not display model identity {alias!r} and a 1M denominator"
+                        f"did not accept launcher model {alias!r} with a 1M denominator"
                     )
             except subprocess.TimeoutExpired as error:
                 results.append({

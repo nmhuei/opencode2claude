@@ -16,7 +16,7 @@
 - Keep upstream provider credentials separate from client API keys in `src/api_key`.
 - Never persist raw upstream API keys in the main TOML configuration.
 - The strict 1M alias accepts only candidates with `context_window >= 1_000_000`.
-- The 1M alias must expose `CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000`, `CLAUDE_CODE_AUTO_COMPACT_WINDOW=800000`, and `CLAUDE_CODE_DISABLE_1M_CONTEXT=0`.
+- The 1M alias must expose `CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000`, `CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000`, and `CLAUDE_CODE_DISABLE_1M_CONTEXT=0`.
 - Streaming retries are allowed only before the first content event.
 - Existing legacy provider commands remain functional until the migration is complete.
 - Every task ends with targeted tests and a focused commit when this plan is executed.
@@ -76,13 +76,13 @@ Modify the existing integration seams:
 #[test]
 fn one_million_profile_uses_a_known_1m_client_identity() {
     let profile = ModelProfile::from_context("route/free-1m", 1_000_000, 128_000, true);
-    assert_eq!(profile.client_model_alias(), "claude-sonnet-5[1m]");
+    assert_eq!(profile.client_model_alias(), "sonnet[1m]");
     let vars = model_claude_code_vars(&profile);
     assert!(vars.iter().any(|(key, value)| {
         *key == "CLAUDE_CODE_MAX_CONTEXT_TOKENS" && value == "1000000"
     }));
     assert!(vars.iter().any(|(key, value)| {
-        *key == "CLAUDE_CODE_AUTO_COMPACT_WINDOW" && value == "800000"
+        *key == "CLAUDE_CODE_AUTO_COMPACT_WINDOW" && value == "1000000"
     }));
 }
 ```
@@ -95,14 +95,14 @@ Expected: FAIL because the current profile API returns the hard-coded `claude-op
 
 - [ ] **Step 3: Implement the profile contract.**
 
-Add a client alias field or resolver to `ModelProfile`. For context windows at or above 1M, return the configured compatibility identity `claude-sonnet-5[1m]`; for smaller models return `claude-sonnet-5`. Keep the upstream model ID separate.
+Add a client alias field or resolver to `ModelProfile`. For context windows at or above 1M, return Claude Code's documented `sonnet[1m]` identity; for smaller models return `claude-sonnet-5`. Keep the upstream model ID separate.
 
 - [ ] **Step 4: Add the Claude Code black-box smoke test.**
 
 The test must:
 
 1. Start the test gateway on an isolated port.
-2. Set `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL=claude-sonnet-5[1m]`, and the three context variables.
+2. Set `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL=sonnet[1m]`, and the three context variables.
 3. Invoke the installed `claude` binary with a non-network `/context`-capable session fixture.
 4. Assert that the displayed model identity contains `[1m]` and the denominator contains `1m` or `1000000`.
 5. Mark the test unavailable with a clear diagnostic if Claude Code is not installed.
@@ -262,7 +262,7 @@ git commit -m "feat: add provider-scoped credential storage"
 fn schema_v2_parses_provider_credentials_and_strict_alias() {
     let registry = parse_fixture(SCHEMA_V2_FIXTURE).unwrap();
     let alias = registry.alias("free-1m").unwrap();
-    assert_eq!(alias.client_model, "claude-sonnet-5[1m]");
+    assert_eq!(alias.client_model, "sonnet[1m]");
     assert_eq!(alias.context_window, 1_000_000);
     assert!(alias.strict_context);
 }
@@ -756,12 +756,12 @@ git commit -m "docs: document multi-provider 1M alias management"
 ```text
 $ opencode2api provider status
 active alias: free-1m
-client model: claude-sonnet-5[1m]
+client model: sonnet[1m]
 context: 1,000,000
 runtime: active
 
 $ opencode2api
-Claude Code starts with ANTHROPIC_MODEL=claude-sonnet-5[1m]
+Claude Code starts with ANTHROPIC_MODEL=sonnet[1m]
 
 Claude Code> /context
 ... 1m tokens ...

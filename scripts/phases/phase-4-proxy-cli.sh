@@ -52,8 +52,8 @@ gate_proxy_ps() {
     error "proxy ps failed"
     return 1
   }
-  echo "$output" | grep -q -E "Primary managed proxies|Proxy Pool Status" || return 1
-  echo "$output" | grep -q -E "Warm-standby protected proxies|Warm-standby proxies" || return 1
+  echo "$output" | grep -q -E "Proxy pool|Managed primary" || return 1
+  echo "$output" | grep -q -E "primary|standby" || return 1
   pass "proxy ps shows primary and warm-standby pools"
 }
 
@@ -78,25 +78,27 @@ gate_no_40010_reference() {
 
 gate_proxy_restart_primary_only() {
   info "Gate 4.10: proxy restart command only affects primary ports 40001-40003"
-  grep -q "get_primary_ports" "$ROOT_DIR/src/app/proxy.rs" || return 1
+  grep -q "configured_primary_ports" "$ROOT_DIR/src/app/proxy.rs" || return 1
   grep -q "docker::create_container" "$ROOT_DIR/src/app/proxy.rs" || return 1
-  # Verify restart never calls into warm-standby ports
-  grep -q "always protected" "$ROOT_DIR/src/app/proxy.rs" || return 1
-  pass "proxy restart only affects 40001-40003"
+  grep -q "for port in &primary_ports" "$ROOT_DIR/src/app/proxy.rs" || return 1
+  grep -q "Protected standby proxies" "$ROOT_DIR/src/app/proxy.rs" || return 1
+  pass "proxy restart only affects configured primary ports"
 }
 
 gate_proxy_purge_primary_only() {
   info "Gate 4.11: proxy purge command recreates only primary ports 40001-40003"
-  grep -q "get_primary_ports" "$ROOT_DIR/src/app/proxy.rs" || return 1
-  grep -q "About to purge and recreate" "$ROOT_DIR/src/app/proxy.rs" || return 1
-  grep -q "always protected" "$ROOT_DIR/src/app/proxy.rs" || return 1
-  pass "proxy purge only affects 40001-40003"
+  grep -q "configured_primary_ports" "$ROOT_DIR/src/app/proxy.rs" || return 1
+  grep -q "docker::rotate_container" "$ROOT_DIR/src/app/proxy.rs" || return 1
+  grep -q "for port in &primary_ports" "$ROOT_DIR/src/app/proxy.rs" || return 1
+  grep -q "Protected standby proxies" "$ROOT_DIR/src/app/proxy.rs" || return 1
+  pass "proxy purge only affects configured primary ports"
 }
 
 gate_proxy_logs_primary_only() {
   info "Gate 4.12: proxy logs only reads from primary ports 40001-40003"
-  grep -q "get_primary_ports" "$ROOT_DIR/src/app/proxy.rs" || return 1
-  pass "proxy logs only reads primary ports"
+  grep -q "configured_primary_ports" "$ROOT_DIR/src/app/proxy.rs" || return 1
+  grep -q "container_logs" "$ROOT_DIR/src/app/proxy.rs" || return 1
+  pass "proxy logs only reads configured primary ports"
 }
 
 run_gates

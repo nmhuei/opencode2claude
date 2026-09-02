@@ -47,12 +47,12 @@ compatibility commands for the legacy singleton configuration.
 ## Claude Code 1M contract
 
 An active strict 1M alias is exposed to Claude Code as
-`claude-sonnet-5[1m]`, while `OPENCODE_MODEL` remains the upstream wire model
+`sonnet[1m]`, while `OPENCODE_MODEL` remains the upstream wire model
 for compatibility. The launcher exports:
 
 ```text
 CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000
-CLAUDE_CODE_AUTO_COMPACT_WINDOW=800000
+CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000
 CLAUDE_CODE_DISABLE_1M_CONTEXT=0
 ```
 

@@ -28,7 +28,7 @@ Out of scope:
 Claude Code receives a compatibility model identity, for example:
 
 ```text
-claude-sonnet-5[1m]
+sonnet[1m]
 ```
 
 The local launcher sets:
@@ -36,9 +36,9 @@ The local launcher sets:
 ```bash
 ANTHROPIC_BASE_URL=http://127.0.0.1:4000
 ANTHROPIC_AUTH_TOKEN=<local-gateway-token>
-ANTHROPIC_MODEL=claude-sonnet-5[1m]
+ANTHROPIC_MODEL=sonnet[1m]
 CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000
-CLAUDE_CODE_AUTO_COMPACT_WINDOW=800000
+CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000
 CLAUDE_CODE_DISABLE_1M_CONTEXT=0
 ```
 
@@ -174,7 +174,7 @@ base_url = "https://api.b.ai/v1"
 enabled = true
 
 [aliases.free-1m]
-client_model = "claude-sonnet-5[1m]"
+client_model = "sonnet[1m]"
 context_window = 1000000
 auto_compact_window = 800000
 strict_context = true
@@ -259,7 +259,7 @@ The status response exposes:
 ```json
 {
   "configured_alias": "free-1m",
-  "configured_client_model": "claude-sonnet-5[1m]",
+  "configured_client_model": "sonnet[1m]",
   "runtime_alias": "free-1m",
   "runtime_context_window": 1000000,
   "restart_required": false,
