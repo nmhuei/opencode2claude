@@ -95,6 +95,15 @@ impl ProviderRegistry {
             active_alias: None,
         }
     }
+    pub fn from_snapshot(snapshot: &ProviderSnapshot) -> Self {
+        Self {
+            providers: (*snapshot.providers).clone(),
+            credentials: (*snapshot.credentials).clone(),
+            models: (*snapshot.models).clone(),
+            aliases: (*snapshot.aliases).clone(),
+            active_alias: snapshot.active_alias.clone(),
+        }
+    }
     pub fn providers(&self) -> impl Iterator<Item = &Provider> {
         self.providers.values()
     }
@@ -129,11 +138,12 @@ impl ProviderRegistry {
     }
     pub fn remove_credential(&mut self, id: impl AsRef<str>) -> Result<(), RegistryError> {
         let id = CredentialId::from(id.as_ref());
-        if self
-            .aliases
-            .values()
-            .any(|alias| alias.candidates.iter().any(|candidate| candidate.credential_id.as_ref() == Some(&id)))
-        {
+        if self.aliases.values().any(|alias| {
+            alias
+                .candidates
+                .iter()
+                .any(|candidate| candidate.credential_id.as_ref() == Some(&id))
+        }) {
             return Err(RegistryError::ReferencedCredential(id.to_string()));
         }
         self.credentials
@@ -178,10 +188,16 @@ impl ProviderRegistry {
     }
     pub fn remove_provider(&mut self, id: impl AsRef<str>) -> Result<(), RegistryError> {
         let id = ProviderId::from(id.as_ref());
-        if self.credentials.values().any(|credential| credential.provider_id == id)
+        if self
+            .credentials
+            .values()
+            .any(|credential| credential.provider_id == id)
             || self.models.keys().any(|(provider, _)| provider == &id)
             || self.aliases.values().any(|alias| {
-                alias.candidates.iter().any(|candidate| candidate.provider_id == id)
+                alias
+                    .candidates
+                    .iter()
+                    .any(|candidate| candidate.provider_id == id)
             })
         {
             return Err(RegistryError::ReferencedProvider(id.to_string()));
@@ -248,13 +264,19 @@ impl ProviderRegistry {
     }
     pub fn upsert_alias(&mut self, alias: ModelAlias) -> Result<(), RegistryError> {
         self.aliases.remove(&alias.id);
-        if let Err(error) = self.validate_alias(&alias) {
-            return Err(error);
-        }
+        self.validate_alias(&alias)?;
         self.aliases.insert(alias.id.clone(), alias);
         Ok(())
     }
     pub fn compile_snapshot(&self) -> Result<ProviderSnapshot, RegistryError> {
+        if let Some(active_alias) = self.active_alias.as_ref() {
+            if !self.aliases.contains_key(active_alias) {
+                return Err(RegistryError::UnknownModel {
+                    provider: "alias".to_string(),
+                    model: active_alias.to_string(),
+                });
+            }
+        }
         for alias in self.aliases.values() {
             self.validate_alias(alias)?;
         }
@@ -347,7 +369,7 @@ impl ProviderRegistry {
             free: false,
         });
         let _ = out.register_alias(ModelAlias {
-            id: AliasId::from("default"),
+            id: AliasId::from("legacy-default"),
             client_model: "claude-sonnet-5".to_string(),
             context_window: 128_000,
             strict_context: false,
@@ -358,6 +380,7 @@ impl ProviderRegistry {
                 priority: 0,
             }],
         });
+        out.set_active_alias(Some(AliasId::from("legacy-default")));
         out
     }
     fn validate_alias(&self, alias: &ModelAlias) -> Result<(), RegistryError> {

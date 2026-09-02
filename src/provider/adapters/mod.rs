@@ -24,6 +24,11 @@ pub enum AdapterError {
     Request(String),
     #[error("credential is required for provider {0}")]
     MissingCredential(String),
+    #[error("provider {provider} uses unsupported protocol {protocol:?}; this gateway currently executes OpenAI Chat Completions only")]
+    UnsupportedProtocol {
+        provider: String,
+        protocol: super::types::ProviderProtocol,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,11 +111,7 @@ fn bearer(
     Ok(())
 }
 
-fn classify_failure(
-    status: Option<StatusCode>,
-    headers: &HeaderMap,
-    body: &str,
-) -> FailureClass {
+fn classify_failure(status: Option<StatusCode>, headers: &HeaderMap, body: &str) -> FailureClass {
     let lower = body.to_ascii_lowercase();
     let rate_limit_body = [
         "rate limit",
@@ -129,9 +130,7 @@ fn classify_failure(
         return FailureClass::RateLimit;
     }
     match status {
-        Some(StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) => {
-            FailureClass::CredentialRejected
-        }
+        Some(StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) => FailureClass::CredentialRejected,
         Some(StatusCode::NOT_FOUND) => FailureClass::ModelUnavailable,
         Some(StatusCode::PAYMENT_REQUIRED) => FailureClass::PaymentRequired,
         Some(value) if value.is_server_error() => FailureClass::ProviderServer,
@@ -151,6 +150,12 @@ fn openai_request(
 ) -> Result<ProviderHttpRequest, AdapterError> {
     if !provider.enabled {
         return Err(AdapterError::Disabled(provider.id.to_string()));
+    }
+    if provider.protocol != super::types::ProviderProtocol::OpenAiChatCompletions {
+        return Err(AdapterError::UnsupportedProtocol {
+            provider: provider.id.to_string(),
+            protocol: provider.protocol,
+        });
     }
     let mut headers = provider.headers.clone();
     headers.insert("Content-Type".to_string(), "application/json".to_string());

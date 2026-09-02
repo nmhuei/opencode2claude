@@ -62,7 +62,10 @@ fn migration_writes_v3_and_preserves_an_adjacent_backup() {
     assert_eq!(report.from_version, 2);
     assert_eq!(report.to_version, 3);
     assert!(report.backup_path.is_file());
-    assert_eq!(fs::read(&report.backup_path).unwrap(), v2_document().as_bytes());
+    assert_eq!(
+        fs::read(&report.backup_path).unwrap(),
+        v2_document().as_bytes()
+    );
     let migrated = fs::read_to_string(&path).unwrap();
     assert!(migrated.contains("schema_version = 3"));
     assert!(migrated.contains("[providers.bai]"));
@@ -91,5 +94,32 @@ fn valid_mutation_writes_a_generic_provider_without_adapter_code() {
     assert!(fs::read_to_string(&path)
         .unwrap()
         .contains("schema_version = 3"));
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn provider_mutation_preserves_unrelated_bridge_configuration() {
+    let path = fixture_path("provider-store-preserve", "toml");
+    fs::write(
+        &path,
+        "schema_version = 1\nport = 4567\nmodel = \"legacy-model\"\nupstream_base_url = \"https://legacy.example/v1\"\n",
+    )
+    .unwrap();
+    let store = ProviderConfigStore::open(&path);
+    store
+        .transaction(ProviderMutation::AddProvider(Provider {
+            id: "new-api".into(),
+            name: "New API".into(),
+            kind: ProviderKind::OpenAiCompatible,
+            base_url: "https://api.example/v1".into(),
+            protocol: ProviderProtocol::OpenAiChatCompletions,
+            headers: BTreeMap::new(),
+            enabled: true,
+        }))
+        .unwrap();
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.contains("port = 4567"));
+    assert!(text.contains("model = \"legacy-model\""));
+    assert!(text.contains("upstream_base_url = \"https://legacy.example/v1\""));
     let _ = fs::remove_file(path);
 }

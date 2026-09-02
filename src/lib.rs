@@ -12,6 +12,7 @@ pub mod app;
 pub mod application;
 pub mod audit;
 pub mod cli;
+pub mod command;
 pub mod config;
 pub mod dashboard;
 pub mod docker;

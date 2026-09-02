@@ -4,7 +4,9 @@ use opencode2api::application::integration::{
 };
 use opencode2api::application::models::ModelProfile;
 use opencode2api::config::BridgeConfig;
-use opencode2api::provider::types::{ModelAlias, ModelCandidate, ModelInfo, Provider, ProviderKind, ProviderProtocol};
+use opencode2api::provider::types::{
+    ModelAlias, ModelCandidate, ModelInfo, Provider, ProviderKind, ProviderProtocol,
+};
 use opencode2api::provider::ProviderRegistry;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -34,6 +36,7 @@ fn launcher_environment_preserves_upstream_id_and_exposes_1m_client_contract() {
     assert_eq!(value(&vars, "CLAUDE_CODE_MAX_CONTEXT_TOKENS"), "1000000");
     assert_eq!(value(&vars, "CLAUDE_CODE_MAX_OUTPUT_TOKENS"), "128000");
     assert_eq!(value(&vars, "CLAUDE_CODE_AUTO_COMPACT_WINDOW"), "800000");
+    assert_eq!(value(&vars, "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"), "80");
 
     let config = BridgeConfig {
         bridge_port: 4567,
@@ -122,6 +125,17 @@ fn configured_non_million_alias_exports_its_context_and_eighty_percent_compactio
     };
     let vars = process_environment(&config);
     assert_eq!(process_value(&vars, "ANTHROPIC_MODEL"), "small");
-    assert_eq!(process_value(&vars, "CLAUDE_CODE_MAX_CONTEXT_TOKENS"), "200000");
-    assert_eq!(process_value(&vars, "CLAUDE_CODE_AUTO_COMPACT_WINDOW"), "160000");
+    assert_eq!(environment(&config).model.as_deref(), Some("small"));
+    assert_eq!(
+        process_value(&vars, "CLAUDE_CODE_MAX_CONTEXT_TOKENS"),
+        "200000"
+    );
+    assert_eq!(
+        process_value(&vars, "CLAUDE_CODE_AUTO_COMPACT_WINDOW"),
+        "160000"
+    );
+    assert_eq!(
+        process_value(&vars, "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"),
+        "80"
+    );
 }

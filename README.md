@@ -77,6 +77,22 @@ opencode2api
 
 OpenCode2API now has one provider namespace for both supported source types.
 
+For new multi-provider setups, use the data-driven management commands:
+
+```bash
+opencode2api provider add bai https://api.b.ai/v1 --kind bai
+opencode2api credential set bai main --env BAI_API_KEY
+opencode2api model discover bai
+opencode2api alias set free-1m --client-model 'sonnet[1m]' \
+  --context-window 1000000 --candidate bai:deepseek-v4-flash:main
+opencode2api alias use free-1m
+opencode2api route explain free-1m
+```
+
+The provider, credential, model, alias, route, health, and config commands are
+the canonical control plane. Generic OpenAI-compatible endpoints require no
+source-code change; legacy singleton commands below remain compatibility paths.
+
 **1. OpenCode Zen mode**
 
 ~~~bash

@@ -206,19 +206,33 @@ async fn execute_retryable_request<T: RetryableOpenAiRequest>(
     routing_key: &str,
     request: &T,
 ) -> Result<LeasedResponse, BridgeError> {
-    if let Some(registry) = state.config.provider_registry.as_deref() {
-        let alias_id = state.config.active_alias.as_deref().or_else(|| {
-            registry
-                .aliases()
-                .find(|alias| alias.client_model == request.model())
-                .map(|alias| alias.id.as_ref())
-        });
+    if let Some(runtime) = state.provider_runtime.as_ref() {
+        let snapshot = runtime.snapshot();
+        let runtime_registry = crate::provider::ProviderRegistry::from_snapshot(&snapshot);
+        let alias_id = state
+            .config
+            .active_alias
+            .clone()
+            .or_else(|| snapshot.active_alias.as_ref().map(ToString::to_string))
+            .or_else(|| {
+                runtime_registry
+                    .aliases()
+                    .find(|alias| alias.client_model == request.model())
+                    .map(|alias| alias.id.to_string())
+            });
         if let Some(alias_id) = alias_id {
-            let planner = RoutePlanner::new(registry);
+            let planner = RoutePlanner::new(&runtime_registry);
             let targets = planner
-                .plan(&request.provider_request(), alias_id)
+                .plan(&request.provider_request(), &alias_id)
                 .map_err(|error| BridgeError::UpstreamError(error.to_string()))?;
-            return execute_provider_targets(state, routing_key, request, registry, targets).await;
+            return execute_provider_targets(
+                state,
+                routing_key,
+                request,
+                &runtime_registry,
+                targets,
+            )
+            .await;
         }
     }
     let max_retries = state.config.retry.max_network_attempts as u32;
@@ -604,7 +618,41 @@ async fn execute_provider_targets<T: RetryableOpenAiRequest>(
     let request_body = request.provider_request();
     let secret_store = default_store(&state.config.management.config_path);
     let mut last_status = None;
-    for target in targets {
+    let mut attempted = vec![false; targets.len()];
+    loop {
+        // RouteState knows cooldowns, while this request-local mask knows
+        // which candidates have already been consumed. Passing the full list
+        // to `choose` would select an already-attempted target again whenever
+        // its failure class deliberately has no cooldown (for example a
+        // provider-specific billing error), silently ending fallback early.
+        let remaining_indices: Vec<usize> = targets
+            .iter()
+            .enumerate()
+            .filter_map(|(index, _)| (!attempted[index]).then_some(index))
+            .collect();
+        if remaining_indices.is_empty() {
+            break;
+        }
+        let remaining_targets: Vec<_> = remaining_indices
+            .iter()
+            .map(|index| targets[*index].clone())
+            .collect();
+        let selected = {
+            let route_state = state.provider_route_state.read().await;
+            route_state.choose(&remaining_targets, std::time::Instant::now())
+        };
+        let target_index = match selected {
+            crate::provider::resilience::RouteAction::UseTarget(index) => remaining_indices[index],
+            crate::provider::resilience::RouteAction::AllCoolingDown { retry_after } => {
+                return Err(BridgeError::EgressUnavailable(format!(
+                    "all provider candidates are cooling down; retry after {} second(s)",
+                    retry_after.max(Duration::from_secs(1)).as_secs()
+                )))
+            }
+            crate::provider::resilience::RouteAction::NoEligibleTargets => break,
+        };
+        attempted[target_index] = true;
+        let target = &targets[target_index];
         let provider = registry.provider(&target.provider_id).ok_or_else(|| {
             BridgeError::UpstreamError("provider disappeared from snapshot".to_string())
         })?;
@@ -613,16 +661,28 @@ async fn execute_provider_targets<T: RetryableOpenAiRequest>(
             .as_ref()
             .and_then(|id| registry.credentials().find(|candidate| &candidate.id == id));
         let secret = match credential {
-            Some(credential) => Some(
-                secret_store
-                    .resolve(credential)
-                    .map_err(|error| BridgeError::UpstreamError(error.to_string()))?,
-            ),
+            Some(credential) => match secret_store.resolve(credential) {
+                Ok(secret) => Some(secret),
+                Err(_error) => {
+                    state.provider_route_state.write().await.record_failure(
+                        target,
+                        crate::provider::adapters::FailureClass::CredentialRejected,
+                        None,
+                        std::time::Instant::now(),
+                    );
+                    warn!(
+                        provider = %target.provider_id,
+                        credential = %credential.id,
+                        "provider credential is unavailable; trying next target"
+                    );
+                    continue;
+                }
+            },
             None => None,
         };
         let adapter = AdapterRegistry::for_provider(provider.kind);
         let prepared = adapter
-            .prepare(provider, &target, &request_body, secret.as_ref())
+            .prepare(provider, target, &request_body, secret.as_ref())
             .map_err(|error| BridgeError::UpstreamError(error.to_string()))?;
         let mut route = select_route_for_attempt(state, routing_key, None, None).await?;
         let mut builder = route.client.post(prepared.url).json(&prepared.body);
@@ -636,6 +696,11 @@ async fn execute_provider_targets<T: RetryableOpenAiRequest>(
         match builder.send().await {
             Ok(response) if response.status().is_success() => {
                 record_transport_success(state, route.proxy_index).await;
+                state
+                    .provider_route_state
+                    .write()
+                    .await
+                    .record_success(target);
                 return Ok(LeasedResponse::new(
                     response,
                     route.lease.take(),
@@ -643,17 +708,55 @@ async fn execute_provider_targets<T: RetryableOpenAiRequest>(
                 ));
             }
             Ok(response) => {
-                last_status = Some(response.status());
-                if let Some(index) = route.proxy_index {
-                    state.proxy_pool.write().await.record_failure(index);
+                let status = response.status();
+                last_status = Some(status);
+                let headers = response.headers().clone();
+                let body = response.text().await.unwrap_or_default();
+                let failure = adapter.classify_failure(
+                    Some(status),
+                    &headers,
+                    &body.chars().take(8_192).collect::<String>(),
+                );
+                if failure == crate::provider::adapters::FailureClass::ClientRequest {
+                    return Err(BridgeError::UpstreamError(format!(
+                        "provider returned HTTP {status}"
+                    )));
                 }
-                let _ = response.bytes().await;
+                let retry_after = headers
+                    .get("retry-after")
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| parse_retry_after(value, std::time::SystemTime::now()))
+                    .map(clamp_provider_retry_after);
+                state.provider_route_state.write().await.record_failure(
+                    target,
+                    failure,
+                    retry_after,
+                    std::time::Instant::now(),
+                );
+                if failure != crate::provider::adapters::FailureClass::RateLimit {
+                    if let Some(index) = route.proxy_index {
+                        state.proxy_pool.write().await.record_failure(index);
+                    }
+                }
+                warn!(
+                    provider = %target.provider_id,
+                    model = %target.wire_model_id,
+                    status = %status,
+                    ?failure,
+                    "provider target failed; trying next eligible target"
+                );
             }
             Err(error) => {
                 last_status = None;
                 if let Some(index) = route.proxy_index {
                     state.proxy_pool.write().await.record_failure(index);
                 }
+                state.provider_route_state.write().await.record_failure(
+                    target,
+                    crate::provider::adapters::FailureClass::Transport,
+                    None,
+                    std::time::Instant::now(),
+                );
                 warn!(provider = %target.provider_id, model = %target.wire_model_id, %error, "provider target failed; trying next target");
             }
         }

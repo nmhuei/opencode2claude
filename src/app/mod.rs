@@ -5,13 +5,13 @@
 
 mod dashboard;
 mod models;
-mod providers;
 mod proxy;
 mod server;
 mod utility;
 mod view;
 
 use crate::cli::{self, Command};
+use crate::command;
 use crate::config::{BridgeConfig, CliOverrides};
 use crate::output::{setup_color, OutputFormat};
 use crate::supervisor::SupervisorStatus;
@@ -26,6 +26,10 @@ pub async fn run_cli() {
 
     let cli = cli::Cli::parse();
 
+    if cli.verbose && std::env::var_os("RUST_LOG").is_none() {
+        std::env::set_var("RUST_LOG", "opencode2api=debug");
+    }
+
     // Initialize color support BEFORE any output
     setup_color(&cli.color);
 
@@ -37,6 +41,7 @@ pub async fn run_cli() {
     } else {
         OutputFormat::Human
     };
+    let global_config = cli.config.clone();
 
     match cli.command {
         // New server subcommand group
@@ -48,33 +53,118 @@ pub async fn run_cli() {
         // New commands
         Some(Command::Doctor) => utility::cmd_doctor(fmt).await,
         Some(Command::Provider(args)) => match args.command {
-            Some(cli::ProviderSubcommand::List(args)) => providers::list(fmt, args.config),
-            Some(cli::ProviderSubcommand::Add(args)) => providers::add(args, fmt),
-            Some(cli::ProviderSubcommand::Remove(args)) => providers::remove(args, fmt),
-            Some(cli::ProviderSubcommand::Credential(args)) => {
-                providers::credentials(args.command, fmt)
-            }
-            Some(cli::ProviderSubcommand::Alias(args)) => providers::aliases(args.command, fmt),
-            Some(cli::ProviderSubcommand::Model(args)) => providers::models(args.command, fmt),
-            Some(cli::ProviderSubcommand::Activate(args)) => {
-                providers::activate(args.alias, args.config, fmt)
-            }
-            Some(cli::ProviderSubcommand::Health(args)) => {
-                providers::health(fmt, args.config).await
-            }
-            Some(other) => {
+            Some(cli::ProviderSubcommand::Opencode(args)) => {
                 models::cmd_provider(
                     cli::ProviderArgs {
-                        command: Some(other),
+                        command: Some(cli::ProviderSubcommand::Opencode(args)),
                     },
                     fmt,
                 )
                 .await
             }
+            Some(cli::ProviderSubcommand::Api(args)) => {
+                models::cmd_provider(
+                    cli::ProviderArgs {
+                        command: Some(cli::ProviderSubcommand::Api(args)),
+                    },
+                    fmt,
+                )
+                .await
+            }
+            Some(cli::ProviderSubcommand::Models(args)) => {
+                models::cmd_provider(
+                    cli::ProviderArgs {
+                        command: Some(cli::ProviderSubcommand::Models(args)),
+                    },
+                    fmt,
+                )
+                .await
+            }
+            Some(cli::ProviderSubcommand::Status(args)) => {
+                models::cmd_provider(
+                    cli::ProviderArgs {
+                        command: Some(cli::ProviderSubcommand::Status(args)),
+                    },
+                    fmt,
+                )
+                .await
+            }
+            Some(other) => command::provider::run_provider(other, global_config.clone(), fmt).await,
             None => models::cmd_provider(cli::ProviderArgs { command: None }, fmt).await,
         },
+        Some(Command::Credential(args)) => {
+            command::provider::run_credentials(args.command, global_config.clone(), fmt).await
+        }
+        Some(Command::Alias(args)) => {
+            command::provider::run_aliases(args.command, global_config.clone(), fmt).await
+        }
+        Some(Command::Route(args)) => {
+            command::provider::run_route(args.command, global_config.clone(), fmt).await
+        }
+        Some(Command::Health(args)) => {
+            command::provider::run_health(args.provider, global_config.clone(), fmt, args.watch)
+                .await
+        }
+        Some(Command::Config(args)) => {
+            command::config::run(args.command, global_config.clone(), fmt).await
+        }
         Some(Command::List(args)) => models::cmd_list(args, fmt).await,
-        Some(Command::Model(args)) => models::cmd_model(args, fmt).await,
+        Some(Command::Model(args)) => {
+            let model_command = args.command;
+            match model_command {
+                Some(cli::ModelSubcommand::List(args)) => {
+                    command::provider::run_model(
+                        cli::ModelSubcommand::List(args),
+                        global_config.clone(),
+                        fmt,
+                    )
+                    .await
+                }
+                Some(cli::ModelSubcommand::Show(args)) => {
+                    command::provider::run_model(
+                        cli::ModelSubcommand::Show(args),
+                        global_config.clone(),
+                        fmt,
+                    )
+                    .await
+                }
+                Some(cli::ModelSubcommand::Discover(args)) => {
+                    command::provider::run_model(
+                        cli::ModelSubcommand::Discover(args),
+                        global_config.clone(),
+                        fmt,
+                    )
+                    .await
+                }
+                Some(cli::ModelSubcommand::Verify(args)) => {
+                    command::provider::run_model(
+                        cli::ModelSubcommand::Verify(args),
+                        global_config.clone(),
+                        fmt,
+                    )
+                    .await
+                }
+                Some(cli::ModelSubcommand::Set(args)) => {
+                    models::cmd_model(
+                        cli::ModelArgs {
+                            command: Some(cli::ModelSubcommand::Set(args)),
+                        },
+                        fmt,
+                    )
+                    .await
+                }
+                Some(cli::ModelSubcommand::Status) => {
+                    models::cmd_model(
+                        cli::ModelArgs {
+                            command: Some(cli::ModelSubcommand::Status),
+                        },
+                        fmt,
+                    )
+                    .await
+                }
+                None => models::cmd_model(cli::ModelArgs { command: None }, fmt).await,
+            }
+        }
         Some(Command::Upstream(args)) => models::cmd_upstream(args, fmt).await,
         Some(Command::Completion(args)) => utility::cmd_completion(args, fmt),
         Some(Command::Update(args)) => utility::cmd_update(args, fmt).await,
@@ -177,10 +267,16 @@ fn launch_claude_code(continue_session: bool, resume: Option<&str>) {
     }
 
     let target_alias = crate::application::integration::client_model_alias(&resolved);
+    let context_window = crate::application::integration::client_context_window(&resolved);
 
     match crate::infrastructure::process::run_foreground(
         "claude",
-        claude_launch_args(continue_session, resume, Some(&target_alias)),
+        claude_launch_args(
+            continue_session,
+            resume,
+            Some(&target_alias),
+            Some(context_window),
+        ),
         crate::application::integration::process_environment(&resolved),
     ) {
         Ok(status) if status.success() => {}
@@ -200,6 +296,7 @@ fn claude_launch_args(
     continue_session: bool,
     resume: Option<&str>,
     model: Option<&str>,
+    context_window: Option<usize>,
 ) -> Vec<String> {
     let mut args = vec![
         "--permission-mode".to_string(),
@@ -209,6 +306,17 @@ fn claude_launch_args(
         if !m.is_empty() {
             args.push("--model".to_string());
             args.push(m.to_string());
+        }
+    }
+    // Current Claude Code exposes a first-class token flag. Supplying it in
+    // addition to the environment contract makes `/context` deterministic;
+    // skip windows below the CLI's documented 100k minimum and let the
+    // environment variables carry those legacy profiles.
+    if let Some(context_window) = context_window {
+        let auto_compact = crate::provider::types::auto_compact_window(context_window);
+        if (100_000..=1_000_000).contains(&auto_compact) {
+            args.push("--autocompact".to_string());
+            args.push(auto_compact.to_string());
         }
     }
     if continue_session {
@@ -246,11 +354,11 @@ mod launcher_tests {
     #[test]
     fn bare_launcher_defaults_to_bypass_permissions() {
         assert_eq!(
-            claude_launch_args(false, None, None),
+            claude_launch_args(false, None, None, None),
             ["--permission-mode", "bypassPermissions"]
         );
         assert_eq!(
-            claude_launch_args(false, None, Some("claude-opus-5")),
+            claude_launch_args(false, None, Some("claude-opus-5"), None),
             [
                 "--permission-mode",
                 "bypassPermissions",
@@ -263,15 +371,15 @@ mod launcher_tests {
     #[test]
     fn launcher_supports_continue_and_resume() {
         assert_eq!(
-            claude_launch_args(true, None, None),
+            claude_launch_args(true, None, None, None),
             ["--permission-mode", "bypassPermissions", "--continue"]
         );
         assert_eq!(
-            claude_launch_args(false, Some(""), None),
+            claude_launch_args(false, Some(""), None, None),
             ["--permission-mode", "bypassPermissions", "--resume"]
         );
         assert_eq!(
-            claude_launch_args(false, Some("session-123"), Some("claude-opus-5")),
+            claude_launch_args(false, Some("session-123"), Some("claude-opus-5"), None),
             [
                 "--permission-mode",
                 "bypassPermissions",
@@ -280,6 +388,25 @@ mod launcher_tests {
                 "--resume",
                 "session-123",
             ]
+        );
+    }
+
+    #[test]
+    fn launcher_passes_fixed_compaction_for_supported_context_windows() {
+        assert_eq!(
+            claude_launch_args(false, None, Some("sonnet[1m]"), Some(1_000_000)),
+            [
+                "--permission-mode",
+                "bypassPermissions",
+                "--model",
+                "sonnet[1m]",
+                "--autocompact",
+                "800000"
+            ]
+        );
+        assert_eq!(
+            claude_launch_args(false, None, Some("small"), Some(64_000)),
+            ["--permission-mode", "bypassPermissions", "--model", "small"]
         );
     }
 }

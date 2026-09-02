@@ -19,7 +19,9 @@ pub enum ProviderConfigError {
     Schema(u32),
     #[error("provider {provider} has invalid base URL: {url}")]
     InvalidUrl { provider: String, url: String },
-    #[error("credential {credential} has invalid source; use env:NAME, file:PATH, or managed[:ID]")]
+    #[error(
+        "credential {credential} has invalid source; use env:NAME, file:PATH, or managed[:ID]"
+    )]
     InvalidSecretSource { credential: String },
 }
 
@@ -243,8 +245,8 @@ impl ProviderFileConfig {
                     .collect(),
             })?;
         }
-        registry.compile_snapshot()?;
         registry.set_active_alias(self.active_alias.map(AliasId::from));
+        registry.compile_snapshot()?;
         Ok(registry)
     }
 }
@@ -259,7 +261,11 @@ impl ProviderFileV3 {
             validate_provider_url(&id, &entry.base_url)?;
             registry.register_provider(Provider {
                 id: id.clone().into(),
-                name: if entry.name.is_empty() { id } else { entry.name },
+                name: if entry.name.is_empty() {
+                    id
+                } else {
+                    entry.name
+                },
                 kind: entry.kind,
                 base_url: entry.base_url,
                 protocol: entry.protocol,
@@ -345,9 +351,7 @@ fn parse_v3_secret_source(id: &str, source: &str) -> Result<SecretSource, Provid
         "file" if !value.trim().is_empty() => Ok(SecretSource::File {
             path: value.trim().to_string(),
         }),
-        "managed" if value.trim().is_empty() => Ok(SecretSource::Managed {
-            id: id.to_string(),
-        }),
+        "managed" if value.trim().is_empty() => Ok(SecretSource::Managed { id: id.to_string() }),
         "managed" if !value.trim().is_empty() => Ok(SecretSource::Managed {
             id: value.trim().to_string(),
         }),
@@ -366,7 +370,7 @@ pub fn load_provider_registry(config_path: &Path) -> Result<ProviderRegistry, Pr
         .unwrap_or(0);
     match version {
         3 => Ok(toml::from_str::<ProviderFileV3>(&raw)?.into_registry()?),
-        0 | 2 => toml::from_str::<ProviderFileConfig>(&raw)?.into_registry(),
+        0..=2 => toml::from_str::<ProviderFileConfig>(&raw)?.into_registry(),
         value => Err(ProviderConfigError::Schema(value as u32)),
     }
 }

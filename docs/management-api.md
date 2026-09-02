@@ -35,6 +35,12 @@ Browser login sets an HttpOnly session cookie. Cookie-authenticated mutation req
 | `GET` | `/api/v1/metrics` | Typed authenticated operational counter snapshot. |
 | `GET` | `/api/v1/audit` | Latest 100 bounded secret-safe management mutation events. |
 | `GET` | `/api/v1/openapi.json` | OpenAPI 3.1 document assembled from the same DTO schema registry used by handlers. |
+| `GET` | `/api/v1/provider-runtime` | Current immutable provider/alias snapshot and transient cooldown counts; secret-safe. |
+| `POST` | `/api/v1/provider-runtime/reload` | Validate the selected provider TOML and atomically replace the daemon snapshot. |
+
+Provider runtime management is intentionally separate from the Anthropic
+request API. A successful file mutation can be followed by the authenticated
+reload call; a failed reload leaves the running snapshot unchanged.
 
 ## Configuration workflow
 

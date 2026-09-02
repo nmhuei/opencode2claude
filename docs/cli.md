@@ -1,21 +1,28 @@
 # CLI reference
 
-OpenCode2API uses hierarchical commands and supports `--json`, `--quiet`, and `--color auto|always|never` as global output options.
+OpenCode2API uses hierarchical commands and supports `--json`, `--quiet`,
+`--color auto|always|never`, and `--verbose` as global output options.
 
 ## Command tree
 
 ```text
 opencode2api
 ├── provider
-│   ├── list|add|remove
+│   ├── list|show|add|remove|enable|disable|test
 │   ├── model add|remove
-│   ├── credential set|list|remove
-│   ├── alias set|show|list
-│   ├── activate ALIAS
-│   ├── health
+│   ├── credential set|list|remove|test
+│   ├── alias set|show|list|remove|use
+│   ├── activate ALIAS                 # legacy-compatible spelling
+│   ├── health [PROVIDER]|test [PROVIDER]
 │   ├── opencode [MODEL]
 │   ├── api <URL> <MODEL> [--api-key-stdin]
 │   └── models [--probe] [--all]
+├── credential list|set|remove|test
+├── model list|show|discover|verify
+├── alias list|show|set|remove|use
+├── route explain|test|simulate
+├── health [PROVIDER] [--watch]
+├── config path|show|validate|migrate
 ├── server
 │   ├── start
 │   ├── stop
@@ -46,7 +53,7 @@ opencode2api
 
 Use `opencode2api <command> --help` as the executable source of truth.
 
-The schema-v2 provider workflow, credential storage rules, and Claude Code 1M
+The schema-v3 provider workflow (with schema-v2 compatibility), credential storage rules, and Claude Code 1M
 alias contract are documented in [provider-management.md](provider-management.md).
 
 ## Global output
@@ -54,6 +61,8 @@ alias contract are documented in [provider-management.md](provider-management.md
 - `--json` returns machine-readable output for commands that expose a schema.
 - `--quiet` suppresses presentation detail and retains compact success/error output.
 - `--color auto|always|never` controls ANSI output.
+- `--verbose` enables `opencode2api=debug` tracing for diagnostics; it never
+  changes provider selection or retry policy.
 
 ## Server lifecycle
 
@@ -125,6 +134,20 @@ opencode2api doctor
 `env` emits the Claude Code integration variables derived from resolved configuration. `doctor` evaluates configuration, port, runtime, Docker/proxy requirements, and other dependencies appropriate to the selected egress mode. Docker is not treated as required in direct mode.
 
 ## Provider model availability cache
+
+The canonical provider-local metadata commands are:
+
+```bash
+opencode2api model list
+opencode2api model show bai:deepseek-1m
+opencode2api model discover bai
+opencode2api model verify bai deepseek-1m
+```
+
+`model discover` queries only the selected provider's `/models` endpoint and
+stores metadata under that provider. It never merges models by ID across
+providers. The older `provider models --probe` command remains a compatibility
+catalog for the legacy singleton path.
 
 ```bash
 opencode2api provider models --probe  # run live discovery/completion probes and refresh cache

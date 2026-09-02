@@ -2,7 +2,9 @@
 
 use super::config::{load_provider_registry, ProviderConfigError};
 use super::registry::{ProviderRegistry, RegistryError};
-use super::types::{AliasId, AuthScheme, Credential, ModelAlias, ModelInfo, Provider, SecretSource};
+use super::types::{
+    AliasId, AuthScheme, Credential, ModelAlias, ModelInfo, Provider, SecretSource,
+};
 use crate::infrastructure::file_store::{AtomicFileStore, FileStore};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -20,6 +22,8 @@ pub enum ProviderStoreError {
     Registry(#[from] RegistryError),
     #[error("provider config serialization failed: {0}")]
     Serialize(#[from] toml::ser::Error),
+    #[error("provider config document error: {0}")]
+    Document(String),
 }
 
 #[derive(Debug, Clone)]
@@ -72,7 +76,8 @@ impl ProviderConfigStore {
         apply_mutation(&mut registry, mutation)?;
         registry.compile_snapshot()?;
         let rendered = render_v3_registry(&registry)?;
-        AtomicFileStore.atomic_write(&self.path, rendered.as_bytes(), true)?;
+        let document = merge_provider_document(&self.path, &rendered)?;
+        AtomicFileStore.atomic_write(&self.path, document.as_bytes(), true)?;
         Ok(registry)
     }
 
@@ -81,19 +86,26 @@ impl ProviderConfigStore {
         let from_version = std::str::from_utf8(&original)
             .ok()
             .and_then(|raw| raw.parse::<toml::Value>().ok())
-            .and_then(|value| value.get("schema_version").and_then(toml::Value::as_integer))
+            .and_then(|value| {
+                value
+                    .get("schema_version")
+                    .and_then(toml::Value::as_integer)
+            })
             .unwrap_or(0) as u32;
         let registry = self.load()?;
         let rendered = render_v3_registry(&registry)?;
+        let document = merge_provider_document(&self.path, &rendered)?;
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let backup_path = self
-            .path
-            .with_file_name(format!("{}.v{}-backup-{stamp}", file_name(&self.path), from_version));
+        let backup_path = self.path.with_file_name(format!(
+            "{}.v{}-backup-{stamp}",
+            file_name(&self.path),
+            from_version
+        ));
         AtomicFileStore.atomic_write(&backup_path, &original, true)?;
-        AtomicFileStore.atomic_write(&self.path, rendered.as_bytes(), true)?;
+        AtomicFileStore.atomic_write(&self.path, document.as_bytes(), true)?;
         Ok(StoreMigrationReport {
             from_version,
             to_version: 3,
@@ -109,6 +121,37 @@ fn file_name(path: &Path) -> String {
         .to_string()
 }
 
+/// Provider management shares the bridge TOML file with unrelated runtime
+/// settings. Replace only provider-owned keys so adding an endpoint cannot
+/// silently discard ports, auth policy, proxy settings, or comments.
+fn merge_provider_document(path: &Path, rendered: &str) -> Result<String, ProviderStoreError> {
+    let mut document = if path.exists() {
+        std::fs::read_to_string(path)
+            .map_err(ProviderStoreError::Io)?
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|error| ProviderStoreError::Document(error.to_string()))?
+    } else {
+        toml_edit::DocumentMut::new()
+    };
+    let generated = rendered
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|error| ProviderStoreError::Document(error.to_string()))?;
+    for key in [
+        "schema_version",
+        "router",
+        "providers",
+        "credentials",
+        "models",
+        "aliases",
+    ] {
+        document.remove(key);
+        if let Some(item) = generated.get(key) {
+            document[key] = item.clone();
+        }
+    }
+    Ok(document.to_string())
+}
+
 fn apply_mutation(
     registry: &mut ProviderRegistry,
     mutation: ProviderMutation,
@@ -118,7 +161,9 @@ fn apply_mutation(
         ProviderMutation::SetCredential(credential) => registry.upsert_credential(credential),
         ProviderMutation::UpsertModel(model) => {
             if registry.provider(&model.provider_id).is_none() {
-                return Err(RegistryError::UnknownProvider(model.provider_id.to_string()));
+                return Err(RegistryError::UnknownProvider(
+                    model.provider_id.to_string(),
+                ));
             }
             registry.insert_model(model);
             Ok(())

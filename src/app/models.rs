@@ -620,6 +620,9 @@ pub async fn cmd_model(args: ModelArgs, fmt: OutputFormat) {
     match args.command {
         Some(ModelSubcommand::List(list_args)) => cmd_list(list_args, fmt).await,
         Some(ModelSubcommand::Set(set_args)) => cmd_model_set(set_args, fmt),
+        Some(ModelSubcommand::Show(_)) => cmd_model_status(fmt),
+        Some(ModelSubcommand::Discover(_)) => cmd_list(ListArgs::default(), fmt).await,
+        Some(ModelSubcommand::Verify(_)) => cmd_model_status(fmt),
         None | Some(ModelSubcommand::Status) => cmd_model_status(fmt),
     }
 }

@@ -88,16 +88,38 @@ fn default_true() -> bool {
 
 impl fmt::Debug for Provider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let headers = self
+            .headers
+            .iter()
+            .map(|(key, value)| {
+                (
+                    key,
+                    if is_secret_header(key) {
+                        "[REDACTED]".to_string()
+                    } else {
+                        value.clone()
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
         f.debug_struct("Provider")
             .field("id", &self.id)
             .field("name", &self.name)
             .field("kind", &self.kind)
             .field("base_url", &self.base_url)
             .field("protocol", &self.protocol)
-            .field("headers", &self.headers)
+            .field("headers", &headers)
             .field("enabled", &self.enabled)
             .finish()
     }
+}
+
+fn is_secret_header(key: &str) -> bool {
+    let compact = key.to_ascii_lowercase().replace(['-', '_'], "");
+    matches!(
+        compact.as_str(),
+        "authorization" | "apikey" | "xapikey" | "cookie" | "setcookie"
+    ) || compact.contains("token")
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -198,9 +220,7 @@ impl ModelAlias {
     /// Keeping it derived prevents a fallback candidate from changing the
     /// client-visible context policy.
     pub fn auto_compact_window(&self) -> usize {
-        let whole = self.context_window / 100 * 80;
-        let remainder = self.context_window % 100 * 80 / 100;
-        whole + remainder
+        auto_compact_window(self.context_window)
     }
 
     pub fn one_million(id: impl Into<AliasId>, candidates: Vec<ModelCandidate>) -> Self {
@@ -212,6 +232,14 @@ impl ModelAlias {
             candidates,
         }
     }
+}
+
+/// Return the 80% compaction threshold without rounding errors for small or
+/// non-round context windows.
+pub fn auto_compact_window(context_window: usize) -> usize {
+    let whole = context_window / 100 * 80;
+    let remainder = context_window % 100 * 80 / 100;
+    whole + remainder
 }
 
 #[derive(Debug, Clone, Serialize)]

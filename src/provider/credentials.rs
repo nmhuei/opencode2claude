@@ -5,6 +5,7 @@ use crate::config::SecretString;
 use crate::infrastructure::file_store::{AtomicFileStore, FileStore};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -20,10 +21,21 @@ pub enum CredentialError {
     KeychainUnavailable,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ManagedSecret {
     pub provider_id: String,
+    #[serde(skip)]
     pub value: String,
+}
+
+impl fmt::Debug for ManagedSecret {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ManagedSecret")
+            .field("provider_id", &self.provider_id)
+            .field("value", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -63,9 +75,11 @@ impl CredentialStore {
     pub fn resolve(&self, credential: &Credential) -> Result<SecretString, CredentialError> {
         let value = match &credential.source {
             SecretSource::Env { variable } => std::env::var(variable).ok(),
-            SecretSource::File { path } => std::fs::read_to_string(path)
-                .ok()
-                .map(|v| v.trim().to_string()),
+            SecretSource::File { path } => {
+                std::fs::read_to_string(resolve_file_source(&self.path, path))
+                    .ok()
+                    .map(|v| v.trim().to_string())
+            }
             SecretSource::Managed { id } => self.read_values()?.remove(id),
         };
         value
@@ -78,6 +92,18 @@ impl CredentialStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
             Err(error) => Err(error.into()),
         }
+    }
+}
+
+fn resolve_file_source(store_path: &Path, source: &str) -> PathBuf {
+    let path = Path::new(source);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        store_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(path)
     }
 }
 
@@ -128,6 +154,20 @@ mod tests {
         assert!(!format!("{credential:?}").contains("secret-value"));
         let _ = std::fs::remove_file(root);
     }
+
+    #[test]
+    fn managed_secret_debug_is_redacted() {
+        let secret = ManagedSecret {
+            provider_id: "bai".to_string(),
+            value: "secret-value".to_string(),
+        };
+        let debug = format!("{secret:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("secret-value"));
+        assert!(!serde_json::to_string(&secret)
+            .unwrap()
+            .contains("secret-value"));
+    }
     #[cfg(unix)]
     #[test]
     fn managed_file_is_owner_only() {
@@ -140,5 +180,25 @@ mod tests {
             std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+
+    #[test]
+    fn relative_file_source_is_resolved_next_to_config() {
+        let root =
+            std::env::temp_dir().join(format!("provider-file-source-{}", std::process::id()));
+        let secret_path = root.join("api-key");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&secret_path, "file-secret\n").unwrap();
+        let store = CredentialStore::new(root.join("provider-secrets.json"));
+        let credential = Credential {
+            id: "file-key".into(),
+            provider_id: ProviderId::from("provider"),
+            source: SecretSource::File {
+                path: "api-key".to_string(),
+            },
+            auth_scheme: AuthScheme::Bearer,
+        };
+        assert_eq!(store.resolve(&credential).unwrap().expose(), "file-secret");
+        let _ = std::fs::remove_dir_all(root);
     }
 }

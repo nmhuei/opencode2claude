@@ -1,50 +1,46 @@
 # Provider template and management boundary
 
-`opencode2api` is the provider manager and gateway. OpenCode, Kilo Code, B.AI,
-or any other upstream is only a configured HTTP provider; this project does
-not spawn their CLIs.
+`opencode2api` owns provider configuration and request routing. It never
+launches OpenCode or Kilo Code. Add a normal OpenAI-compatible API by creating
+records; Rust changes are needed only for a genuinely different wire protocol.
 
-## Common provider template
-
-The schema-v2 template is intentionally split into five records:
+## Common schema-v3 template
 
 ```toml
-schema_version = 2
+schema_version = 3
 
-[[providers]]
-id = "provider-id"
+[router]
+active_alias = "coding-1m"
+
+[providers.provider-id]
 name = "Human Provider Name"
 kind = "openai-compatible"       # opencode, kilo, bai, or generic
 protocol = "openai_chat_completions"
 base_url = "https://api.example.com/v1"
 enabled = true
 
-[[credentials]]
-id = "provider-main"
-provider_id = "provider-id"
-env = "PROVIDER_API_KEY"          # or file / managed
-auth_scheme = "bearer"             # bearer, x-api-key, or none
+[credentials.provider-main]
+provider = "provider-id"
+source = "env:PROVIDER_API_KEY"  # file:/path or managed[:id]
+auth_scheme = "bearer"            # bearer, x-api-key, or none
 
-[[models]]
-provider_id = "provider-id"
-model_id = "model-id"
-wire_model_id = "model-id"         # optional; defaults to model_id
+[models.provider-id."model-id"]
+wire_model = "model-id"
 context_window = 1000000
 max_output_tokens = 128000
-verified_context = true
 supports_thinking = true
+verified_context = true
 free = true
 
-[[aliases]]
-id = "coding-1m"
+[aliases.coding-1m]
 client_model = "sonnet[1m]"
 context_window = 1000000
 strict_context = true
 
-[[aliases.candidates]]
-provider_id = "provider-id"
-model_id = "model-id"
-credential_id = "provider-main"
+[[aliases.coding-1m.candidates]]
+provider = "provider-id"
+model = "model-id"
+credential = "provider-main"
 priority = 0
 ```
 
@@ -54,73 +50,60 @@ The relationship is:
 client alias -> ordered candidates -> provider + model + credential -> adapter -> HTTP endpoint
 ```
 
-The model's auto-compact threshold is calculated centrally as
-`floor(context_window * 80 / 100)`. It is not a provider setting, so a 1M
-model keeps `CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000` and gets
-`CLAUDE_CODE_AUTO_COMPACT_WINDOW=800000`.
+`auto_compact_window` is derived centrally as
+`floor(context_window * 80 / 100)`. It is not configurable per provider or
+candidate. A 1M alias therefore keeps a 1,000,000-token Claude Code context
+and compacts at 800,000 tokens.
 
-## Adding a new API
-
-For an OpenAI-compatible API, no Rust change is required:
+## Add an API without source changes
 
 ```bash
 opencode2api provider add my-api https://api.example.com/v1 \
   --kind openai-compatible --protocol openai_chat_completions
-opencode2api provider credential set my-api main --env MY_API_KEY
-opencode2api provider model add my-api my-model \
-  --context-window 128000 --max-output-tokens 32768
-opencode2api provider alias set coding \
-  --client-model claude-sonnet-5 \
-  --context-window 128000 \
-  --candidate my-api:my-model:main
-opencode2api provider activate coding
+opencode2api credential set my-api main --env MY_API_KEY
+opencode2api model discover my-api
+opencode2api model verify my-api my-model
+opencode2api alias set coding-1m --client-model 'sonnet[1m]' \
+  --context-window 1000000 --candidate my-api:my-model:main
+opencode2api alias use coding-1m
 ```
 
-For a provider that uses a new wire protocol, authentication handshake, or
-response format, one adapter is required. The provider's endpoint, model
-metadata, credentials, aliases, and fallback order still remain data-driven;
-adding another provider using that adapter does not require another code
-change.
+`model discover` reads the provider's `/models` endpoint and stores provider-
+local metadata. Discovery metadata is unverified until `model verify`, which
+performs a second live catalog check and validates strict-alias requirements.
+A strict alias cannot use unknown or unverified context metadata. Relative
+`file:PATH` secrets are resolved relative to the selected TOML file.
+
+## Secret storage
+
+TOML contains only `env:NAME`, `file:/path`, or `managed[:id]` references.
+Managed values are stored in `provider-secrets.json` beside the selected TOML
+file with mode `0600`. `credential list`, config views, JSON, logs, and errors
+show status or source only, never the value. Provider credentials are separate
+from bridge client keys in `auth_tokens`.
 
 ## CLI ownership
 
-The canonical management surface is the `opencode2api provider` namespace:
-
 | Command | Owns |
 | --- | --- |
-| `provider add/remove/list` | endpoint and protocol identity |
-| `provider credential set/list/remove` | provider-scoped key references |
-| `provider model add/remove` | wire model and capability metadata |
-| `provider alias set/show/list` | Claude-facing alias and fallback candidates |
-| `provider activate` | active route used by the launcher |
-| `provider models` | live/cached upstream model discovery |
-| `provider health/status` | operational state |
+| `provider add/remove/list/show/enable/disable/test` | endpoint lifecycle |
+| `credential set/list/remove/test` | key reference and availability |
+| `model add/remove/list/show/discover/verify` | local wire metadata |
+| `alias set/show/list/remove/use` | Claude identity and fallback order |
+| `route explain/test/simulate` | offline/debug routing decisions |
+| `health [PROVIDER]` | daemon runtime health, with direct fallback |
+| `config path/show/validate/migrate` | scope, validation, and schema migration |
 
-Claude Code is only the client. Running `opencode2api` without a subcommand
-launches Claude Code with the generated `ANTHROPIC_*` and model-context
-environment. It does not manage provider records.
+`--config PATH` selects the file scope. Mutations are validated and atomically
+written through `ProviderConfigStore`; unrelated bridge settings are preserved.
+Use `POST /api/v1/provider-runtime/reload` after a write when the daemon is
+running, or restart it if reload is unavailable.
 
-## 9router comparison
+## Protocol boundary
 
-The current 9router architecture separates provider connections, compatible
-provider nodes, aliases, custom models, combos, API keys, and usage persistence.
-It also provides dashboard CRUD, model combos, multi-account rotation, quota
-tracking, cooldowns, token refresh, and request logging. These are useful
-reference capabilities from [its architecture document](https://github.com/decolua/9router/blob/master/docs/ARCHITECTURE.md)
-and [provider connection repository](https://github.com/decolua/9router/blob/master/src/lib/db/repos/connectionsRepo.js).
-
-This project deliberately maps the stable core first:
-
-| 9router concept | `opencode2api` equivalent | Status |
-| --- | --- | --- |
-| provider node/connection | `Provider` + `Credential` | implemented |
-| custom model | `ModelInfo` | implemented |
-| model alias/combo | `ModelAlias` with ordered candidates | implemented |
-| client API key | `auth_tokens` | separate by design |
-| atomic runtime reload | `ProviderRuntimeHandle` | implemented |
-| health/cooldown/quota history | `HealthManager` and routing hooks | partial |
-| dashboard CRUD | CLI and management API | partial |
-
-The important boundary is that provider identity is data, while protocol
-translation is code. This keeps adding another OpenAI-compatible endpoint a
-configuration operation instead of a source-code operation.
+The current execution path supports OpenAI Chat Completions with Bearer,
+`x-api-key`, or no authentication. `openai_responses` and
+`anthropic_messages` are reserved protocol values and fail closed until a
+matching request/response adapter is added; they are never silently sent as a
+Chat Completions payload. Adding another endpoint that uses the generic
+protocol remains data-only.

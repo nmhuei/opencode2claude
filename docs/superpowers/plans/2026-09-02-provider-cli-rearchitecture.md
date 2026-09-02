@@ -1,5 +1,13 @@
 # Provider Runtime and CLI Rearchitecture Implementation Plan
 
+> **Implementation status (2026-09-02):** Core provider v3 storage, immutable
+> runtime snapshots, data-driven adapters, fallback health state, CLI control
+> plane, REST runtime inspection/reload, 1M/80% Claude Code integration, and
+> verification gates are implemented in this worktree. The checkboxes below
+> remain the design traceability checklist; the delivered code intentionally
+> keeps the repository's existing `src/cli.rs` and retry module boundaries to
+> avoid a risky broad file move while preserving compatibility.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the split legacy/schema-v2 provider paths with one

@@ -59,7 +59,9 @@ fn cooldown_expiry_reenables_the_original_target_without_persisting_secret_data(
     );
     assert_eq!(
         state.choose(std::slice::from_ref(&target), now),
-        RouteAction::AllCoolingDown { retry_after: Duration::from_secs(5) }
+        RouteAction::AllCoolingDown {
+            retry_after: Duration::from_secs(5)
+        }
     );
     assert_eq!(
         state.choose(std::slice::from_ref(&target), now + Duration::from_secs(5)),
@@ -67,4 +69,15 @@ fn cooldown_expiry_reenables_the_original_target_without_persisting_secret_data(
     );
     let debug = format!("{state:?}");
     assert!(!debug.contains("bai-primary"));
+}
+
+#[test]
+fn billing_failure_quarantines_only_the_provider_and_reload_can_clear_it() {
+    let now = Instant::now();
+    let targets = vec![target("bai", "primary", 0), target("kilo", "free", 1)];
+    let mut state = RouteState::default();
+    state.record_failure(&targets[0], FailureClass::PaymentRequired, None, now);
+    assert_eq!(state.choose(&targets, now), RouteAction::UseTarget(1));
+    state.clear();
+    assert_eq!(state.choose(&targets, now), RouteAction::UseTarget(0));
 }

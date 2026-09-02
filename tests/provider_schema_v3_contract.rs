@@ -61,12 +61,12 @@ priority = 10
             .context_window,
         Some(1_000_000)
     );
-    assert_eq!(registry.alias("free-1m").unwrap().client_model, "sonnet[1m]");
     assert_eq!(
-        registry
-            .alias("free-1m")
-            .unwrap()
-            .auto_compact_window(),
+        registry.alias("free-1m").unwrap().client_model,
+        "sonnet[1m]"
+    );
+    assert_eq!(
+        registry.alias("free-1m").unwrap().auto_compact_window(),
         800_000
     );
     let _ = fs::remove_file(path);

@@ -28,7 +28,12 @@ impl<'a> RoutePlanner<'a> {
         let required = request.max_output_tokens.unwrap_or(0);
         Ok(targets
             .into_iter()
-            .filter(|target| target.context_window >= required)
+            .filter(|target| {
+                self.registry
+                    .provider(&target.provider_id)
+                    .is_some_and(|provider| provider.enabled)
+                    && target.context_window >= required
+            })
             .collect())
     }
     pub fn plan_for_context(
@@ -40,7 +45,12 @@ impl<'a> RoutePlanner<'a> {
             .registry
             .resolve_alias(alias)?
             .into_iter()
-            .filter(|target| target.context_window >= required_context)
+            .filter(|target| {
+                self.registry
+                    .provider(&target.provider_id)
+                    .is_some_and(|provider| provider.enabled)
+                    && target.context_window >= required_context
+            })
             .collect())
     }
 }

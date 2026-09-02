@@ -46,8 +46,8 @@ pub fn process_environment(config: &BridgeConfig) -> Vec<(String, Option<String>
         .unwrap_or(OX_ALPHA_MODEL)
         .to_string();
     let profile = client_profile(config, &effective_model);
-    let claude_vars = configured_alias_vars(config)
-        .unwrap_or_else(|| model_claude_code_vars(&profile));
+    let claude_vars =
+        configured_alias_vars(config).unwrap_or_else(|| model_claude_code_vars(&profile));
 
     let mut vars = vec![
         ("ANTHROPIC_API_KEY".to_string(), Some(key.clone())),
@@ -72,13 +72,6 @@ pub fn process_environment(config: &BridgeConfig) -> Vec<(String, Option<String>
 pub fn environment(config: &BridgeConfig) -> IntegrationEnvironment {
     let base = base_url(config);
     let key = api_key(config).to_string();
-    let effective_model = config
-        .model
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or(OX_ALPHA_MODEL)
-        .to_string();
-    let profile = client_profile(config, &effective_model);
 
     let shell_exports = process_environment(config)
         .into_iter()
@@ -92,24 +85,19 @@ pub fn environment(config: &BridgeConfig) -> IntegrationEnvironment {
         anthropic_base_url: base.clone(),
         openai_base_url: format!("{base}/v1"),
         api_key: key,
-        model: Some(profile.client_model_alias().to_string()),
+        model: Some(client_model_alias(config)),
         shell_exports,
     }
 }
 
-fn configured_alias_vars(
-    config: &BridgeConfig,
-) -> Option<Vec<(&'static str, String)>> {
+fn configured_alias_vars(config: &BridgeConfig) -> Option<Vec<(&'static str, String)>> {
     let registry = config.provider_registry.as_deref()?;
     let alias_id = config.active_alias.as_deref()?;
     let alias = registry.alias(alias_id)?;
     let (max_output_tokens, supports_thinking) = alias
         .candidates
         .iter()
-        .filter_map(|candidate| {
-            registry
-                .model(&candidate.provider_id, &candidate.model_id)
-        })
+        .filter_map(|candidate| registry.model(&candidate.provider_id, &candidate.model_id))
         .next()
         .map(|model| {
             (
@@ -132,17 +120,30 @@ fn client_profile(
     config: &BridgeConfig,
     effective_model: &str,
 ) -> crate::application::models::ModelProfile {
-    if config
-        .active_alias
-        .as_deref()
-        .is_some_and(|alias| alias.contains("1m") || alias.contains("million"))
-    {
-        return crate::application::models::ModelProfile::from_context(
-            OX_ALPHA_MODEL,
-            1_000_000,
-            128_000,
-            true,
-        );
+    if let (Some(registry), Some(alias_id)) = (
+        config.provider_registry.as_deref(),
+        config.active_alias.as_deref(),
+    ) {
+        if let Some(alias) = registry.alias(alias_id) {
+            let (max_output_tokens, supports_thinking) = alias
+                .candidates
+                .iter()
+                .filter_map(|candidate| registry.model(&candidate.provider_id, &candidate.model_id))
+                .next()
+                .map(|model| {
+                    (
+                        model.max_output_tokens.unwrap_or(128_000),
+                        model.supports_thinking,
+                    )
+                })
+                .unwrap_or((128_000, false));
+            return crate::application::models::ModelProfile::from_context(
+                OX_ALPHA_MODEL,
+                alias.context_window,
+                max_output_tokens,
+                supports_thinking,
+            );
+        }
     }
     crate::application::models::resolve_model_profile(effective_model)
 }
@@ -166,6 +167,26 @@ pub fn client_model_alias(config: &BridgeConfig) -> String {
         .to_string()
 }
 
+/// Context window used by the client launcher. This is derived from the
+/// active alias when provider management is enabled and falls back to the
+/// legacy model catalog for singleton configurations.
+pub fn client_context_window(config: &BridgeConfig) -> usize {
+    if let (Some(registry), Some(alias_id)) = (
+        config.provider_registry.as_deref(),
+        config.active_alias.as_deref(),
+    ) {
+        if let Some(alias) = registry.alias(alias_id) {
+            return alias.context_window;
+        }
+    }
+    let model = config
+        .model
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(OX_ALPHA_MODEL);
+    crate::application::models::resolve_model_profile(model).context_window
+}
+
 pub fn model_claude_code_vars(
     profile: &crate::application::models::ModelProfile,
 ) -> Vec<(&'static str, String)> {
@@ -181,8 +202,8 @@ pub fn model_claude_code_vars_for_context(
     max_output_tokens: usize,
     supports_thinking: bool,
 ) -> Vec<(&'static str, String)> {
-    let auto_compact = ((context_window / 100) * 80 + ((context_window % 100) * 80) / 100)
-        .to_string();
+    let auto_compact =
+        ((context_window / 100) * 80 + ((context_window % 100) * 80) / 100).to_string();
     let max_output = max_output_tokens.to_string();
     let disable_1m = if context_window >= 1_000_000 {
         "0"
@@ -201,12 +222,13 @@ pub fn model_claude_code_vars_for_context(
 
     vec![
         ("CLAUDE_CODE_DISABLE_1M_CONTEXT", disable_1m.to_string()),
-        (
-            "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
-            context_window.to_string(),
-        ),
+        ("CLAUDE_CODE_MAX_CONTEXT_TOKENS", context_window.to_string()),
         ("CLAUDE_CODE_MAX_OUTPUT_TOKENS", max_output),
         ("CLAUDE_CODE_AUTO_COMPACT_WINDOW", auto_compact),
+        // Claude Code 2.1+ also exposes a percentage override. Keep it in
+        // lockstep with the token boundary so `/context` and automatic
+        // compaction cannot drift apart between CLI versions.
+        ("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "80".to_string()),
         ("CLAUDE_CODE_DISABLE_THINKING", disable_thinking.to_string()),
         (
             "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING",

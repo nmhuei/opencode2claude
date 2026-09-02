@@ -54,6 +54,11 @@ pub struct AppState {
     pub metrics: Arc<Metrics>,
     /// Bounded secret-safe management audit trail.
     pub audit_log: Arc<AuditLog>,
+    /// Immutable provider registry snapshot used by request execution and
+    /// replaceable by a validated management reload.
+    pub provider_runtime: Option<Arc<crate::provider::ProviderRuntimeHandle>>,
+    /// Ephemeral provider/credential cooldowns; never persisted as config.
+    pub provider_route_state: Arc<RwLock<crate::provider::resilience::RouteState>>,
     /// Persistent request, prompt, reasoning and response history.
     pub history: Arc<HistoryStore>,
     /// Single-use tickets binding echoed local-shell results to bridge-issued delegations.
@@ -121,6 +126,17 @@ impl AppState {
         file_store: Arc<dyn FileStore>,
     ) -> Self {
         let config = Arc::new(config);
+        let provider_runtime = config
+            .provider_registry
+            .as_deref()
+            .and_then(|registry| {
+                let mut runtime_registry = registry.clone();
+                if let Some(active_alias) = config.active_alias.as_deref() {
+                    runtime_registry.set_active_alias(Some(active_alias.into()));
+                }
+                crate::provider::ProviderRuntimeHandle::load(&runtime_registry).ok()
+            })
+            .map(Arc::new);
         let http_client = Client::builder()
             .timeout(Duration::from_secs(600))
             .connect_timeout(HTTP_CONNECT_TIMEOUT)
@@ -293,6 +309,10 @@ impl AppState {
             workers,
             metrics,
             audit_log,
+            provider_runtime,
+            provider_route_state: Arc::new(RwLock::new(
+                crate::provider::resilience::RouteState::default(),
+            )),
             history,
             shell_delegations: Arc::new(ShellDelegations::new()),
             event_tx,

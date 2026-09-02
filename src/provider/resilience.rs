@@ -9,12 +9,21 @@ use std::time::{Duration, Instant};
 const DEFAULT_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(30);
 const DEFAULT_PROVIDER_COOLDOWN: Duration = Duration::from_secs(1);
 const DEFAULT_MODEL_COOLDOWN: Duration = Duration::from_secs(300);
+const DEFAULT_BILLING_COOLDOWN: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RouteAction {
     UseTarget(usize),
     AllCoolingDown { retry_after: Duration },
     NoEligibleTargets,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RouteStateSummary {
+    pub cooling_down: usize,
+    pub credential_cooldowns: usize,
+    pub provider_cooldowns: usize,
+    pub model_cooldowns: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -37,6 +46,30 @@ pub struct RouteState {
 }
 
 impl RouteState {
+    pub fn summary(&self, now: Instant) -> RouteStateSummary {
+        let credential_cooldowns = self
+            .credential_cooldowns
+            .values()
+            .filter(|until| **until > now)
+            .count();
+        let provider_cooldowns = self
+            .provider_cooldowns
+            .values()
+            .filter(|until| **until > now)
+            .count();
+        let model_cooldowns = self
+            .model_cooldowns
+            .values()
+            .filter(|until| **until > now)
+            .count();
+        RouteStateSummary {
+            cooling_down: credential_cooldowns + provider_cooldowns + model_cooldowns,
+            credential_cooldowns,
+            provider_cooldowns,
+            model_cooldowns,
+        }
+    }
+
     pub fn choose(&self, targets: &[AttemptTarget], now: Instant) -> RouteAction {
         if targets.is_empty() {
             return RouteAction::NoEligibleTargets;
@@ -63,15 +96,14 @@ impl RouteState {
         retry_after: Option<Duration>,
         now: Instant,
     ) {
-        let duration = retry_after.unwrap_or_else(|| match failure {
+        let duration = retry_after.unwrap_or(match failure {
             FailureClass::RateLimit | FailureClass::CredentialRejected => {
                 DEFAULT_RATE_LIMIT_COOLDOWN
             }
             FailureClass::ModelUnavailable => DEFAULT_MODEL_COOLDOWN,
             FailureClass::ProviderServer | FailureClass::Transport => DEFAULT_PROVIDER_COOLDOWN,
-            FailureClass::PaymentRequired
-            | FailureClass::ClientRequest
-            | FailureClass::Unknown => Duration::ZERO,
+            FailureClass::PaymentRequired => DEFAULT_BILLING_COOLDOWN,
+            FailureClass::ClientRequest | FailureClass::Unknown => Duration::ZERO,
         });
         if duration.is_zero() {
             return;
@@ -89,9 +121,11 @@ impl RouteState {
                 self.provider_cooldowns
                     .insert(target.provider_id.to_string(), until);
             }
-            FailureClass::PaymentRequired
-            | FailureClass::ClientRequest
-            | FailureClass::Unknown => {}
+            FailureClass::PaymentRequired => {
+                self.provider_cooldowns
+                    .insert(target.provider_id.to_string(), until);
+            }
+            FailureClass::ClientRequest | FailureClass::Unknown => {}
         }
     }
 
@@ -101,14 +135,27 @@ impl RouteState {
         self.provider_cooldowns.remove(target.provider_id.as_ref());
     }
 
+    /// Drop transient state after a validated registry replacement. Cooldowns
+    /// are keyed by provider/model/credential identifiers from the old
+    /// snapshot and must not survive a configuration reload as stale health.
+    pub fn clear(&mut self) {
+        self.credential_cooldowns.clear();
+        self.provider_cooldowns.clear();
+        self.model_cooldowns.clear();
+    }
+
     pub fn is_eligible(&self, target: &AttemptTarget, now: Instant) -> bool {
         self.cooldown_until(target).is_none_or(|until| until <= now)
     }
 
     fn cooldown_until(&self, target: &AttemptTarget) -> Option<Instant> {
         [
-            self.credential_cooldowns.get(&credential_key(target)).copied(),
-            self.provider_cooldowns.get(target.provider_id.as_ref()).copied(),
+            self.credential_cooldowns
+                .get(&credential_key(target))
+                .copied(),
+            self.provider_cooldowns
+                .get(target.provider_id.as_ref())
+                .copied(),
             self.model_cooldowns.get(&model_key(target)).copied(),
         ]
         .into_iter()

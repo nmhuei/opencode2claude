@@ -55,9 +55,10 @@ async fn server(status: StatusCode) -> (String, Arc<Mutex<Vec<Value>>>) {
     (format!("http://{address}"), requests)
 }
 
-#[tokio::test]
-async fn strict_one_million_alias_falls_across_providers_without_downgrading_context() {
-    let (first_url, first_requests) = server(StatusCode::SERVICE_UNAVAILABLE).await;
+async fn run_two_provider_fallback(
+    first_status: StatusCode,
+) -> (StatusCode, Vec<Value>, Vec<Value>) {
+    let (first_url, first_requests) = server(first_status).await;
     let (second_url, second_requests) = server(StatusCode::OK).await;
     let mut registry = ProviderRegistry::new();
     for (id, url) in [("deepseek", first_url), ("glm", second_url)] {
@@ -119,7 +120,25 @@ async fn strict_one_million_alias_falls_across_providers_without_downgrading_con
     };
     let app = build_router(AppState::new(config));
     let response = app.oneshot(Request::builder().method("POST").uri("/v1/messages").header("content-type", "application/json").body(Body::from(serde_json::to_vec(&json!({"model":"sonnet[1m]","messages":[{"role":"user","content":"large context"}],"max_tokens":128})).unwrap())).unwrap()).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(first_requests.lock().await[0]["model"], "wire-deepseek");
-    assert_eq!(second_requests.lock().await[0]["model"], "wire-glm");
+    let first_requests = first_requests.lock().await.clone();
+    let second_requests = second_requests.lock().await.clone();
+    (response.status(), first_requests, second_requests)
+}
+
+#[tokio::test]
+async fn rate_limited_one_million_alias_falls_across_providers_without_downgrading_context() {
+    let (status, first_requests, second_requests) =
+        run_two_provider_fallback(StatusCode::TOO_MANY_REQUESTS).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first_requests[0]["model"], "wire-deepseek");
+    assert_eq!(second_requests[0]["model"], "wire-glm");
+}
+
+#[tokio::test]
+async fn billing_failure_falls_to_the_next_provider() {
+    let (status, first_requests, second_requests) =
+        run_two_provider_fallback(StatusCode::PAYMENT_REQUIRED).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first_requests[0]["model"], "wire-deepseek");
+    assert_eq!(second_requests[0]["model"], "wire-glm");
 }

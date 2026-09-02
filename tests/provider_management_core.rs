@@ -3,7 +3,7 @@ use opencode2api::provider::catalog::{CatalogSource, ModelCatalog};
 use opencode2api::provider::config::ProviderFileConfig;
 use opencode2api::provider::routing::RoutePlanner;
 use opencode2api::provider::types::{AuthScheme, ModelInfo, ProviderRequest};
-use opencode2api::provider::ProviderRuntimeHandle;
+use opencode2api::provider::{ProviderRegistry, ProviderRuntimeHandle};
 
 const CONFIG: &str = r#"
 schema_version = 2
@@ -153,6 +153,48 @@ fn route_planner_keeps_fallback_order_and_context() {
     assert!(targets
         .iter()
         .all(|target| target.context_window >= 1_000_000));
+}
+
+#[test]
+fn disabled_provider_is_not_selected_for_a_request() {
+    let registry = toml::from_str::<ProviderFileConfig>(CONFIG)
+        .unwrap()
+        .into_registry()
+        .unwrap();
+    let mut registry = ProviderRegistry::from_snapshot(&registry.compile_snapshot().unwrap());
+    registry.set_enabled("bai", false).unwrap();
+    let request = ProviderRequest {
+        client_model: "sonnet[1m]".into(),
+        messages: serde_json::json!([]),
+        max_output_tokens: Some(128000),
+        stream: false,
+    };
+    assert!(RoutePlanner::new(&registry)
+        .plan(&request, "free-1m")
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn unsupported_wire_protocol_fails_closed_instead_of_sending_wrong_payload() {
+    let registry = toml::from_str::<ProviderFileConfig>(CONFIG)
+        .unwrap()
+        .into_registry()
+        .unwrap();
+    let provider = registry.provider("bai").unwrap();
+    let target = registry.resolve_alias("free-1m").unwrap().remove(0);
+    let request = ProviderRequest {
+        client_model: target.client_model.clone(),
+        messages: serde_json::json!([]),
+        max_output_tokens: Some(128),
+        stream: false,
+    };
+    let mut provider = provider.clone();
+    provider.protocol = opencode2api::provider::types::ProviderProtocol::AnthropicMessages;
+    let error = AdapterRegistry::for_provider(provider.kind)
+        .prepare(&provider, &target, &request, None)
+        .unwrap_err();
+    assert!(error.to_string().contains("unsupported protocol"));
 }
 
 #[test]

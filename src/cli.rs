@@ -45,6 +45,14 @@ pub struct Cli {
     /// Color output: auto (default), always, never
     #[arg(long, global = true, value_enum, default_value_t = ColorChoice::default())]
     pub color: ColorChoice,
+
+    /// Provider configuration file used by management commands.
+    #[arg(long, global = true)]
+    pub config: Option<String>,
+
+    /// Include diagnostic details in human-readable output.
+    #[arg(long, global = true)]
+    pub verbose: bool,
 }
 
 /// Clap help text styling for a cyber/SOC aesthetic.
@@ -110,8 +118,22 @@ pub enum Command {
     List(ListArgs),
 
     /// Advanced model override namespace
-    #[command(hide = true)]
     Model(ModelArgs),
+
+    /// Manage provider credentials independently from provider definitions.
+    Credential(ProviderCredentialArgs),
+
+    /// Manage stable client-facing aliases and their fallback candidates.
+    Alias(ProviderAliasArgs),
+
+    /// Explain, test, or simulate route selection without hiding provider state.
+    Route(RouteArgs),
+
+    /// Inspect daemon/provider health.
+    Health(HealthArgs),
+
+    /// Read, validate, and migrate configuration files.
+    Config(ConfigArgs),
 
     /// Legacy upstream configuration namespace
     #[command(hide = true)]
@@ -519,10 +541,16 @@ pub struct ProviderArgs {
 pub enum ProviderSubcommand {
     /// List all configured providers without revealing secrets.
     List(ProviderListArgs),
+    /// Show one provider without revealing secrets.
+    Show(ProviderShowArgs),
     /// Register a provider endpoint and protocol.
     Add(ProviderAddArgs),
     /// Remove a provider definition.
     Remove(ProviderRemoveArgs),
+    /// Enable a provider for new requests.
+    Enable(ProviderToggleArgs),
+    /// Disable a provider without deleting its configuration.
+    Disable(ProviderToggleArgs),
     /// Manage provider-scoped credentials.
     Credential(ProviderCredentialArgs),
     /// Manage stable client aliases and fallback candidates.
@@ -531,8 +559,12 @@ pub enum ProviderSubcommand {
     Model(ProviderModelArgs),
     /// Make an alias the active client route.
     Activate(ProviderActivateArgs),
+    /// Alias for activate, matching the stable alias vocabulary.
+    Use(ProviderActivateArgs),
     /// Check configured provider endpoints.
     Health(ProviderHealthArgs),
+    /// Run a provider endpoint check.
+    Test(ProviderHealthArgs),
     /// Use OpenCode Zen. Model defaults to mimo-v2.5-free.
     Opencode(ProviderOpenCodeArgs),
 
@@ -564,8 +596,16 @@ pub struct ProviderListArgs {
     pub config: Option<String>,
 }
 
+#[derive(Args, Debug, Clone)]
+pub struct ProviderShowArgs {
+    pub id: String,
+    #[arg(short, long)]
+    pub config: Option<String>,
+}
+
 #[derive(Args, Debug, Clone, Default)]
 pub struct ProviderHealthArgs {
+    pub provider: Option<String>,
     #[arg(short, long)]
     pub config: Option<String>,
 }
@@ -584,6 +624,13 @@ pub struct ProviderRemoveArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+pub struct ProviderToggleArgs {
+    pub id: String,
+    #[arg(short, long)]
+    pub config: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
 pub struct ProviderCredentialArgs {
     #[command(subcommand)]
     pub command: ProviderCredentialCommand,
@@ -594,6 +641,7 @@ pub enum ProviderCredentialCommand {
     Set(ProviderCredentialSetArgs),
     List(ProviderCredentialListArgs),
     Remove(ProviderCredentialRemoveArgs),
+    Test(ProviderCredentialTestArgs),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -623,6 +671,14 @@ pub struct ProviderCredentialRemoveArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+pub struct ProviderCredentialTestArgs {
+    pub provider: String,
+    pub id: String,
+    #[arg(short, long)]
+    pub config: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
 pub struct ProviderAliasArgs {
     #[command(subcommand)]
     pub command: ProviderAliasCommand,
@@ -632,6 +688,8 @@ pub enum ProviderAliasCommand {
     List(ProviderAliasListArgs),
     Show(ProviderAliasShowArgs),
     Set(ProviderAliasSetArgs),
+    Remove(ProviderAliasRemoveArgs),
+    Use(ProviderActivateArgs),
 }
 #[derive(Args, Debug, Clone)]
 pub struct ProviderAliasListArgs {
@@ -653,6 +711,12 @@ pub struct ProviderAliasSetArgs {
     pub context_window: usize,
     #[arg(long)]
     pub candidate: Vec<String>,
+    #[arg(short, long)]
+    pub config: Option<String>,
+}
+#[derive(Args, Debug, Clone)]
+pub struct ProviderAliasRemoveArgs {
+    pub id: String,
     #[arg(short, long)]
     pub config: Option<String>,
 }
@@ -765,8 +829,118 @@ pub enum ModelSubcommand {
     /// Set the active model in configuration
     Set(ModelSetArgs),
 
+    /// Show one configured provider model or the active model profile.
+    Show(ModelShowArgs),
+
+    /// Discover models from a provider catalog.
+    Discover(ModelDiscoverArgs),
+
+    /// Verify model metadata used by strict aliases.
+    Verify(ModelVerifyArgs),
+
     /// Show current active model profile and tuning parameters
     Status,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ModelShowArgs {
+    pub model: Option<String>,
+    #[arg(short, long)]
+    pub config: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ModelDiscoverArgs {
+    pub provider: String,
+    #[arg(short, long)]
+    pub config: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ModelVerifyArgs {
+    pub provider: String,
+    pub model: String,
+    #[arg(short, long)]
+    pub config: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct RouteArgs {
+    #[command(subcommand)]
+    pub command: RouteCommand,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum RouteCommand {
+    Explain(RouteExplainArgs),
+    Test(RouteTestArgs),
+    Simulate(RouteSimulateArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct RouteExplainArgs {
+    pub alias: String,
+    #[arg(short, long)]
+    pub config: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct RouteTestArgs {
+    pub alias: String,
+    #[arg(short, long)]
+    pub config: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct RouteSimulateArgs {
+    pub alias: String,
+    #[arg(long)]
+    pub from: Option<String>,
+    #[arg(long)]
+    pub status: Option<u16>,
+    #[arg(short, long)]
+    pub config: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct HealthArgs {
+    pub provider: Option<String>,
+    #[arg(long)]
+    pub watch: bool,
+    #[arg(short, long)]
+    pub config: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ConfigArgs {
+    #[command(subcommand)]
+    pub command: ConfigCommand,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ConfigCommand {
+    Path,
+    Show(ConfigShowArgs),
+    Validate,
+    Migrate(ConfigMigrateArgs),
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct ConfigShowArgs {
+    #[arg(long, conflicts_with = "effective")]
+    pub file: bool,
+    #[arg(long, conflicts_with = "file")]
+    pub effective: bool,
+    #[arg(short, long)]
+    pub config: Option<String>,
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct ConfigMigrateArgs {
+    #[arg(short, long)]
+    pub config: Option<String>,
+    #[arg(long)]
+    pub write: bool,
 }
 
 #[derive(Args, Debug, Clone)]
