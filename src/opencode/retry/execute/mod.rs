@@ -9,6 +9,10 @@ use super::response::LeasedResponse;
 use crate::error::BridgeError;
 use crate::observability::{EgressRouteMetricClass, RetryMetricClass};
 use crate::opencode::types::{OpenAiInboundRequest, OpenAiRequest};
+use crate::provider::adapters::AdapterRegistry;
+use crate::provider::credentials::default_store;
+use crate::provider::routing::RoutePlanner;
+use crate::provider::types::ProviderRequest;
 use crate::proxy_pool::{EgressLease, EgressRole, RouteKind, RouteMetadata};
 use crate::state::AppState;
 use reqwest::{Client, RequestBuilder, StatusCode};
@@ -39,6 +43,18 @@ trait RetryableOpenAiRequest: Serialize + Clone {
     fn repair_missing_tool_reasoning(&mut self) -> bool;
     fn disable_reasoning_compatibility(&mut self) -> bool;
     fn strip_response_format(&mut self) -> bool;
+    fn provider_request(&self) -> ProviderRequest {
+        let value = serde_json::to_value(self).unwrap_or_default();
+        ProviderRequest {
+            client_model: self.model().to_string(),
+            messages: value.get("messages").cloned().unwrap_or_default(),
+            max_output_tokens: value
+                .get("max_tokens")
+                .and_then(serde_json::Value::as_u64)
+                .map(|value| value as usize),
+            stream: self.stream(),
+        }
+    }
 }
 
 impl RetryableOpenAiRequest for OpenAiRequest {
@@ -190,6 +206,21 @@ async fn execute_retryable_request<T: RetryableOpenAiRequest>(
     routing_key: &str,
     request: &T,
 ) -> Result<LeasedResponse, BridgeError> {
+    if let Some(registry) = state.config.provider_registry.as_deref() {
+        let alias_id = state.config.active_alias.as_deref().or_else(|| {
+            registry
+                .aliases()
+                .find(|alias| alias.client_model == request.model())
+                .map(|alias| alias.id.as_ref())
+        });
+        if let Some(alias_id) = alias_id {
+            let planner = RoutePlanner::new(registry);
+            let targets = planner
+                .plan(&request.provider_request(), alias_id)
+                .map_err(|error| BridgeError::UpstreamError(error.to_string()))?;
+            return execute_provider_targets(state, routing_key, request, registry, targets).await;
+        }
+    }
     let max_retries = state.config.retry.max_network_attempts as u32;
     let models = build_model_retry_list(
         request.model(),
@@ -552,6 +583,87 @@ async fn execute_retryable_request<T: RetryableOpenAiRequest>(
             }
         }
     }
+}
+
+/// Execute a compiled provider route. The legacy retry loop above remains the
+/// compatibility path for old singleton TOML files; schema-v2 requests never
+/// mutate a model string while keeping the old endpoint, so provider fallback
+/// is genuinely endpoint- and credential-scoped.
+async fn execute_provider_targets<T: RetryableOpenAiRequest>(
+    state: &AppState,
+    routing_key: &str,
+    request: &T,
+    registry: &crate::provider::ProviderRegistry,
+    targets: Vec<crate::provider::AttemptTarget>,
+) -> Result<LeasedResponse, BridgeError> {
+    if targets.is_empty() {
+        return Err(BridgeError::UpstreamError(
+            "no provider candidate satisfies the alias context requirement".to_string(),
+        ));
+    }
+    let request_body = request.provider_request();
+    let secret_store = default_store(&state.config.management.config_path);
+    let mut last_status = None;
+    for target in targets {
+        let provider = registry.provider(&target.provider_id).ok_or_else(|| {
+            BridgeError::UpstreamError("provider disappeared from snapshot".to_string())
+        })?;
+        let credential = target
+            .credential_id
+            .as_ref()
+            .and_then(|id| registry.credentials().find(|candidate| &candidate.id == id));
+        let secret = match credential {
+            Some(credential) => Some(
+                secret_store
+                    .resolve(credential)
+                    .map_err(|error| BridgeError::UpstreamError(error.to_string()))?,
+            ),
+            None => None,
+        };
+        let adapter = AdapterRegistry::for_provider(provider.kind);
+        let prepared = adapter
+            .prepare(provider, &target, &request_body, secret.as_ref())
+            .map_err(|error| BridgeError::UpstreamError(error.to_string()))?;
+        let mut route = select_route_for_attempt(state, routing_key, None, None).await?;
+        let mut builder = route.client.post(prepared.url).json(&prepared.body);
+        for (key, value) in prepared.headers {
+            builder = builder.header(key, value);
+        }
+        if let Some(real_ip) = route.upstream_real_ip.as_deref() {
+            builder = builder.header("x-real-ip", real_ip);
+        }
+        builder = builder.header("user-agent", "opencode/0.5.0");
+        match builder.send().await {
+            Ok(response) if response.status().is_success() => {
+                record_transport_success(state, route.proxy_index).await;
+                return Ok(LeasedResponse::new(
+                    response,
+                    route.lease.take(),
+                    route.metadata.clone(),
+                ));
+            }
+            Ok(response) => {
+                last_status = Some(response.status());
+                if let Some(index) = route.proxy_index {
+                    state.proxy_pool.write().await.record_failure(index);
+                }
+                let _ = response.bytes().await;
+            }
+            Err(error) => {
+                last_status = None;
+                if let Some(index) = route.proxy_index {
+                    state.proxy_pool.write().await.record_failure(index);
+                }
+                warn!(provider = %target.provider_id, model = %target.wire_model_id, %error, "provider target failed; trying next target");
+            }
+        }
+    }
+    Err(BridgeError::UpstreamError(format!(
+        "all provider targets failed{}",
+        last_status
+            .map(|status| format!(" (last status {status})"))
+            .unwrap_or_default()
+    )))
 }
 
 /// Client-facing summary for a terminal network error. The raw reqwest error

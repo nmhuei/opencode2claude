@@ -7,6 +7,12 @@ OpenCode2API uses hierarchical commands and supports `--json`, `--quiet`, and `-
 ```text
 opencode2api
 ├── provider
+│   ├── list|add|remove
+│   ├── model add|remove
+│   ├── credential set|list|remove
+│   ├── alias set|show|list
+│   ├── activate ALIAS
+│   ├── health
 │   ├── opencode [MODEL]
 │   ├── api <URL> <MODEL> [--api-key-stdin]
 │   └── models [--probe] [--all]
@@ -39,6 +45,9 @@ opencode2api
 ```
 
 Use `opencode2api <command> --help` as the executable source of truth.
+
+The schema-v2 provider workflow, credential storage rules, and Claude Code 1M
+alias contract are documented in [provider-management.md](provider-management.md).
 
 ## Global output
 

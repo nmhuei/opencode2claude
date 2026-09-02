@@ -5,6 +5,7 @@
 
 mod dashboard;
 mod models;
+mod providers;
 mod proxy;
 mod server;
 mod utility;
@@ -46,7 +47,32 @@ pub async fn run_cli() {
 
         // New commands
         Some(Command::Doctor) => utility::cmd_doctor(fmt).await,
-        Some(Command::Provider(args)) => models::cmd_provider(args, fmt).await,
+        Some(Command::Provider(args)) => match args.command {
+            Some(cli::ProviderSubcommand::List(args)) => providers::list(fmt, args.config),
+            Some(cli::ProviderSubcommand::Add(args)) => providers::add(args, fmt),
+            Some(cli::ProviderSubcommand::Remove(args)) => providers::remove(args, fmt),
+            Some(cli::ProviderSubcommand::Credential(args)) => {
+                providers::credentials(args.command, fmt)
+            }
+            Some(cli::ProviderSubcommand::Alias(args)) => providers::aliases(args.command, fmt),
+            Some(cli::ProviderSubcommand::Model(args)) => providers::models(args.command, fmt),
+            Some(cli::ProviderSubcommand::Activate(args)) => {
+                providers::activate(args.alias, args.config, fmt)
+            }
+            Some(cli::ProviderSubcommand::Health(args)) => {
+                providers::health(fmt, args.config).await
+            }
+            Some(other) => {
+                models::cmd_provider(
+                    cli::ProviderArgs {
+                        command: Some(other),
+                    },
+                    fmt,
+                )
+                .await
+            }
+            None => models::cmd_provider(cli::ProviderArgs { command: None }, fmt).await,
+        },
         Some(Command::List(args)) => models::cmd_list(args, fmt).await,
         Some(Command::Model(args)) => models::cmd_model(args, fmt).await,
         Some(Command::Upstream(args)) => models::cmd_upstream(args, fmt).await,
@@ -150,17 +176,11 @@ fn launch_claude_code(continue_session: bool, resume: Option<&str>) {
         }
     }
 
-    let profile = crate::application::models::resolve_model_profile(
-        resolved
-            .model
-            .as_deref()
-            .unwrap_or(crate::application::integration::OX_ALPHA_MODEL),
-    );
-    let target_alias = profile.client_model_alias();
+    let target_alias = crate::application::integration::client_model_alias(&resolved);
 
     match crate::infrastructure::process::run_foreground(
         "claude",
-        claude_launch_args(continue_session, resume, Some(target_alias)),
+        claude_launch_args(continue_session, resume, Some(&target_alias)),
         crate::application::integration::process_environment(&resolved),
     ) {
         Ok(status) if status.success() => {}

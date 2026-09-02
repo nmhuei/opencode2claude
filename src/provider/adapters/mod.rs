@@ -1,0 +1,106 @@
+//! Protocol-specific request preparation. Request execution owns no provider
+//! inference; the configured provider kind selects the adapter.
+
+mod bai;
+mod kilo;
+mod openai_compatible;
+mod opencode;
+
+use super::types::{
+    AttemptTarget, NormalizedResponse, Provider, ProviderHttpRequest, ProviderKind, ProviderRequest,
+};
+use crate::config::SecretString;
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum AdapterError {
+    #[error("provider {0} is disabled")]
+    Disabled(String),
+    #[error("provider {0} has no adapter")]
+    Unsupported(String),
+    #[error("invalid provider request: {0}")]
+    Request(String),
+    #[error("credential is required for provider {0}")]
+    MissingCredential(String),
+}
+
+pub trait ProviderAdapter: Send + Sync {
+    fn prepare(
+        &self,
+        provider: &Provider,
+        target: &AttemptTarget,
+        request: &ProviderRequest,
+        credential: Option<&SecretString>,
+    ) -> Result<ProviderHttpRequest, AdapterError>;
+    fn normalize(
+        &self,
+        provider: &Provider,
+        target: &AttemptTarget,
+        body: serde_json::Value,
+    ) -> NormalizedResponse {
+        NormalizedResponse {
+            provider_id: provider.id.clone(),
+            model_id: target.wire_model_id.clone(),
+            body,
+        }
+    }
+}
+
+pub struct AdapterRegistry;
+impl AdapterRegistry {
+    pub fn for_provider(kind: ProviderKind) -> Box<dyn ProviderAdapter> {
+        match kind {
+            ProviderKind::Kilo => Box::new(kilo::KiloAdapter),
+            ProviderKind::OpenCode => Box::new(opencode::OpenCodeAdapter),
+            ProviderKind::Bai => Box::new(bai::BaiAdapter),
+            ProviderKind::OpenAiCompatible => Box::new(openai_compatible::OpenAiCompatibleAdapter),
+        }
+    }
+}
+
+fn bearer(
+    headers: &mut std::collections::BTreeMap<String, String>,
+    credential: Option<&SecretString>,
+    scheme: super::types::AuthScheme,
+    provider: &Provider,
+) -> Result<(), AdapterError> {
+    match scheme {
+        super::types::AuthScheme::Bearer => {
+            let value = credential
+                .ok_or_else(|| AdapterError::MissingCredential(provider.id.to_string()))?;
+            headers.insert(
+                "Authorization".to_string(),
+                format!("Bearer {}", value.expose()),
+            );
+        }
+        super::types::AuthScheme::XApiKey => {
+            let value = credential
+                .ok_or_else(|| AdapterError::MissingCredential(provider.id.to_string()))?;
+            headers.insert("x-api-key".to_string(), value.expose().to_string());
+        }
+        super::types::AuthScheme::None => {}
+    }
+    Ok(())
+}
+
+fn openai_request(
+    provider: &Provider,
+    target: &AttemptTarget,
+    request: &ProviderRequest,
+    credential: Option<&SecretString>,
+    suffix: &str,
+    scheme: super::types::AuthScheme,
+) -> Result<ProviderHttpRequest, AdapterError> {
+    if !provider.enabled {
+        return Err(AdapterError::Disabled(provider.id.to_string()));
+    }
+    let mut headers = provider.headers.clone();
+    headers.insert("Content-Type".to_string(), "application/json".to_string());
+    bearer(&mut headers, credential, scheme, provider)?;
+    let body = serde_json::json!({"model": target.wire_model_id, "messages": request.messages, "max_tokens": request.max_output_tokens, "stream": request.stream});
+    Ok(ProviderHttpRequest {
+        url: format!("{}{}", provider.base_url.trim_end_matches('/'), suffix),
+        headers,
+        body,
+    })
+}

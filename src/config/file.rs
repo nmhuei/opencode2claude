@@ -36,6 +36,7 @@ pub struct TomlConfig {
     pub host: Option<String>,
     pub opencode_port: Option<u16>,
     pub model: Option<String>,
+    pub active_alias: Option<String>,
     pub shell_policy: Option<String>,
     pub shell_allowlist: Option<String>,
     pub auth_tokens: Option<StringList>,

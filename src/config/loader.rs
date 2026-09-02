@@ -114,6 +114,16 @@ pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
             }
         });
     let file = TomlConfig::from_file(&config_path);
+    let provider_registry =
+        crate::provider::config::load_provider_registry(std::path::Path::new(&config_path))
+            .ok()
+            .and_then(|registry| {
+                if registry.providers().next().is_some() {
+                    Some(std::sync::Arc::new(registry))
+                } else {
+                    None
+                }
+            });
 
     resolved.host = resolve_host(
         overrides.host,
@@ -135,6 +145,9 @@ pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
         .model
         .or_else(|| env_string("OPENCODE_MODEL"))
         .or_else(|| file.as_ref().and_then(|cfg| cfg.model.clone()));
+    resolved.active_alias = env_string("OPENCODE_ALIAS")
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.active_alias.clone()));
+    resolved.provider_registry = provider_registry;
 
     resolved.shell_policy = resolve_shell_policy(
         overrides

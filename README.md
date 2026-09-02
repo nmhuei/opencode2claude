@@ -26,6 +26,9 @@ The install script downloads the binary and its companion `.sha256` file, verifi
 
 ## Quick start
 
+For multi-provider endpoints, scoped credentials, stable Claude Code aliases,
+and strict 1M fallback, see [docs/provider-management.md](docs/provider-management.md).
+
 The default bind address is `127.0.0.1:4000`. The default proxy topology expects three primary SOCKS proxies on ports `40001-40003` and two protected warm-standby proxies on `40004-40005`.
 
 Start with managed proxy egress:

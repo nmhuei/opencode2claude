@@ -45,7 +45,7 @@ pub fn process_environment(config: &BridgeConfig) -> Vec<(String, Option<String>
         .filter(|value| !value.trim().is_empty())
         .unwrap_or(OX_ALPHA_MODEL)
         .to_string();
-    let profile = crate::application::models::resolve_model_profile(&effective_model);
+    let profile = client_profile(config, &effective_model);
 
     let mut vars = vec![
         ("ANTHROPIC_API_KEY".to_string(), Some(key.clone())),
@@ -55,7 +55,7 @@ pub fn process_environment(config: &BridgeConfig) -> Vec<(String, Option<String>
         ("ANTHROPIC_AUTH_TOKEN".to_string(), Some(key)),
         (
             "ANTHROPIC_MODEL".to_string(),
-            Some(profile.client_model_alias().to_string()),
+            Some(client_model_alias(config)),
         ),
         ("OPENCODE_MODEL".to_string(), Some(effective_model.clone())),
     ];
@@ -76,7 +76,7 @@ pub fn environment(config: &BridgeConfig) -> IntegrationEnvironment {
         .filter(|value| !value.trim().is_empty())
         .unwrap_or(OX_ALPHA_MODEL)
         .to_string();
-    let profile = crate::application::models::resolve_model_profile(&effective_model);
+    let profile = client_profile(config, &effective_model);
 
     let shell_exports = process_environment(config)
         .into_iter()
@@ -93,6 +93,47 @@ pub fn environment(config: &BridgeConfig) -> IntegrationEnvironment {
         model: Some(profile.client_model_alias().to_string()),
         shell_exports,
     }
+}
+
+/// Resolve the client contract independently from the upstream wire model.
+/// A configured alias is authoritative for Claude Code identity; the legacy
+/// model catalog remains the fallback for old configurations.
+fn client_profile(
+    config: &BridgeConfig,
+    effective_model: &str,
+) -> crate::application::models::ModelProfile {
+    if config
+        .active_alias
+        .as_deref()
+        .is_some_and(|alias| alias.contains("1m") || alias.contains("million"))
+    {
+        return crate::application::models::ModelProfile::from_context(
+            OX_ALPHA_MODEL,
+            1_000_000,
+            128_000,
+            true,
+        );
+    }
+    crate::application::models::resolve_model_profile(effective_model)
+}
+
+pub fn client_model_alias(config: &BridgeConfig) -> String {
+    if let (Some(registry), Some(alias_id)) = (
+        config.provider_registry.as_deref(),
+        config.active_alias.as_deref(),
+    ) {
+        if let Some(alias) = registry.alias(alias_id) {
+            return alias.client_model.clone();
+        }
+    }
+    let model = config
+        .model
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(OX_ALPHA_MODEL);
+    client_profile(config, model)
+        .client_model_alias()
+        .to_string()
 }
 
 pub fn model_claude_code_vars(

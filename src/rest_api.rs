@@ -34,6 +34,21 @@ const MANAGEMENT_PATHS: &[(&str, &str)] = &[
     ("/api/v1/metrics", "/api/v1/metrics"),
     ("/api/v1/audit", "/api/v1/audit"),
     ("/api/v1/openapi.json", "/api/v1/openapi.json"),
+    ("/api/v1/providers", "/api/v1/providers"),
+    ("/api/v1/providers/:id", "/api/v1/providers/{id}"),
+    (
+        "/api/v1/providers/:id/models",
+        "/api/v1/providers/{id}/models",
+    ),
+    (
+        "/api/v1/providers/:id/health",
+        "/api/v1/providers/{id}/health",
+    ),
+    ("/api/v1/aliases", "/api/v1/aliases"),
+    (
+        "/api/v1/aliases/:id/activate",
+        "/api/v1/aliases/{id}/activate",
+    ),
 ];
 
 pub fn router() -> Router<AppState> {
@@ -49,6 +64,12 @@ pub fn router() -> Router<AppState> {
         .route(MANAGEMENT_PATHS[8].0, get(metrics))
         .route(MANAGEMENT_PATHS[9].0, get(audit_events))
         .route(MANAGEMENT_PATHS[10].0, get(openapi))
+        .route(MANAGEMENT_PATHS[11].0, get(providers))
+        .route(MANAGEMENT_PATHS[12].0, get(provider))
+        .route(MANAGEMENT_PATHS[13].0, get(provider_models))
+        .route(MANAGEMENT_PATHS[14].0, post(provider_health))
+        .route(MANAGEMENT_PATHS[15].0, get(aliases))
+        .route(MANAGEMENT_PATHS[16].0, post(activate_alias))
         .layer(axum::middleware::from_fn(no_store))
 }
 
@@ -146,12 +167,36 @@ async fn status(
     authorize(&headers, &state)?;
     let egress = service::egress_operational_snapshot(&state).await;
     let workers = state.workers.snapshot();
+    let configured_alias = state
+        .config
+        .provider_registry
+        .as_deref()
+        .and_then(|registry| {
+            state
+                .config
+                .active_alias
+                .as_deref()
+                .and_then(|id| registry.alias(id))
+        });
+    let fallback_profile = state
+        .config
+        .model
+        .as_deref()
+        .map(crate::application::models::resolve_model_profile);
     Ok(Json(dto::StatusResponse {
         status: "ok".to_string(),
         service: "opencode2api".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         uptime_secs: service::uptime_secs(&state),
         model: state.config.model.clone(),
+        active_alias: configured_alias.map(|alias| alias.id.to_string()),
+        client_model: configured_alias
+            .map(|alias| alias.client_model.clone())
+            .or_else(|| fallback_profile.map(|profile| profile.client_model_alias().to_string())),
+        context_window: configured_alias
+            .map(|alias| alias.context_window)
+            .or_else(|| fallback_profile.map(|profile| profile.context_window)),
+        restart_required: state.config.active_alias.is_some(),
         bridge: dto::BridgeSummary {
             host: state.config.host.to_string(),
             port: state.config.bridge_port,
@@ -160,6 +205,115 @@ async fn status(
         egress: egress.into(),
         workers,
     }))
+}
+
+fn registry_or_error(state: &AppState) -> Result<&crate::provider::ProviderRegistry, ApiError> {
+    state.config.provider_registry.as_deref().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::NOT_FOUND,
+            "provider_registry_unconfigured",
+            "schema_version=2 provider registry is not configured",
+        )
+    })
+}
+
+async fn providers(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    authorize(&headers, &state)?;
+    let registry = registry_or_error(&state)?;
+    let values: Vec<_> = registry.providers().map(|provider| json!({
+        "id": provider.id, "name": provider.name, "kind": provider.kind,
+        "base_url": provider.base_url, "protocol": provider.protocol, "enabled": provider.enabled,
+    })).collect();
+    Ok(Json(
+        json!({"providers": values, "active_alias": state.config.active_alias}),
+    ))
+}
+
+async fn provider(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    authorize(&headers, &state)?;
+    let registry = registry_or_error(&state)?;
+    let value = registry
+        .provider(&id)
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "provider_not_found", id.clone()))?;
+    Ok(Json(
+        json!({"id": value.id, "name": value.name, "kind": value.kind, "base_url": value.base_url, "protocol": value.protocol, "enabled": value.enabled, "credential_count": registry.credentials().filter(|credential| credential.provider_id == value.id).count()}),
+    ))
+}
+
+async fn provider_models(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    authorize(&headers, &state)?;
+    let registry = registry_or_error(&state)?;
+    if registry.provider(&id).is_none() {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "provider_not_found",
+            id,
+        ));
+    }
+    let models: Vec<_> = registry.models().filter(|model| model.provider_id.as_ref() == id).map(|model| json!({
+        "model_id": model.model_id, "wire_model_id": model.wire_model_id,
+        "context_window": model.context_window, "max_output_tokens": model.max_output_tokens,
+        "verified_context": model.verified_context, "free": model.free,
+    })).collect();
+    Ok(Json(json!({"provider_id": id, "models": models})))
+}
+
+async fn provider_health(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    authorize(&headers, &state)?;
+    let registry = registry_or_error(&state)?;
+    let provider = registry
+        .provider(&id)
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "provider_not_found", id.clone()))?;
+    let started = std::time::Instant::now();
+    let result = state.http_client.get(&provider.base_url).send().await;
+    Ok(Json(
+        json!({"provider_id": id, "healthy": result.as_ref().is_ok_and(|response| response.status().is_success() || response.status().is_client_error()), "latency_ms": started.elapsed().as_millis(), "error": result.err().map(|error| error.to_string())}),
+    ))
+}
+
+async fn aliases(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    authorize(&headers, &state)?;
+    let registry = registry_or_error(&state)?;
+    let aliases: Vec<_> = registry.aliases().map(|alias| json!({"id": alias.id, "client_model": alias.client_model, "context_window": alias.context_window, "strict_context": alias.strict_context, "candidates": alias.candidates})).collect();
+    Ok(Json(
+        json!({"aliases": aliases, "active_alias": state.config.active_alias}),
+    ))
+}
+
+async fn activate_alias(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    authorize(&headers, &state)?;
+    let registry = registry_or_error(&state)?;
+    let alias = registry
+        .alias(&id)
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "alias_not_found", id.clone()))?;
+    registry.resolve_alias(&id).map_err(|error| {
+        ApiError::new(StatusCode::BAD_REQUEST, "invalid_alias", error.to_string())
+    })?;
+    Ok(Json(
+        json!({"status":"ok", "active_alias": alias.id, "client_model": alias.client_model, "context_window": alias.context_window, "restart_required": true}),
+    ))
 }
 
 async fn proxies(
@@ -452,7 +606,13 @@ fn openapi_document() -> Value {
             "/api/v1/proxies/{port}/undrain": {"post":{"summary":"Cancel a managed primary drain without changing health state","parameters":[{"name":"port","in":"path","required":true,"schema":{"type":"integer","minimum":1,"maximum":65535}}],"responses":{"200":response_schema::<dto::ProxyDrainResponse>(),"400":{"description":"Invalid port"},"401":{"description":"Unauthorized"},"403":{"description":"Protected proxy"},"404":{"description":"Not configured"}}}},
             "/api/v1/metrics": {"get":{"summary":"Get bounded in-process counters and worker state","responses":{"200":response_schema::<dto::MetricsResponse>(),"401":{"description":"Unauthorized"},"404":{"description":"Metrics disabled"}}}},
             "/api/v1/audit": {"get":{"summary":"Get recent secret-safe management audit events","responses":{"200":response_schema::<dto::AuditEventsResponse>(),"401":{"description":"Unauthorized"}}}},
-            "/api/v1/openapi.json": {"get":{"summary":"Get this OpenAPI document","responses":{"200":{"description":"OpenAPI 3.1 document"},"401":{"description":"Unauthorized"}}}}
+            "/api/v1/openapi.json": {"get":{"summary":"Get this OpenAPI document","responses":{"200":{"description":"OpenAPI 3.1 document"},"401":{"description":"Unauthorized"}}}},
+            "/api/v1/providers": {"get":{"summary":"List configured providers","responses":{"200":{"description":"Provider catalog"},"401":{"description":"Unauthorized"}}}},
+            "/api/v1/providers/{id}": {"get":{"summary":"Get one provider","responses":{"200":{"description":"Provider details"},"401":{"description":"Unauthorized"},"404":{"description":"Provider not found"}}}},
+            "/api/v1/providers/{id}/models": {"get":{"summary":"List provider-local model metadata","responses":{"200":{"description":"Provider model catalog"},"401":{"description":"Unauthorized"},"404":{"description":"Provider not found"}}}},
+            "/api/v1/providers/{id}/health": {"post":{"summary":"Probe one provider endpoint","responses":{"200":{"description":"Provider health"},"401":{"description":"Unauthorized"},"404":{"description":"Provider not found"}}}},
+            "/api/v1/aliases": {"get":{"summary":"List stable client aliases","responses":{"200":{"description":"Alias catalog"},"401":{"description":"Unauthorized"}}}},
+            "/api/v1/aliases/{id}/activate": {"post":{"summary":"Validate and activate an alias","responses":{"200":{"description":"Activation result"},"400":{"description":"Invalid alias"},"401":{"description":"Unauthorized"},"404":{"description":"Alias not found"}}}}
         }
     })
 }

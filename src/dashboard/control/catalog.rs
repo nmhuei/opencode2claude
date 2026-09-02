@@ -22,6 +22,7 @@ pub async fn handler_capabilities(
             {"id":"dashboard","actions":["status","session","events"]},
             {"id":"integration","actions":["env","doctor","completion"]},
             {"id":"configuration","actions":["view","template","init","preview","apply","select_model"]},
+            {"id":"providers","actions":["list","add","remove","models","credentials","aliases","activate","health"]},
             {"id":"access","actions":["list_api_keys","create_api_key","read_api_key","update_api_key","verify_api_key","rotate_api_key","disable_api_key","enable_api_key","revoke_api_key","generate_client_config","hot_reload_policy"]},
             {"id":"update","actions":["check","apply"]}
         ],
@@ -39,6 +40,41 @@ pub async fn handler_models(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     super::super::auth::check_admin_token(&state, &headers, None)?;
+    if let Some(registry) = state.config.provider_registry.as_deref() {
+        let catalog = registry
+            .models()
+            .map(|model| {
+                json!({
+                    "id": model.model_id,
+                    "label": format!("{}:{}", model.provider_id, model.model_id),
+                    "provider": model.provider_id,
+                    "protocol": "provider-adapter",
+                    "context_window": model.context_window,
+                    "max_output_tokens": model.max_output_tokens,
+                    "verified_context": model.verified_context,
+                    "free": model.free,
+                    "privacy_notice": "Provider-specific terms apply.",
+                })
+            })
+            .collect::<Vec<_>>();
+        let aliases = registry
+            .aliases()
+            .map(|alias| {
+                json!({
+                    "id": alias.id,
+                    "client_model": alias.client_model,
+                    "context_window": alias.context_window,
+                    "strict_context": alias.strict_context,
+                })
+            })
+            .collect::<Vec<_>>();
+        return Ok(Json(json!({
+            "selected": state.config.active_alias,
+            "aliases": aliases,
+            "models": catalog,
+            "source": "schema-v2 provider registry"
+        })));
+    }
     let catalog = models::free_models()
         .iter()
         .map(|model| {

@@ -53,7 +53,7 @@ pub fn migrate_value(mut value: toml::Value) -> Result<(toml::Value, MigrationRe
         return Err("schema_version must be non-negative".to_string());
     }
     let from_version = from_version as u32;
-    if from_version > CURRENT_SCHEMA_VERSION {
+    if from_version > CURRENT_SCHEMA_VERSION && from_version != 2 {
         return Err(format!(
             "Configuration schema version {from_version} is newer than supported version {CURRENT_SCHEMA_VERSION}"
         ));
@@ -61,6 +61,21 @@ pub fn migrate_value(mut value: toml::Value) -> Result<(toml::Value, MigrationRe
 
     for retired in RETIRED_KEYS {
         table.remove(*retired);
+    }
+
+    // Provider management owns schema v2 sections. The legacy loader still
+    // reports v1 as its current schema, but must preserve a validated v2
+    // document so `active_alias` and provider tables reach the resolver.
+    if from_version == 2 {
+        return Ok((
+            value,
+            MigrationReport {
+                from_version,
+                to_version: 2,
+                renamed_keys: Vec::new(),
+                changed: false,
+            },
+        ));
     }
 
     let mut renamed_keys = Vec::new();
@@ -151,5 +166,17 @@ mod tests {
         let (second, report) = migrate_document(&document).unwrap();
         assert!(!report.changed);
         assert_eq!(second, document);
+    }
+
+    #[test]
+    fn provider_schema_v2_is_preserved_for_provider_loader() {
+        let (document, report) = migrate_document(
+            "schema_version = 2\nactive_alias = \"free-1m\"\n[[providers]]\nid = \"kilo\"\n",
+        )
+        .unwrap();
+        assert_eq!(report.from_version, 2);
+        assert_eq!(report.to_version, 2);
+        assert!(document.contains("active_alias"));
+        assert!(document.contains("[[providers]]"));
     }
 }

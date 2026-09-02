@@ -517,6 +517,22 @@ pub struct ProviderArgs {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum ProviderSubcommand {
+    /// List all configured providers without revealing secrets.
+    List(ProviderListArgs),
+    /// Register a provider endpoint and protocol.
+    Add(ProviderAddArgs),
+    /// Remove a provider definition.
+    Remove(ProviderRemoveArgs),
+    /// Manage provider-scoped credentials.
+    Credential(ProviderCredentialArgs),
+    /// Manage stable client aliases and fallback candidates.
+    Alias(ProviderAliasArgs),
+    /// Manage provider-local model metadata.
+    Model(ProviderModelArgs),
+    /// Make an alias the active client route.
+    Activate(ProviderActivateArgs),
+    /// Check configured provider endpoints.
+    Health(ProviderHealthArgs),
     /// Use OpenCode Zen. Model defaults to mimo-v2.5-free.
     Opencode(ProviderOpenCodeArgs),
 
@@ -527,7 +543,160 @@ pub enum ProviderSubcommand {
     Models(ListArgs),
 
     /// Show active provider mode, endpoint, credential state, and model.
-    Status,
+    Status(ProviderStatusArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ProviderAddArgs {
+    pub id: String,
+    pub url: String,
+    #[arg(long, default_value = "openai-compatible")]
+    pub kind: String,
+    #[arg(long, default_value = "openai_chat_completions")]
+    pub protocol: String,
+    #[arg(short, long)]
+    pub config: Option<String>,
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct ProviderListArgs {
+    #[arg(short, long)]
+    pub config: Option<String>,
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct ProviderHealthArgs {
+    #[arg(short, long)]
+    pub config: Option<String>,
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct ProviderStatusArgs {
+    #[arg(short, long)]
+    pub config: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ProviderRemoveArgs {
+    pub id: String,
+    #[arg(short, long)]
+    pub config: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ProviderCredentialArgs {
+    #[command(subcommand)]
+    pub command: ProviderCredentialCommand,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ProviderCredentialCommand {
+    Set(ProviderCredentialSetArgs),
+    List(ProviderCredentialListArgs),
+    Remove(ProviderCredentialRemoveArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ProviderCredentialSetArgs {
+    pub provider: String,
+    pub id: String,
+    #[arg(long)]
+    pub env: Option<String>,
+    #[arg(long)]
+    pub api_key_stdin: bool,
+    /// Authentication header: bearer, x-api-key, or none.
+    #[arg(long, default_value = "bearer")]
+    pub auth_scheme: String,
+    #[arg(short, long)]
+    pub config: Option<String>,
+}
+#[derive(Args, Debug, Clone)]
+pub struct ProviderCredentialListArgs {
+    #[arg(short, long)]
+    pub config: Option<String>,
+}
+#[derive(Args, Debug, Clone)]
+pub struct ProviderCredentialRemoveArgs {
+    pub id: String,
+    #[arg(short, long)]
+    pub config: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ProviderAliasArgs {
+    #[command(subcommand)]
+    pub command: ProviderAliasCommand,
+}
+#[derive(Subcommand, Debug, Clone)]
+pub enum ProviderAliasCommand {
+    List(ProviderAliasListArgs),
+    Show(ProviderAliasShowArgs),
+    Set(ProviderAliasSetArgs),
+}
+#[derive(Args, Debug, Clone)]
+pub struct ProviderAliasListArgs {
+    #[arg(short, long)]
+    pub config: Option<String>,
+}
+#[derive(Args, Debug, Clone)]
+pub struct ProviderAliasShowArgs {
+    pub id: String,
+    #[arg(short, long)]
+    pub config: Option<String>,
+}
+#[derive(Args, Debug, Clone)]
+pub struct ProviderAliasSetArgs {
+    pub id: String,
+    #[arg(long, default_value = "claude-sonnet-5[1m]")]
+    pub client_model: String,
+    #[arg(long, default_value_t = 1_000_000)]
+    pub context_window: usize,
+    #[arg(long)]
+    pub candidate: Vec<String>,
+    #[arg(short, long)]
+    pub config: Option<String>,
+}
+#[derive(Args, Debug, Clone)]
+pub struct ProviderActivateArgs {
+    pub alias: String,
+    #[arg(short, long)]
+    pub config: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ProviderModelArgs {
+    #[command(subcommand)]
+    pub command: ProviderModelCommand,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ProviderModelCommand {
+    Add(ProviderModelAddArgs),
+    Remove(ProviderModelRemoveArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ProviderModelAddArgs {
+    pub provider: String,
+    pub model: String,
+    #[arg(long)]
+    pub context_window: usize,
+    #[arg(long)]
+    pub max_output_tokens: Option<usize>,
+    #[arg(long)]
+    pub wire_model: Option<String>,
+    #[arg(long)]
+    pub free: bool,
+    #[arg(short, long)]
+    pub config: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ProviderModelRemoveArgs {
+    pub provider: String,
+    pub model: String,
+    #[arg(short, long)]
+    pub config: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -576,6 +745,9 @@ pub struct ListArgs {
     /// Upstream base URL override (e.g. https://api.b.ai/v1)
     #[arg(long = "upstream-base-url")]
     pub upstream_base_url: Option<String>,
+    /// Configuration file for provider catalog commands.
+    #[arg(short, long)]
+    pub config: Option<String>,
 }
 
 /// Advanced model override commands.
@@ -801,7 +973,41 @@ mod tests {
         let Command::Provider(args) = status.command.unwrap() else {
             panic!("expected provider command");
         };
-        assert!(matches!(args.command, Some(ProviderSubcommand::Status)));
+        assert!(matches!(args.command, Some(ProviderSubcommand::Status(_))));
+    }
+
+    #[test]
+    fn provider_management_commands_parse_aliases_and_scoped_credentials() {
+        let parsed = parse(&["provider", "activate", "free-1m"]).unwrap();
+        let Command::Provider(args) = parsed.command.unwrap() else {
+            panic!("expected provider");
+        };
+        let Some(ProviderSubcommand::Activate(args)) = args.command else {
+            panic!("expected activate");
+        };
+        assert_eq!(args.alias, "free-1m");
+
+        let parsed = parse(&[
+            "provider",
+            "credential",
+            "set",
+            "bai",
+            "main",
+            "--env",
+            "BAI_API_KEY",
+        ])
+        .unwrap();
+        let Command::Provider(args) = parsed.command.unwrap() else {
+            panic!("expected provider");
+        };
+        let Some(ProviderSubcommand::Credential(args)) = args.command else {
+            panic!("expected credential");
+        };
+        let ProviderCredentialCommand::Set(args) = args.command else {
+            panic!("expected credential set");
+        };
+        assert_eq!(args.provider, "bai");
+        assert_eq!(args.env.as_deref(), Some("BAI_API_KEY"));
     }
 
     #[test]

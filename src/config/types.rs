@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::net::IpAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Default)]
@@ -290,6 +291,10 @@ pub struct BridgeConfig {
     pub bridge_port: u16,
     pub opencode_port: u16,
     pub model: Option<String>,
+    /// Stable client-facing provider alias selected by `provider activate`.
+    pub active_alias: Option<String>,
+    /// Compiled schema-v2 registry. `None` means legacy singleton mode.
+    pub provider_registry: Option<Arc<crate::provider::ProviderRegistry>>,
     pub shell_policy: ShellPolicy,
     pub auth_tokens: Option<Vec<SecretString>>,
     pub max_body_size: usize,
@@ -322,6 +327,8 @@ impl Default for BridgeConfig {
             bridge_port: super::DEFAULT_BRIDGE_PORT,
             opencode_port: super::DEFAULT_OPENCODE_PORT,
             model: None,
+            active_alias: None,
+            provider_registry: None,
             shell_policy: ShellPolicy::Disabled,
             auth_tokens: None,
             max_body_size: super::DEFAULT_MAX_BODY_SIZE,

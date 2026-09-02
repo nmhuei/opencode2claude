@@ -292,7 +292,10 @@ fn apply_upstream_configuration_at(
 }
 
 pub async fn cmd_list(args: ListArgs, fmt: OutputFormat) {
-    let config = BridgeConfig::from_env_and_cli(CliOverrides::default());
+    let config = BridgeConfig::from_env_and_cli(CliOverrides {
+        config_path: args.config.clone(),
+        ..Default::default()
+    });
     let upstream_url = args
         .upstream_base_url
         .as_deref()
@@ -737,8 +740,59 @@ pub async fn cmd_provider(args: ProviderArgs, fmt: OutputFormat) {
     match args.command {
         Some(ProviderSubcommand::Opencode(args)) => cmd_provider_opencode(args, fmt).await,
         Some(ProviderSubcommand::Api(args)) => cmd_provider_api(args, fmt).await,
-        Some(ProviderSubcommand::Models(args)) => cmd_list(args, fmt).await,
-        None | Some(ProviderSubcommand::Status) => cmd_provider_status(fmt).await,
+        Some(ProviderSubcommand::Models(args)) => {
+            let config = BridgeConfig::from_env_and_cli(CliOverrides {
+                config_path: args.config.clone(),
+                ..Default::default()
+            });
+            if let Some(registry) = config.provider_registry.as_deref() {
+                cmd_registry_models(registry, fmt);
+            } else {
+                cmd_list(args, fmt).await;
+            }
+        }
+        None => cmd_provider_status(fmt, None).await,
+        Some(ProviderSubcommand::Status(args)) => cmd_provider_status(fmt, args.config).await,
+        _ => unreachable!("canonical provider commands are dispatched by app::run_cli"),
+    }
+}
+
+fn cmd_registry_models(registry: &crate::provider::ProviderRegistry, fmt: OutputFormat) {
+    let models: Vec<_> = registry
+        .models()
+        .map(|model| {
+            serde_json::json!({
+                "provider": model.provider_id,
+                "model": model.model_id,
+                "wire_model": model.wire_model_id,
+                "context_window": model.context_window,
+                "max_output_tokens": model.max_output_tokens,
+                "verified_context": model.verified_context,
+                "free": model.free,
+            })
+        })
+        .collect();
+    match fmt {
+        OutputFormat::Json => println!("{}", serde_json::json!({"models": models})),
+        OutputFormat::Quiet => {
+            for model in models {
+                println!("{}", model["model"]);
+            }
+        }
+        OutputFormat::Human => {
+            if models.is_empty() {
+                println!("No configured provider models");
+            }
+            for model in models {
+                println!(
+                    "{}:{} (context {}, verified={})",
+                    model["provider"],
+                    model["model"],
+                    model["context_window"],
+                    model["verified_context"]
+                );
+            }
+        }
     }
 }
 
@@ -894,8 +948,53 @@ fn render_provider_changed(
     }
 }
 
-async fn cmd_provider_status(fmt: OutputFormat) {
-    let config = BridgeConfig::from_env_and_cli(CliOverrides::default());
+async fn cmd_provider_status(fmt: OutputFormat, config_path: Option<String>) {
+    let config = BridgeConfig::from_env_and_cli(CliOverrides {
+        config_path,
+        ..Default::default()
+    });
+    if let Some(registry) = config.provider_registry.as_deref() {
+        let providers: Vec<_> = registry
+            .providers()
+            .map(|provider| {
+                serde_json::json!({
+                    "id": provider.id,
+                    "name": provider.name,
+                    "kind": provider.kind,
+                    "base_url": provider.base_url,
+                    "enabled": provider.enabled,
+                })
+            })
+            .collect();
+        let active_alias = config
+            .active_alias
+            .as_deref()
+            .and_then(|id| registry.alias(id));
+        if matches!(fmt, OutputFormat::Json) {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "providers": providers,
+                    "active_alias": active_alias.map(|alias| alias.id.to_string()),
+                    "client_model": active_alias.map(|alias| alias.client_model.clone()),
+                    "context_window": active_alias.map(|alias| alias.context_window),
+                    "restart_required": config.active_alias.is_some(),
+                })
+            );
+        } else if let Some(alias) = active_alias {
+            println!("\n◆ Active Provider Alias");
+            println!("  Alias:               {}", alias.id);
+            println!("  Client model:        {}", alias.client_model);
+            println!(
+                "  Context:             {} tokens",
+                format_number(alias.context_window)
+            );
+            println!("  Candidates:          {}", alias.candidates.len());
+        } else {
+            println!("No active provider alias; use `provider activate <alias>`");
+        }
+        return;
+    }
     let upstream_url = config.retry.upstream_base_url.as_str();
     let mode = if crate::application::prober::is_opencode_upstream(upstream_url) {
         "opencode"
