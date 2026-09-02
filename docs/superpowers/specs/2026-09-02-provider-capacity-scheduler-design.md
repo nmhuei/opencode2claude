@@ -185,9 +185,11 @@ RoutePlanner
 
 ### State ownership
 
-`ProviderRuntimeHandle` owns an immutable compiled snapshot of providers,
-credentials, models, aliases, and credential pools. `AppState` owns one
-`Arc<CapacityScheduler>` alongside the existing transient `RouteState`.
+`ProviderRuntimeHandle` owns an immutable runtime snapshot containing the
+compiled providers, credentials, models, aliases, credential pools, and that
+snapshot's `Arc<CapacityScheduler>`. `AppState` continues to own the runtime
+handle and the existing transient `RouteState`, but does not own a scheduler
+that can be replaced underneath an active request.
 
 `CapacityScheduler` owns a `Mutex<SchedulerState>`. The mutex protects all
 selection cursors, token buckets, cooldown reads used for admission, current
@@ -336,10 +338,11 @@ TOML write or daemon reload. A failed validation changes neither file nor live
 runtime. `POST /api/v1/provider-runtime/reload` constructs a new scheduler
 snapshot only after registry validation succeeds.
 
-Reload does not invalidate active leases. Active leases remain attached to
-their old scheduler state until their response finishes; new requests use the
-new scheduler. The old state is released once its final lease drops. This
-prevents a reload from leaking or double-releasing a capacity reservation.
+Reload builds a complete new runtime snapshot, including a new scheduler,
+before atomically replacing the handle. Active leases retain the old snapshot
+and its scheduler until their response finishes; new requests use the new
+snapshot. The old state is released once its final lease drops. This prevents
+a reload from leaking or double-releasing a capacity reservation.
 
 Configuration mutations expose `restart_required` as today unless the daemon
 reload endpoint is explicitly called.
