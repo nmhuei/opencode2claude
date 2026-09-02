@@ -188,14 +188,15 @@ RoutePlanner
 `ProviderRuntimeHandle` owns an immutable runtime snapshot containing the
 compiled providers, credentials, models, aliases, credential pools, and that
 snapshot's `Arc<CapacityScheduler>`. `AppState` continues to own the runtime
-handle and the existing transient `RouteState`, but does not own a scheduler
-that can be replaced underneath an active request.
+handle, but does not own scheduler or cooldown state that can be replaced
+underneath an active request.
 
-`CapacityScheduler` owns a `Mutex<SchedulerState>`. The mutex protects all
-selection cursors, token buckets, cooldown reads used for admission, current
+`CapacityScheduler` owns a `Mutex<SchedulerState>`, including the existing
+`RouteState` cooldown policy/state. The mutex protects selection cursors,
+token buckets, cooldown reads and writes used for admission, current
 in-flight counts, and outstanding reservation IDs. It is held only while
-refilling budgets and issuing or rejecting a lease; it is never held across
-DNS, HTTP, streaming, or secret I/O.
+refilling budgets and issuing, completing, or rejecting a lease; it is never
+held across DNS, HTTP, streaming, or secret I/O.
 
 The existing global `BRIDGE_RATE_LIMIT` semaphore remains an outer bridge-wide
 guard. It does not replace per-pool admission: a global limit of three is
@@ -268,10 +269,11 @@ debug assertion in tests; an unknown lease ID cannot decrement capacity.
 
 ## Failure, Cooldown, and Feedback Policy
 
-`RouteState` continues to own failure classification and cooldown durations.
-Capacity admission reads that state before reserving. The executor records
-failure before attempting a new candidate, so a concurrent request observes
-the exclusion as soon as its own admission lock is acquired.
+`RouteState` remains the failure-policy type but is stored inside
+`SchedulerState`, so failure recording and a later admission share one atomic
+state transition. The executor records failure before attempting a new
+candidate, so a concurrent request observes the exclusion as soon as its own
+admission lock is acquired.
 
 | Condition | Scheduler action |
 | --- | --- |
