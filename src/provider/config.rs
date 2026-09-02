@@ -19,11 +19,14 @@ pub enum ProviderConfigError {
     Schema(u32),
     #[error("provider {provider} has invalid base URL: {url}")]
     InvalidUrl { provider: String, url: String },
+    #[error("credential {credential} has invalid source; use env:NAME, file:PATH, or managed[:ID]")]
+    InvalidSecretSource { credential: String },
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ProviderFileConfig {
     pub schema_version: Option<u32>,
+    pub active_alias: Option<String>,
     #[serde(default)]
     pub providers: Vec<ProviderEntry>,
     #[serde(default)]
@@ -32,6 +35,80 @@ pub struct ProviderFileConfig {
     pub models: Vec<ModelEntry>,
     #[serde(default)]
     pub aliases: Vec<AliasFileConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct ProviderFileV3 {
+    schema_version: u32,
+    #[serde(default)]
+    router: RouterFileConfig,
+    #[serde(default)]
+    providers: BTreeMap<String, ProviderV3Entry>,
+    #[serde(default)]
+    credentials: BTreeMap<String, CredentialV3Entry>,
+    #[serde(default)]
+    models: BTreeMap<String, BTreeMap<String, ModelV3Entry>>,
+    #[serde(default)]
+    aliases: BTreeMap<String, AliasV3Entry>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct RouterFileConfig {
+    active_alias: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ProviderV3Entry {
+    #[serde(default)]
+    name: String,
+    kind: ProviderKind,
+    base_url: String,
+    #[serde(default = "default_protocol")]
+    protocol: ProviderProtocol,
+    #[serde(default)]
+    headers: BTreeMap<String, String>,
+    #[serde(default = "default_true")]
+    enabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CredentialV3Entry {
+    provider: String,
+    source: String,
+    #[serde(default)]
+    auth_scheme: AuthScheme,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct ModelV3Entry {
+    wire_model: Option<String>,
+    context_window: Option<usize>,
+    max_output_tokens: Option<usize>,
+    #[serde(default)]
+    supports_thinking: bool,
+    #[serde(default)]
+    verified_context: bool,
+    #[serde(default)]
+    free: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct AliasV3Entry {
+    client_model: String,
+    context_window: usize,
+    #[serde(default)]
+    strict_context: bool,
+    #[serde(default)]
+    candidates: Vec<CandidateV3Entry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CandidateV3Entry {
+    provider: String,
+    model: String,
+    credential: Option<String>,
+    #[serde(default)]
+    priority: i32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -104,24 +181,7 @@ impl ProviderFileConfig {
     pub fn into_registry(self) -> Result<ProviderRegistry, ProviderConfigError> {
         let mut registry = ProviderRegistry::new();
         for entry in self.providers {
-            let parsed = reqwest::Url::parse(&entry.base_url).map_err(|_| {
-                ProviderConfigError::InvalidUrl {
-                    provider: entry.id.clone(),
-                    url: entry.base_url.clone(),
-                }
-            })?;
-            if !matches!(parsed.scheme(), "http" | "https")
-                || parsed.host_str().is_none()
-                || !parsed.username().is_empty()
-                || parsed.password().is_some()
-                || parsed.query().is_some()
-                || parsed.fragment().is_some()
-            {
-                return Err(ProviderConfigError::InvalidUrl {
-                    provider: entry.id.clone(),
-                    url: entry.base_url,
-                });
-            }
+            validate_provider_url(&entry.id, &entry.base_url)?;
             registry.register_provider(Provider {
                 id: entry.id.clone().into(),
                 name: if entry.name.is_empty() {
@@ -184,19 +244,131 @@ impl ProviderFileConfig {
             })?;
         }
         registry.compile_snapshot()?;
+        registry.set_active_alias(self.active_alias.map(AliasId::from));
         Ok(registry)
+    }
+}
+
+impl ProviderFileV3 {
+    fn into_registry(self) -> Result<ProviderRegistry, ProviderConfigError> {
+        if self.schema_version != 3 {
+            return Err(ProviderConfigError::Schema(self.schema_version));
+        }
+        let mut registry = ProviderRegistry::new();
+        for (id, entry) in self.providers {
+            validate_provider_url(&id, &entry.base_url)?;
+            registry.register_provider(Provider {
+                id: id.clone().into(),
+                name: if entry.name.is_empty() { id } else { entry.name },
+                kind: entry.kind,
+                base_url: entry.base_url,
+                protocol: entry.protocol,
+                headers: entry.headers,
+                enabled: entry.enabled,
+            })?;
+        }
+        for (id, entry) in self.credentials {
+            let source = parse_v3_secret_source(&id, &entry.source)?;
+            registry.register_credential(Credential {
+                id: id.into(),
+                provider_id: entry.provider.into(),
+                source,
+                auth_scheme: entry.auth_scheme,
+            })?;
+        }
+        for (provider_id, models) in self.models {
+            for (model_id, entry) in models {
+                let wire_model_id = entry.wire_model.unwrap_or_else(|| model_id.clone());
+                registry.insert_model(ModelInfo {
+                    provider_id: provider_id.clone().into(),
+                    model_id,
+                    wire_model_id,
+                    context_window: entry.context_window,
+                    max_output_tokens: entry.max_output_tokens,
+                    supports_thinking: entry.supports_thinking,
+                    verified_context: entry.verified_context,
+                    free: entry.free,
+                });
+            }
+        }
+        for (id, entry) in self.aliases {
+            registry.register_alias(ModelAlias {
+                id: id.into(),
+                client_model: entry.client_model,
+                context_window: entry.context_window,
+                strict_context: entry.strict_context,
+                candidates: entry
+                    .candidates
+                    .into_iter()
+                    .map(|candidate| ModelCandidate {
+                        provider_id: candidate.provider.into(),
+                        model_id: candidate.model,
+                        credential_id: candidate.credential.map(Into::into),
+                        priority: candidate.priority,
+                    })
+                    .collect(),
+            })?;
+        }
+        registry.set_active_alias(self.router.active_alias.map(AliasId::from));
+        registry.compile_snapshot()?;
+        Ok(registry)
+    }
+}
+
+fn validate_provider_url(provider: &str, value: &str) -> Result<(), ProviderConfigError> {
+    let parsed = reqwest::Url::parse(value).map_err(|_| ProviderConfigError::InvalidUrl {
+        provider: provider.to_string(),
+        url: value.to_string(),
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(ProviderConfigError::InvalidUrl {
+            provider: provider.to_string(),
+            url: value.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn parse_v3_secret_source(id: &str, source: &str) -> Result<SecretSource, ProviderConfigError> {
+    let source = source.trim();
+    let (kind, value) = source.split_once(':').unwrap_or((source, ""));
+    match kind {
+        "env" if !value.trim().is_empty() => Ok(SecretSource::Env {
+            variable: value.trim().to_string(),
+        }),
+        "file" if !value.trim().is_empty() => Ok(SecretSource::File {
+            path: value.trim().to_string(),
+        }),
+        "managed" if value.trim().is_empty() => Ok(SecretSource::Managed {
+            id: id.to_string(),
+        }),
+        "managed" if !value.trim().is_empty() => Ok(SecretSource::Managed {
+            id: value.trim().to_string(),
+        }),
+        _ => Err(ProviderConfigError::InvalidSecretSource {
+            credential: id.to_string(),
+        }),
     }
 }
 
 pub fn load_provider_registry(config_path: &Path) -> Result<ProviderRegistry, ProviderConfigError> {
     let raw = std::fs::read_to_string(config_path)?;
-    let config: ProviderFileConfig = toml::from_str(&raw)?;
-    if let Some(version) = config.schema_version {
-        if version != 2 {
-            return Err(ProviderConfigError::Schema(version));
-        }
+    let version = raw
+        .parse::<toml::Value>()?
+        .get("schema_version")
+        .and_then(toml::Value::as_integer)
+        .unwrap_or(0);
+    match version {
+        3 => Ok(toml::from_str::<ProviderFileV3>(&raw)?.into_registry()?),
+        0 | 2 => toml::from_str::<ProviderFileConfig>(&raw)?.into_registry(),
+        value => Err(ProviderConfigError::Schema(value as u32)),
     }
-    config.into_registry()
 }
 
 pub fn schema_v2_example() -> &'static str {

@@ -146,7 +146,17 @@ pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
         .or_else(|| env_string("OPENCODE_MODEL"))
         .or_else(|| file.as_ref().and_then(|cfg| cfg.model.clone()));
     resolved.active_alias = env_string("OPENCODE_ALIAS")
-        .or_else(|| file.as_ref().and_then(|cfg| cfg.active_alias.clone()));
+        .or_else(|| file.as_ref().and_then(|cfg| cfg.active_alias.clone()))
+        .or_else(|| {
+            provider_registry
+                .as_deref()
+                .and_then(|registry| registry.active_alias().map(ToString::to_string))
+        })
+        .or_else(|| {
+            file.as_ref()
+                .and_then(|cfg| cfg.router.as_ref())
+                .and_then(|router| router.active_alias.clone())
+        });
     resolved.provider_registry = provider_registry;
 
     resolved.shell_policy = resolve_shell_policy(

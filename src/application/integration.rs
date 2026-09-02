@@ -46,6 +46,8 @@ pub fn process_environment(config: &BridgeConfig) -> Vec<(String, Option<String>
         .unwrap_or(OX_ALPHA_MODEL)
         .to_string();
     let profile = client_profile(config, &effective_model);
+    let claude_vars = configured_alias_vars(config)
+        .unwrap_or_else(|| model_claude_code_vars(&profile));
 
     let mut vars = vec![
         ("ANTHROPIC_API_KEY".to_string(), Some(key.clone())),
@@ -60,7 +62,7 @@ pub fn process_environment(config: &BridgeConfig) -> Vec<(String, Option<String>
         ("OPENCODE_MODEL".to_string(), Some(effective_model.clone())),
     ];
 
-    for (k, v) in model_claude_code_vars(&profile) {
+    for (k, v) in claude_vars {
         vars.push((k.to_string(), Some(v)));
     }
 
@@ -93,6 +95,34 @@ pub fn environment(config: &BridgeConfig) -> IntegrationEnvironment {
         model: Some(profile.client_model_alias().to_string()),
         shell_exports,
     }
+}
+
+fn configured_alias_vars(
+    config: &BridgeConfig,
+) -> Option<Vec<(&'static str, String)>> {
+    let registry = config.provider_registry.as_deref()?;
+    let alias_id = config.active_alias.as_deref()?;
+    let alias = registry.alias(alias_id)?;
+    let (max_output_tokens, supports_thinking) = alias
+        .candidates
+        .iter()
+        .filter_map(|candidate| {
+            registry
+                .model(&candidate.provider_id, &candidate.model_id)
+        })
+        .next()
+        .map(|model| {
+            (
+                model.max_output_tokens.unwrap_or(128_000),
+                model.supports_thinking,
+            )
+        })
+        .unwrap_or((128_000, false));
+    Some(model_claude_code_vars_for_context(
+        alias.context_window,
+        max_output_tokens,
+        supports_thinking,
+    ))
 }
 
 /// Resolve the client contract independently from the upstream wire model.
@@ -139,20 +169,32 @@ pub fn client_model_alias(config: &BridgeConfig) -> String {
 pub fn model_claude_code_vars(
     profile: &crate::application::models::ModelProfile,
 ) -> Vec<(&'static str, String)> {
-    let auto_compact = profile.auto_compact_window().to_string();
-    let max_output = profile.max_output_tokens.to_string();
-    let disable_1m = if profile.context_window >= 1_000_000 {
+    model_claude_code_vars_for_context(
+        profile.context_window,
+        profile.max_output_tokens,
+        profile.supports_thinking,
+    )
+}
+
+pub fn model_claude_code_vars_for_context(
+    context_window: usize,
+    max_output_tokens: usize,
+    supports_thinking: bool,
+) -> Vec<(&'static str, String)> {
+    let auto_compact = ((context_window / 100) * 80 + ((context_window % 100) * 80) / 100)
+        .to_string();
+    let max_output = max_output_tokens.to_string();
+    let disable_1m = if context_window >= 1_000_000 {
         "0"
     } else {
         "1"
     };
-    let (disable_thinking, disable_adaptive, effort) = if profile.supports_thinking {
+    let (disable_thinking, disable_adaptive, effort) = if supports_thinking {
         ("0", "0", "1")
     } else {
         ("1", "1", "0")
     };
-    let max_thinking = profile
-        .max_output_tokens
+    let max_thinking = max_output_tokens
         .saturating_sub(1024)
         .min(120_000)
         .to_string();
@@ -161,7 +203,7 @@ pub fn model_claude_code_vars(
         ("CLAUDE_CODE_DISABLE_1M_CONTEXT", disable_1m.to_string()),
         (
             "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
-            profile.context_window.to_string(),
+            context_window.to_string(),
         ),
         ("CLAUDE_CODE_MAX_OUTPUT_TOKENS", max_output),
         ("CLAUDE_CODE_AUTO_COMPACT_WINDOW", auto_compact),

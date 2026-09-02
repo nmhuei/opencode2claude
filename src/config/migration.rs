@@ -53,7 +53,7 @@ pub fn migrate_value(mut value: toml::Value) -> Result<(toml::Value, MigrationRe
         return Err("schema_version must be non-negative".to_string());
     }
     let from_version = from_version as u32;
-    if from_version > CURRENT_SCHEMA_VERSION && from_version != 2 {
+    if from_version > CURRENT_SCHEMA_VERSION && !matches!(from_version, 2 | 3) {
         return Err(format!(
             "Configuration schema version {from_version} is newer than supported version {CURRENT_SCHEMA_VERSION}"
         ));
@@ -66,12 +66,12 @@ pub fn migrate_value(mut value: toml::Value) -> Result<(toml::Value, MigrationRe
     // Provider management owns schema v2 sections. The legacy loader still
     // reports v1 as its current schema, but must preserve a validated v2
     // document so `active_alias` and provider tables reach the resolver.
-    if from_version == 2 {
+    if matches!(from_version, 2 | 3) {
         return Ok((
             value,
             MigrationReport {
                 from_version,
-                to_version: 2,
+                to_version: from_version,
                 renamed_keys: Vec::new(),
                 changed: false,
             },
@@ -178,5 +178,18 @@ mod tests {
         assert_eq!(report.to_version, 2);
         assert!(document.contains("active_alias"));
         assert!(document.contains("[[providers]]"));
+    }
+
+    #[test]
+    fn provider_schema_v3_is_preserved_for_provider_loader() {
+        let (document, report) = migrate_document(
+            "schema_version = 3\n[router]\nactive_alias = \"free-1m\"\n[providers.bai]\nbase_url = \"https://api.b.ai/v1\"\n",
+        )
+        .unwrap();
+        assert_eq!(report.from_version, 3);
+        assert_eq!(report.to_version, 3);
+        assert!(document.contains("schema_version = 3"));
+        assert!(document.contains("[router]"));
+        assert!(document.contains("[providers.bai]"));
     }
 }

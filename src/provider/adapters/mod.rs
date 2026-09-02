@@ -10,6 +10,8 @@ use super::types::{
     AttemptTarget, NormalizedResponse, Provider, ProviderHttpRequest, ProviderKind, ProviderRequest,
 };
 use crate::config::SecretString;
+use reqwest::header::HeaderMap;
+use reqwest::StatusCode;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -22,6 +24,18 @@ pub enum AdapterError {
     Request(String),
     #[error("credential is required for provider {0}")]
     MissingCredential(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureClass {
+    CredentialRejected,
+    RateLimit,
+    ModelUnavailable,
+    ProviderServer,
+    PaymentRequired,
+    ClientRequest,
+    Transport,
+    Unknown,
 }
 
 pub trait ProviderAdapter: Send + Sync {
@@ -43,6 +57,15 @@ pub trait ProviderAdapter: Send + Sync {
             model_id: target.wire_model_id.clone(),
             body,
         }
+    }
+
+    fn classify_failure(
+        &self,
+        status: Option<StatusCode>,
+        headers: &HeaderMap,
+        body: &str,
+    ) -> FailureClass {
+        classify_failure(status, headers, body)
     }
 }
 
@@ -81,6 +104,41 @@ fn bearer(
         super::types::AuthScheme::None => {}
     }
     Ok(())
+}
+
+fn classify_failure(
+    status: Option<StatusCode>,
+    headers: &HeaderMap,
+    body: &str,
+) -> FailureClass {
+    let lower = body.to_ascii_lowercase();
+    let rate_limit_body = [
+        "rate limit",
+        "rate_limit",
+        "quota exceeded",
+        "quota_exceeded",
+        "too many requests",
+        "throttl",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+    if status == Some(StatusCode::TOO_MANY_REQUESTS)
+        || headers.contains_key("retry-after")
+        || rate_limit_body
+    {
+        return FailureClass::RateLimit;
+    }
+    match status {
+        Some(StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) => {
+            FailureClass::CredentialRejected
+        }
+        Some(StatusCode::NOT_FOUND) => FailureClass::ModelUnavailable,
+        Some(StatusCode::PAYMENT_REQUIRED) => FailureClass::PaymentRequired,
+        Some(value) if value.is_server_error() => FailureClass::ProviderServer,
+        Some(value) if value.is_client_error() => FailureClass::ClientRequest,
+        Some(_) => FailureClass::Unknown,
+        None => FailureClass::Transport,
+    }
 }
 
 fn openai_request(

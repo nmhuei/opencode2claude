@@ -32,6 +32,7 @@ impl StringList {
 #[derive(Debug, Deserialize, Default)]
 pub struct TomlConfig {
     pub schema_version: Option<u32>,
+    pub router: Option<RouterConfig>,
     pub port: Option<u16>,
     pub host: Option<String>,
     pub opencode_port: Option<u16>,
@@ -131,6 +132,11 @@ pub struct TomlConfig {
     pub history_max_record_bytes: Option<usize>,
     pub history_queue_capacity: Option<usize>,
     pub history_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct RouterConfig {
+    pub active_alias: Option<String>,
 }
 
 impl TomlConfig {

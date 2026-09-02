@@ -14,11 +14,7 @@ impl ProviderAdapter for KiloAdapter {
             request,
             credential,
             "/chat/completions",
-            if credential.is_some() {
-                super::super::types::AuthScheme::Bearer
-            } else {
-                super::super::types::AuthScheme::None
-            },
+            target.auth_scheme,
         )
     }
 }

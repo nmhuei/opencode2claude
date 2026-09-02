@@ -9,7 +9,7 @@ pub mod migration;
 mod security;
 mod types;
 
-pub use file::{StringList, TomlConfig};
+pub use file::{RouterConfig, StringList, TomlConfig};
 pub use types::{
     BridgeConfig, CliOverrides, EgressConfig, EgressMode, HistoryCaptureMode, HistoryConfig,
     ManagementConfig, ObservabilityConfig, ProtocolConfig, RetryConfig, RuntimeConfig,

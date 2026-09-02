@@ -194,6 +194,15 @@ pub struct ModelAlias {
 }
 
 impl ModelAlias {
+    /// The compaction boundary is a product invariant shared by every route.
+    /// Keeping it derived prevents a fallback candidate from changing the
+    /// client-visible context policy.
+    pub fn auto_compact_window(&self) -> usize {
+        let whole = self.context_window / 100 * 80;
+        let remainder = self.context_window % 100 * 80 / 100;
+        whole + remainder
+    }
+
     pub fn one_million(id: impl Into<AliasId>, candidates: Vec<ModelCandidate>) -> Self {
         Self {
             id: id.into(),

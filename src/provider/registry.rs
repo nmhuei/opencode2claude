@@ -24,12 +24,18 @@ pub enum RegistryError {
     EmptyAlias { alias: String },
     #[error("strict alias {alias} candidate {model} has unknown context metadata")]
     UnknownContext { alias: String, model: String },
+    #[error("strict alias {alias} candidate {model} has unknown context metadata")]
+    UnverifiedContext { alias: String, model: String },
     #[error("strict alias {alias} candidate {model} has only {context} context tokens")]
     InsufficientContext {
         alias: String,
         model: String,
         context: usize,
     },
+    #[error("provider {0} is referenced by another provider record")]
+    ReferencedProvider(String),
+    #[error("credential {0} is referenced by an alias")]
+    ReferencedCredential(String),
 }
 
 #[derive(Debug, Clone)]
@@ -38,6 +44,7 @@ pub struct ProviderRegistry {
     credentials: BTreeMap<CredentialId, Credential>,
     models: BTreeMap<(ProviderId, String), ModelInfo>,
     aliases: BTreeMap<AliasId, ModelAlias>,
+    active_alias: Option<AliasId>,
 }
 
 #[derive(Debug, Clone)]
@@ -46,6 +53,7 @@ pub struct ProviderSnapshot {
     pub credentials: Arc<BTreeMap<CredentialId, Credential>>,
     pub models: Arc<BTreeMap<(ProviderId, String), ModelInfo>>,
     pub aliases: Arc<BTreeMap<AliasId, ModelAlias>>,
+    pub active_alias: Option<AliasId>,
 }
 
 /// Atomic runtime boundary. A request takes one immutable snapshot; replacing
@@ -84,6 +92,7 @@ impl ProviderRegistry {
             credentials: BTreeMap::new(),
             models: BTreeMap::new(),
             aliases: BTreeMap::new(),
+            active_alias: None,
         }
     }
     pub fn providers(&self) -> impl Iterator<Item = &Provider> {
@@ -94,6 +103,93 @@ impl ProviderRegistry {
     }
     pub fn aliases(&self) -> impl Iterator<Item = &ModelAlias> {
         self.aliases.values()
+    }
+    pub fn active_alias(&self) -> Option<&AliasId> {
+        self.active_alias.as_ref()
+    }
+    pub fn set_active_alias(&mut self, alias: Option<AliasId>) {
+        self.active_alias = alias;
+    }
+    pub fn set_enabled(&mut self, id: impl AsRef<str>, enabled: bool) -> Result<(), RegistryError> {
+        let provider = self
+            .providers
+            .get_mut(&ProviderId::from(id.as_ref()))
+            .ok_or_else(|| RegistryError::UnknownProvider(id.as_ref().to_string()))?;
+        provider.enabled = enabled;
+        Ok(())
+    }
+    pub fn upsert_credential(&mut self, credential: Credential) -> Result<(), RegistryError> {
+        if !self.providers.contains_key(&credential.provider_id) {
+            return Err(RegistryError::UnknownProvider(
+                credential.provider_id.to_string(),
+            ));
+        }
+        self.credentials.insert(credential.id.clone(), credential);
+        Ok(())
+    }
+    pub fn remove_credential(&mut self, id: impl AsRef<str>) -> Result<(), RegistryError> {
+        let id = CredentialId::from(id.as_ref());
+        if self
+            .aliases
+            .values()
+            .any(|alias| alias.candidates.iter().any(|candidate| candidate.credential_id.as_ref() == Some(&id)))
+        {
+            return Err(RegistryError::ReferencedCredential(id.to_string()));
+        }
+        self.credentials
+            .remove(&id)
+            .map(|_| ())
+            .ok_or_else(|| RegistryError::UnknownCredential(id.to_string()))
+    }
+    pub fn remove_model(
+        &mut self,
+        provider: impl AsRef<str>,
+        model: impl AsRef<str>,
+    ) -> Result<(), RegistryError> {
+        let provider_id = ProviderId::from(provider.as_ref());
+        let model_id = model.as_ref().to_string();
+        if self.aliases.values().any(|alias| {
+            alias.candidates.iter().any(|candidate| {
+                candidate.provider_id == provider_id && candidate.model_id == model_id
+            })
+        }) {
+            return Err(RegistryError::ReferencedProvider(format!(
+                "{}:{}",
+                provider_id, model_id
+            )));
+        }
+        self.models
+            .remove(&(provider_id.clone(), model_id.clone()))
+            .map(|_| ())
+            .ok_or_else(|| RegistryError::UnknownModel {
+                provider: provider_id.to_string(),
+                model: model_id,
+            })
+    }
+    pub fn remove_alias(&mut self, id: impl AsRef<str>) -> Result<(), RegistryError> {
+        let id = AliasId::from(id.as_ref());
+        self.aliases
+            .remove(&id)
+            .map(|_| ())
+            .ok_or_else(|| RegistryError::UnknownModel {
+                provider: "alias".to_string(),
+                model: id.to_string(),
+            })
+    }
+    pub fn remove_provider(&mut self, id: impl AsRef<str>) -> Result<(), RegistryError> {
+        let id = ProviderId::from(id.as_ref());
+        if self.credentials.values().any(|credential| credential.provider_id == id)
+            || self.models.keys().any(|(provider, _)| provider == &id)
+            || self.aliases.values().any(|alias| {
+                alias.candidates.iter().any(|candidate| candidate.provider_id == id)
+            })
+        {
+            return Err(RegistryError::ReferencedProvider(id.to_string()));
+        }
+        self.providers
+            .remove(&id)
+            .map(|_| ())
+            .ok_or_else(|| RegistryError::UnknownProvider(id.to_string()))
     }
     pub fn models(&self) -> impl Iterator<Item = &ModelInfo> {
         self.models.values()
@@ -150,6 +246,14 @@ impl ProviderRegistry {
         self.aliases.insert(alias.id.clone(), alias);
         Ok(())
     }
+    pub fn upsert_alias(&mut self, alias: ModelAlias) -> Result<(), RegistryError> {
+        self.aliases.remove(&alias.id);
+        if let Err(error) = self.validate_alias(&alias) {
+            return Err(error);
+        }
+        self.aliases.insert(alias.id.clone(), alias);
+        Ok(())
+    }
     pub fn compile_snapshot(&self) -> Result<ProviderSnapshot, RegistryError> {
         for alias in self.aliases.values() {
             self.validate_alias(alias)?;
@@ -159,6 +263,7 @@ impl ProviderRegistry {
             credentials: Arc::new(self.credentials.clone()),
             models: Arc::new(self.models.clone()),
             aliases: Arc::new(self.aliases.clone()),
+            active_alias: self.active_alias.clone(),
         })
     }
     pub fn resolve_alias(&self, id: impl AsRef<str>) -> Result<Vec<AttemptTarget>, RegistryError> {
@@ -289,6 +394,12 @@ impl ProviderRegistry {
             if alias.strict_context {
                 match info.context_window {
                     Some(value) if value >= alias.context_window && info.verified_context => {}
+                    Some(_) if !info.verified_context => {
+                        return Err(RegistryError::UnverifiedContext {
+                            alias: alias.id.to_string(),
+                            model: candidate.model_id.clone(),
+                        })
+                    }
                     Some(value) => {
                         return Err(RegistryError::InsufficientContext {
                             alias: alias.id.to_string(),
