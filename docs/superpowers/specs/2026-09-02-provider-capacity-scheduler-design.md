@@ -321,11 +321,12 @@ quota_scopes: active, cooling, rpm_limited, tpm_limited
 admission: admitted, rejected, fallback_due_to_capacity, queue_depth=0
 ```
 
-`route explain <alias>` gains a capacity section showing the configured pool,
-strategy, eligible member count, active reservation count, and limiting reason
-without revealing credential material. `route simulate` gains a deterministic
-`--concurrent N` mode and may simulate a 429 from one pool member. `health`
-shows capacity state rather than probing or mutating a cooldown.
+`route explain <alias>` gains a configuration-level capacity section showing
+the configured pool, strategy, member count, and limits without claiming to
+be live daemon state. `route simulate` constructs an isolated deterministic
+scheduler and gains a `--concurrent N` mode that may simulate a 429 from one
+pool member. `health` and `GET /api/v1/provider-runtime` show live capacity
+state without probing or mutating a cooldown.
 
 Structured logs contain `provider`, `model`, `pool`, redacted `credential`,
 `quota_scope`, `admission_reason`, `in_flight`, and `retry_after_ms`. They do
