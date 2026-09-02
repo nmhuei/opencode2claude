@@ -4,7 +4,7 @@ use crate::config::BridgeConfig;
 use serde::Serialize;
 
 pub const OX_ALPHA_MODEL: &str = "opencode/x-preview-f-free";
-pub const OX_ALPHA_CLAUDE_MODEL: &str = "claude-opus-5";
+pub const OX_ALPHA_CLAUDE_MODEL: &str = "claude-sonnet-5[1m]";
 pub const OX_ALPHA_MAX_OUTPUT_TOKENS: &str = "128000";
 pub const OX_ALPHA_AUTO_COMPACT_WINDOW: &str = "450000";
 pub const OX_ALPHA_MAX_THINKING_TOKENS: &str = "120000";
@@ -50,12 +50,12 @@ pub fn process_environment(config: &BridgeConfig) -> Vec<(String, Option<String>
     let mut vars = vec![
         ("ANTHROPIC_API_KEY".to_string(), Some(key.clone())),
         ("ANTHROPIC_BASE_URL".to_string(), Some(base.clone())),
-        ("OPENAI_API_KEY".to_string(), Some(key)),
+        ("OPENAI_API_KEY".to_string(), Some(key.clone())),
         ("OPENAI_BASE_URL".to_string(), Some(format!("{base}/v1"))),
-        ("ANTHROPIC_AUTH_TOKEN".to_string(), None),
+        ("ANTHROPIC_AUTH_TOKEN".to_string(), Some(key)),
         (
             "ANTHROPIC_MODEL".to_string(),
-            Some(profile.anthropic_alias.to_string()),
+            Some(profile.client_model_alias().to_string()),
         ),
         ("OPENCODE_MODEL".to_string(), Some(effective_model.clone())),
     ];
@@ -90,7 +90,7 @@ pub fn environment(config: &BridgeConfig) -> IntegrationEnvironment {
         anthropic_base_url: base.clone(),
         openai_base_url: format!("{base}/v1"),
         api_key: key,
-        model: Some(profile.anthropic_alias.to_string()),
+        model: Some(profile.client_model_alias().to_string()),
         shell_exports,
     }
 }
@@ -136,7 +136,7 @@ pub fn model_claude_code_vars(
 
 pub fn ox_alpha_claude_code_exports() -> Vec<String> {
     let profile = crate::application::models::resolve_model_profile(OX_ALPHA_MODEL);
-    std::iter::once(("ANTHROPIC_MODEL", profile.anthropic_alias.to_string()))
+    std::iter::once(("ANTHROPIC_MODEL", profile.client_model_alias().to_string()))
         .chain(model_claude_code_vars(&profile))
         .map(|(key, value)| format!("export {key}={}", shell_quote(&value)))
         .collect()
@@ -255,6 +255,6 @@ mod tests {
             .any(|line| line == "export CLAUDE_CODE_MAX_OUTPUT_TOKENS='131072'"));
         assert!(glm_exports
             .iter()
-            .any(|line| line == "export ANTHROPIC_MODEL='claude-opus-5'"));
+            .any(|line| line == "export ANTHROPIC_MODEL='claude-sonnet-5[1m]'"));
     }
 }

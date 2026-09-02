@@ -156,7 +156,7 @@ fn launch_claude_code(continue_session: bool, resume: Option<&str>) {
             .as_deref()
             .unwrap_or(crate::application::integration::OX_ALPHA_MODEL),
     );
-    let target_alias = profile.anthropic_alias;
+    let target_alias = profile.client_model_alias();
 
     match crate::infrastructure::process::run_foreground(
         "claude",

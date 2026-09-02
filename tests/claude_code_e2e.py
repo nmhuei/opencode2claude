@@ -20,6 +20,7 @@ Exit: 0 = all cases passed, 1 = failure (evidence under artifacts/claude-code-e2
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import shutil
@@ -51,6 +52,7 @@ ENV_STRIP_EXACT = {
     "BRIDGE_WARM_STANDBY_PROXIES", "BRIDGE_PROXIES", "RUNTIME_DIR",
     "OPENCODE_PORT", "OPENCODE_MODEL", "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
     "CLAUDE_CODE_MAX_OUTPUT_TOKENS", "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+    "CLAUDE_CODE_DISABLE_1M_CONTEXT", "MAX_THINKING_TOKENS",
 }
 ENV_STRIP_SUBSTR = ("UPSTREAM", "PROXY", "proxy")
 
@@ -209,34 +211,42 @@ def wait_health(port: int, timeout: float = 20.0) -> None:
     raise SystemExit(f"bridge /health never became ready on port {port}")
 
 
-def write_claude_settings(profile: Path, bridge_port: int) -> Path:
+def write_claude_settings(profile: Path, bridge_port: int, *, model: str = MODEL_PROFILE,
+                           auth_token: str | None = None, context_tokens: str = "200000",
+                           max_output_tokens: str = "128000",
+                           auto_compact_window: str = "200000") -> Path:
     profile.mkdir(parents=True, exist_ok=True)
     env_block = {
         "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{bridge_port}",
-        "ANTHROPIC_API_KEY": CLIENT_TOKEN,
-        "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "200000",
-        "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "128000",
-        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "200000",
-        "CLAUDE_CODE_DISABLE_1M_CONTEXT": "1",
+        "ANTHROPIC_API_KEY": CLIENT_TOKEN if auth_token is None else "",
+        "CLAUDE_CODE_MAX_CONTEXT_TOKENS": context_tokens,
+        "CLAUDE_CODE_MAX_OUTPUT_TOKENS": max_output_tokens,
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": auto_compact_window,
+        "CLAUDE_CODE_DISABLE_1M_CONTEXT": "0" if context_tokens == "1000000" else "1",
         "MAX_THINKING_TOKENS": "8000",
     }
-    settings = {"model": MODEL_PROFILE, "alwaysThinkingEnabled": False, "env": env_block}
+    if auth_token is not None:
+        env_block["ANTHROPIC_AUTH_TOKEN"] = auth_token
+    settings = {"model": model, "alwaysThinkingEnabled": False, "env": env_block}
     path = profile / "settings.json"
     path.write_text(json.dumps(settings, indent=2) + "\n")
     return path
 
 
 def run_claude(case: str, profile: Path, prompt: str, *, max_turns: int,
-               tools: list[str], work_dir: Path | None) -> tuple[subprocess.CompletedProcess[str], int]:
+               tools: list[str], work_dir: Path | None, model: str = MODEL_PROFILE,
+               bare: bool = False) -> tuple[subprocess.CompletedProcess[str], int]:
     cmd = [
         shutil.which("claude") or "claude",
         "-p", prompt,
-        "--model", MODEL_PROFILE,
+        "--model", model,
         "--settings", str(profile / "settings.json"),
         "--setting-sources", "user",
         "--max-turns", str(max_turns),
         "--output-format", "json",
     ]
+    if bare:
+        cmd.append("--bare")
     if tools:
         cmd += ["--tools", *tools, "--allowedTools", *tools,
                 "--permission-mode", "bypassPermissions"]
@@ -278,16 +288,35 @@ def parse_single_json(stdout: str) -> dict[str, Any]:
     return {}
 
 
+def summary_version(claude_bin: str) -> str:
+    version = subprocess.run(
+        [claude_bin, "--version"], capture_output=True, text=True, check=False
+    )
+    return (version.stdout or version.stderr).strip() or "unknown version"
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--provider-alias",
+        choices=("free-1m",),
+        help="run the Claude Code 1M provider alias contract case",
+    )
+    return parser.parse_args()
+
+
 def main() -> int:
+    args = parse_args()
     if OUT.exists():
         shutil.rmtree(OUT)
     OUT.mkdir(parents=True)
     (OUT / "raw").mkdir()
 
-    serve_bin = resolve_serve_bin()
     claude_bin = shutil.which("claude")
     if not claude_bin:
-        raise SystemExit("claude CLI not found on PATH")
+        print("UNAVAILABLE: Claude Code CLI not found on PATH", file=sys.stderr)
+        return 2
+    serve_bin = resolve_serve_bin()
 
     stub_port = free_port()
     bridge_port = free_port()
@@ -359,6 +388,61 @@ upstream_api_keys = ["{KEY_ONE}", "{KEY_TWO}"]
             except subprocess.TimeoutExpired as error:
                 results.append({"case": case, "passed": False, "error": f"timeout: {error}"})
                 print(f"  ✗ {case}: TIMEOUT")
+
+        if args.provider_alias == "free-1m":
+            alias = "claude-sonnet-5[1m]"
+            profile = tmp / "profiles" / "provider_alias_free_1m"
+            write_claude_settings(
+                profile,
+                bridge_port,
+                model=alias,
+                auth_token=CLIENT_TOKEN,
+                context_tokens="1000000",
+                max_output_tokens="128000",
+                auto_compact_window="800000",
+            )
+            try:
+                proc, elapsed = run_claude(
+                    "provider_alias_free_1m",
+                    profile,
+                    "/context",
+                    max_turns=1,
+                    tools=[],
+                    work_dir=work_dir,
+                    model=alias,
+                    bare=True,
+                )
+                displayed = f"{proc.stdout}\n{proc.stderr}"
+                passed = (
+                    proc.returncode == 0
+                    and "[1m]" in displayed
+                    and ("1m" in displayed or "1000000" in displayed)
+                )
+                results.append({
+                    "case": "provider_alias_free_1m",
+                    "passed": passed,
+                    "exit_code": proc.returncode,
+                    "model": alias,
+                    "displayed_output": displayed[-2000:],
+                    "elapsed_ms": elapsed,
+                })
+                print(
+                    f"  {'✓' if passed else '✗'} provider_alias_free_1m: "
+                    f"exit={proc.returncode} model={alias} elapsed={elapsed}ms"
+                )
+                if not passed:
+                    print(
+                        f"    compatibility failure: Claude Code {summary_version(claude_bin)} "
+                        f"did not display model identity {alias!r} and a 1M denominator"
+                    )
+            except subprocess.TimeoutExpired as error:
+                results.append({
+                    "case": "provider_alias_free_1m",
+                    "passed": False,
+                    "error": f"timeout: {error}",
+                    "model": alias,
+                })
+                print(f"  ✗ provider_alias_free_1m: TIMEOUT model={alias}")
 
         # Rotation evidence: every 429 (key-one) must be immediately followed
         # by a successful key-two attempt, and key-one must never see a 200.
