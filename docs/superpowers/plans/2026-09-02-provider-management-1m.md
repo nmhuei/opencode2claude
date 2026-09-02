@@ -16,7 +16,7 @@
 - Keep upstream provider credentials separate from client API keys in `src/api_key`.
 - Never persist raw upstream API keys in the main TOML configuration.
 - The strict 1M alias accepts only candidates with `context_window >= 1_000_000`.
-- The 1M alias must expose `CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000`, `CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000`, and `CLAUDE_CODE_DISABLE_1M_CONTEXT=0`.
+- The 1M alias must expose `CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000`, `CLAUDE_CODE_AUTO_COMPACT_WINDOW=800000`, and `CLAUDE_CODE_DISABLE_1M_CONTEXT=0`.
 - Streaming retries are allowed only before the first content event.
 - Existing legacy provider commands remain functional until the migration is complete.
 - Every task ends with targeted tests and a focused commit when this plan is executed.
@@ -82,7 +82,7 @@ fn one_million_profile_uses_a_known_1m_client_identity() {
         *key == "CLAUDE_CODE_MAX_CONTEXT_TOKENS" && value == "1000000"
     }));
     assert!(vars.iter().any(|(key, value)| {
-        *key == "CLAUDE_CODE_AUTO_COMPACT_WINDOW" && value == "1000000"
+        *key == "CLAUDE_CODE_AUTO_COMPACT_WINDOW" && value == "800000"
     }));
 }
 ```

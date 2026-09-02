@@ -102,9 +102,9 @@ The legacy list, model, and upstream namespaces remain accepted for scripts but 
 
 | Model | Context | Auto-compact | Max output | Default output | Price |
 |---|---:|---:|---:|---:|---|
-| deepseek-v4-flash | 1,000,000 | 1,000,000 | 384,000 | provider-defined | Free (0 Credits) |
-| deepseek-v4-flash-vision-exp | 1,000,000 | 1,000,000 | 384,000 | provider-defined | Free (0 Credits) |
-| glm-5.3-flash | 1,000,000 | 1,000,000 | 131,072 | 65,536 | Free (0 Credits) |
+| deepseek-v4-flash | 1,000,000 | 800,000 | 384,000 | provider-defined | Free (0 Credits) |
+| deepseek-v4-flash-vision-exp | 1,000,000 | 800,000 | 384,000 | provider-defined | Free (0 Credits) |
+| glm-5.3-flash | 1,000,000 | 800,000 | 131,072 | 65,536 | Free (0 Credits) |
 | qwen3.8-flash | 128,000 | 102,400 | 16,384 | provider-defined | Free (0 Credits) |
 
 Advanced deployments may still set OPENCODE_UPSTREAM_BASE_URL, OPENCODE_UPSTREAM_API_KEY, OPENCODE_MODEL, and OPENCODE_MODEL_FALLBACKS directly through environment/TOML.

@@ -29,7 +29,7 @@ fn launcher_environment_preserves_upstream_id_and_exposes_1m_client_contract() {
     assert_eq!(value(&vars, "CLAUDE_CODE_DISABLE_1M_CONTEXT"), "0");
     assert_eq!(value(&vars, "CLAUDE_CODE_MAX_CONTEXT_TOKENS"), "1000000");
     assert_eq!(value(&vars, "CLAUDE_CODE_MAX_OUTPUT_TOKENS"), "128000");
-    assert_eq!(value(&vars, "CLAUDE_CODE_AUTO_COMPACT_WINDOW"), "1000000");
+    assert_eq!(value(&vars, "CLAUDE_CODE_AUTO_COMPACT_WINDOW"), "800000");
 
     let config = BridgeConfig {
         bridge_port: 4567,
@@ -70,8 +70,5 @@ fn generated_claude_code_settings_use_alias_and_1m_environment() {
     assert_eq!(settings["env"]["ANTHROPIC_MODEL"], "sonnet[1m]");
     assert_eq!(settings["env"]["CLAUDE_CODE_DISABLE_1M_CONTEXT"], "0");
     assert_eq!(settings["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "1000000");
-    assert_eq!(
-        settings["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"],
-        "1000000"
-    );
+    assert_eq!(settings["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "800000");
 }

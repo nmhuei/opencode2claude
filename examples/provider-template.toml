@@ -1,0 +1,69 @@
+# Copy this file, replace example values, and pass it with --config.
+# No secret value belongs in this file.
+schema_version = 2
+
+[[providers]]
+id = "bai"
+name = "B.AI"
+kind = "bai"
+protocol = "openai_chat_completions"
+base_url = "https://api.b.ai/v1"
+enabled = true
+
+[[credentials]]
+id = "bai-main"
+provider_id = "bai"
+env = "BAI_API_KEY"
+auth_scheme = "x-api-key"
+
+[[models]]
+provider_id = "bai"
+model_id = "deepseek-1m"
+context_window = 1000000
+max_output_tokens = 128000
+verified_context = true
+free = true
+
+[[providers]]
+id = "opencode-free"
+name = "OpenCode Free"
+kind = "opencode"
+protocol = "openai_chat_completions"
+base_url = "https://opencode.ai/zen/v1"
+enabled = true
+
+[[models]]
+provider_id = "opencode-free"
+model_id = "deepseek-v4-flash-free"
+context_window = 1000000
+max_output_tokens = 384000
+verified_context = true
+free = true
+
+[[aliases]]
+id = "free-1m"
+client_model = "sonnet[1m]"
+context_window = 1000000
+strict_context = true
+
+[[aliases.candidates]]
+provider_id = "bai"
+model_id = "deepseek-1m"
+credential_id = "bai-main"
+priority = 0
+
+[[aliases.candidates]]
+provider_id = "opencode-free"
+model_id = "deepseek-v4-flash-free"
+priority = 10
+
+[[aliases]]
+id = "free-standard"
+client_model = "claude-sonnet-5"
+context_window = 128000
+strict_context = true
+
+[[aliases.candidates]]
+provider_id = "opencode-free"
+model_id = "deepseek-v4-flash-free"
+priority = 0

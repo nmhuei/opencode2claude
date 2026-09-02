@@ -42,12 +42,14 @@ Upstream Bearer credentials are sent only over HTTPS, except for loopback HTTP e
 
 | Model | Context window | Auto-compact window | Max output | Default output | Billing |
 |---|---:|---:|---:|---:|---|
-| deepseek-v4-flash | 1,000,000 | 1,000,000 | 384,000 | provider-defined | Free (0 Credits) |
-| deepseek-v4-flash-vision-exp | 1,000,000 | 1,000,000 | 384,000 | provider-defined | Free (0 Credits) |
-| glm-5.3-flash | 1,000,000 | 1,000,000 | 131,072 | 65,536 | Free (0 Credits) |
+| deepseek-v4-flash | 1,000,000 | 800,000 | 384,000 | provider-defined | Free (0 Credits) |
+| deepseek-v4-flash-vision-exp | 1,000,000 | 800,000 | 384,000 | provider-defined | Free (0 Credits) |
+| glm-5.3-flash | 1,000,000 | 800,000 | 131,072 | 65,536 | Free (0 Credits) |
 | qwen3.8-flash | 128,000 | 102,400 | 16,384 | provider-defined | Free (0 Credits) |
 
 These exact profiles are applied to Claude Code environment tuning and to model discovery output when the API exposes the matching IDs.
+The auto-compact window is always `floor(context_window * 80 / 100)`, including
+for 1M models.
 
 ### Claude Code model tiering & fallback isolation
 

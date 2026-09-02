@@ -6,7 +6,7 @@ use serde::Serialize;
 pub const OX_ALPHA_MODEL: &str = "opencode/x-preview-f-free";
 pub const OX_ALPHA_CLAUDE_MODEL: &str = "sonnet[1m]";
 pub const OX_ALPHA_MAX_OUTPUT_TOKENS: &str = "128000";
-pub const OX_ALPHA_AUTO_COMPACT_WINDOW: &str = "1000000";
+pub const OX_ALPHA_AUTO_COMPACT_WINDOW: &str = "800000";
 pub const OX_ALPHA_MAX_THINKING_TOKENS: &str = "120000";
 
 #[derive(Debug, Clone, Serialize)]
@@ -260,7 +260,7 @@ mod tests {
             .any(|line| line == "export CLAUDE_CODE_MAX_CONTEXT_TOKENS='1000000'"));
         assert!(exports_million
             .iter()
-            .any(|line| line == "export CLAUDE_CODE_AUTO_COMPACT_WINDOW='1000000'"));
+            .any(|line| line == "export CLAUDE_CODE_AUTO_COMPACT_WINDOW='800000'"));
         assert!(exports_million
             .iter()
             .all(|line| line != "export DISABLE_COMPACT='1'"));
@@ -275,7 +275,7 @@ mod tests {
             .any(|line| line == "export CLAUDE_CODE_MAX_CONTEXT_TOKENS='1000000'"));
         assert!(deepseek_exports
             .iter()
-            .any(|line| line == "export CLAUDE_CODE_AUTO_COMPACT_WINDOW='1000000'"));
+            .any(|line| line == "export CLAUDE_CODE_AUTO_COMPACT_WINDOW='800000'"));
         assert!(deepseek_exports
             .iter()
             .any(|line| line == "export CLAUDE_CODE_MAX_OUTPUT_TOKENS='384000'"));
@@ -290,7 +290,7 @@ mod tests {
             .any(|line| line == "export CLAUDE_CODE_MAX_CONTEXT_TOKENS='1000000'"));
         assert!(glm_exports
             .iter()
-            .any(|line| line == "export CLAUDE_CODE_AUTO_COMPACT_WINDOW='1000000'"));
+            .any(|line| line == "export CLAUDE_CODE_AUTO_COMPACT_WINDOW='800000'"));
         assert!(glm_exports
             .iter()
             .any(|line| line == "export CLAUDE_CODE_MAX_OUTPUT_TOKENS='131072'"));

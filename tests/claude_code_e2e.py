@@ -234,7 +234,7 @@ def wait_health(port: int, timeout: float = 20.0) -> None:
 
 def write_claude_settings(profile: Path, bridge_port: int, *, model: str = MODEL_PROFILE,
                            auth_token: str | None = None, context_tokens: str = "200000",
-                           max_output_tokens: str = "128000", auto_compact_window: str = "200000",
+                           max_output_tokens: str = "128000", auto_compact_window: str = "160000",
                            launcher_env: dict[str, str] | None = None) -> Path:
     profile.mkdir(parents=True, exist_ok=True)
     if launcher_env is None:
@@ -503,14 +503,16 @@ upstream_api_keys = ["{KEY_ONE}", "{KEY_TWO}"]
                     ) if part
                 )
                 normalized = displayed.lower().replace(",", "")
-                has_one_million_window = bool(
-                    re.search(r"/\s*(?:1m|1000000)(?:\s+tokens?)?\s*(?:\(|$)", normalized)
-                    or re.search(r"auto-compact window:\s*(?:1m|1000000)", normalized)
+                has_expected_compact_window = bool(
+                    re.search(r"/\s*(?:800k|800000)(?:\s+tokens?)?\s*(?:\(|$)", normalized)
+                    or re.search(r"auto-compact window:\s*(?:800k|800000)", normalized)
                 )
                 passed = (
                     proc.returncode == 0
                     and alias == "sonnet[1m]"
-                    and has_one_million_window
+                    and launcher_env.get("CLAUDE_CODE_MAX_CONTEXT_TOKENS") == "1000000"
+                    and launcher_env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW") == "800000"
+                    and has_expected_compact_window
                 )
                 results.append({
                     "case": "provider_alias_free_1m",
@@ -527,7 +529,7 @@ upstream_api_keys = ["{KEY_ONE}", "{KEY_TWO}"]
                 if not passed:
                     print(
                         f"    compatibility failure: Claude Code {summary_version(claude_bin)} "
-                        f"did not accept launcher model {alias!r} with a 1M denominator"
+                        f"did not accept launcher model {alias!r} with an 800k auto-compact window"
                     )
             except subprocess.TimeoutExpired as error:
                 results.append({

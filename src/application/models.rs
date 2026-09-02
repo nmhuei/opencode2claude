@@ -4,6 +4,10 @@ use crate::management::{config_apply, dto};
 use crate::state::AppState;
 use serde::Serialize;
 
+const fn eighty_percent(value: usize) -> usize {
+    (value / 100) * 80 + ((value % 100) * 80) / 100
+}
+
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 pub struct ModelProfile {
     pub id: &'static str,
@@ -48,11 +52,7 @@ impl ModelProfile {
 
     #[inline]
     pub const fn auto_compact_window(&self) -> usize {
-        if self.context_window >= 1_000_000 {
-            self.context_window
-        } else {
-            (self.context_window * 80) / 100
-        }
+        eighty_percent(self.context_window)
     }
 }
 
@@ -72,11 +72,7 @@ pub struct FreeModel {
 impl FreeModel {
     #[inline]
     pub const fn auto_compact_window(&self) -> usize {
-        if self.context_window >= 1_000_000 {
-            self.context_window
-        } else {
-            (self.context_window * 80) / 100
-        }
+        eighty_percent(self.context_window)
     }
 
     pub fn to_profile(&self) -> ModelProfile {
@@ -428,11 +424,7 @@ mod tests {
             assert!(model.limited_time);
             assert_eq!(
                 model.auto_compact_window(),
-                if model.context_window >= 1_000_000 {
-                    model.context_window
-                } else {
-                    (model.context_window * 80) / 100
-                }
+                (model.context_window * 80) / 100
             );
         }
     }
@@ -452,22 +444,22 @@ mod tests {
         let deepseek_free = resolve_model_profile("opencode/deepseek-v4-flash-free");
         assert_eq!(deepseek_free.context_window, 1_000_000);
         assert_eq!(deepseek_free.max_output_tokens, 384_000);
-        assert_eq!(deepseek_free.auto_compact_window(), 1_000_000);
+        assert_eq!(deepseek_free.auto_compact_window(), 800_000);
 
         let deepseek = resolve_model_profile("deepseek-v4-flash");
         assert_eq!(deepseek.context_window, 1_000_000);
         assert_eq!(deepseek.max_output_tokens, 384_000);
-        assert_eq!(deepseek.auto_compact_window(), 1_000_000);
+        assert_eq!(deepseek.auto_compact_window(), 800_000);
 
         let vision = resolve_model_profile("deepseek-v4-flash-vision-exp");
         assert_eq!(vision.context_window, 1_000_000);
         assert_eq!(vision.max_output_tokens, 384_000);
-        assert_eq!(vision.auto_compact_window(), 1_000_000);
+        assert_eq!(vision.auto_compact_window(), 800_000);
 
         let glm = resolve_model_profile("glm-5.3-flash");
         assert_eq!(glm.context_window, 1_000_000);
         assert_eq!(glm.max_output_tokens, 131_072);
-        assert_eq!(glm.auto_compact_window(), 1_000_000);
+        assert_eq!(glm.auto_compact_window(), 800_000);
 
         let qwen = resolve_model_profile("qwen3.8-flash");
         assert_eq!(qwen.context_window, 128_000);
@@ -512,7 +504,7 @@ mod tests {
             *key == "CLAUDE_CODE_MAX_CONTEXT_TOKENS" && value == "1000000"
         }));
         assert!(vars.iter().any(|(key, value)| {
-            *key == "CLAUDE_CODE_AUTO_COMPACT_WINDOW" && value == "1000000"
+            *key == "CLAUDE_CODE_AUTO_COMPACT_WINDOW" && value == "800000"
         }));
     }
 }

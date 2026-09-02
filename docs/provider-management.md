@@ -41,6 +41,10 @@ Use `--config PATH` on provider, credential, alias, and activation commands to
 operate on a specific configuration. JSON output is safe for automation and
 does not contain raw secrets.
 
+For a reusable schema-v2 starting point, see
+[`examples/provider-template.toml`](../examples/provider-template.toml) and the
+[provider template guide](provider-template.md).
+
 `provider opencode`, `provider api`, `provider models`, and `upstream` remain
 compatibility commands for the legacy singleton configuration.
 
@@ -52,9 +56,13 @@ for compatibility. The launcher exports:
 
 ```text
 CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000
-CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000
+CLAUDE_CODE_AUTO_COMPACT_WINDOW=800000
 CLAUDE_CODE_DISABLE_1M_CONTEXT=0
 ```
+
+The auto-compact threshold is always `floor(context_window * 80 / 100)` for
+every model. A 1M model therefore keeps a 1M Claude Code context window while
+compacting at 800k tokens.
 
 `/context` must be verified against the installed Claude Code version by
 `python3 tests/claude_code_e2e.py --provider-alias free-1m`. A proxy cannot
