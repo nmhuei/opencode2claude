@@ -596,11 +596,7 @@ fn resolve_anonymous_model(
                 return "z-ai/glm-5.3-flash".to_string();
             } else {
                 if let Some(cfg) = configured_clean {
-                    if crate::application::models::resolve_model_profile(cfg).context_window
-                        < 1_000_000
-                    {
-                        return cfg.to_string();
-                    }
+                    return cfg.to_string();
                 }
                 return "qwen3.8-flash".to_string();
             }
