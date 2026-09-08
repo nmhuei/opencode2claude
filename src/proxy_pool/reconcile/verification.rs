@@ -32,6 +32,7 @@ pub trait ProxyVerifier: Send + Sync + fmt::Debug {
         &self,
         client: &reqwest::Client,
         endpoints: &[String],
+        require_warp: bool,
         timeout: Duration,
     ) -> Result<ExitIdentity, String>;
 
@@ -72,9 +73,10 @@ impl ProxyVerifier for LiveProxyVerifier {
         &self,
         client: &reqwest::Client,
         endpoints: &[String],
+        require_warp: bool,
         _timeout: Duration,
     ) -> Result<ExitIdentity, String> {
-        probe_exit_identity(client, endpoints).await
+        probe_exit_identity(client, endpoints, require_warp).await
     }
 
     async fn verify_route(
@@ -98,10 +100,12 @@ pub async fn verify_candidate(
     client: &reqwest::Client,
     identity_endpoints: &[String],
     upstream_base_url: &str,
+    require_warp: bool,
     timeout: Duration,
 ) -> Result<ExitIdentity, VerificationFailure> {
     verify_transport_stage(verifier, client, timeout).await?;
-    let identity = verify_identity_stage(verifier, client, identity_endpoints, timeout).await?;
+    let identity =
+        verify_identity_stage(verifier, client, identity_endpoints, require_warp, timeout).await?;
     verify_route_stage(verifier, client, upstream_base_url, timeout).await?;
     Ok(identity)
 }
@@ -121,11 +125,12 @@ pub(crate) async fn verify_identity_stage(
     verifier: &dyn ProxyVerifier,
     client: &reqwest::Client,
     endpoints: &[String],
+    require_warp: bool,
     timeout: Duration,
 ) -> Result<ExitIdentity, VerificationFailure> {
     tokio::time::timeout(
         timeout,
-        verifier.verify_identity(client, endpoints, timeout),
+        verifier.verify_identity(client, endpoints, require_warp, timeout),
     )
     .await
     .map_err(|_| VerificationFailure::Identity(timeout_message("identity", timeout)))?

@@ -119,6 +119,8 @@ fn apply_claude_default_model(mut resolved: BridgeConfig) -> BridgeConfig {
     {
         if crate::application::prober::is_opencode_upstream(&resolved.retry.upstream_base_url) {
             resolved.model = Some("opencode/mimo-v2.5-free".to_string());
+        } else if crate::application::prober::is_cline_upstream(&resolved.retry.upstream_base_url) {
+            resolved.model = Some("z-ai/glm-5.3-flash".to_string());
         } else {
             resolved.model = Some("glm-5.3-flash".to_string());
         }
@@ -156,11 +158,16 @@ fn launch_claude_code(continue_session: bool, resume: Option<&str>) {
             .as_deref()
             .unwrap_or(crate::application::integration::OX_ALPHA_MODEL),
     );
-    let target_alias = profile.anthropic_alias;
+    let target_alias = crate::application::integration::client_model_alias_for_profile(&profile);
 
     match crate::infrastructure::process::run_foreground(
         "claude",
-        claude_launch_args(continue_session, resume, Some(target_alias)),
+        claude_launch_args(
+            continue_session,
+            resume,
+            Some(target_alias),
+            Some(profile.context_window),
+        ),
         crate::application::integration::process_environment(&resolved),
     ) {
         Ok(status) if status.success() => {}
@@ -180,6 +187,7 @@ fn claude_launch_args(
     continue_session: bool,
     resume: Option<&str>,
     model: Option<&str>,
+    context_window: Option<usize>,
 ) -> Vec<String> {
     let mut args = vec![
         "--permission-mode".to_string(),
@@ -189,6 +197,14 @@ fn claude_launch_args(
         if !m.is_empty() {
             args.push("--model".to_string());
             args.push(m.to_string());
+        }
+    }
+    if let Some(window) = context_window {
+        if (100_000..=1_000_000).contains(&window) {
+            // Override stale Claude Code settings such as autoCompactWindow=800k.
+            // The compaction trigger is configured independently through the environment.
+            args.push("--autocompact".to_string());
+            args.push(window.to_string());
         }
     }
     if continue_session {
@@ -226,11 +242,11 @@ mod launcher_tests {
     #[test]
     fn bare_launcher_defaults_to_bypass_permissions() {
         assert_eq!(
-            claude_launch_args(false, None, None),
+            claude_launch_args(false, None, None, None),
             ["--permission-mode", "bypassPermissions"]
         );
         assert_eq!(
-            claude_launch_args(false, None, Some("claude-opus-5")),
+            claude_launch_args(false, None, Some("claude-opus-5"), None),
             [
                 "--permission-mode",
                 "bypassPermissions",
@@ -243,15 +259,15 @@ mod launcher_tests {
     #[test]
     fn launcher_supports_continue_and_resume() {
         assert_eq!(
-            claude_launch_args(true, None, None),
+            claude_launch_args(true, None, None, None),
             ["--permission-mode", "bypassPermissions", "--continue"]
         );
         assert_eq!(
-            claude_launch_args(false, Some(""), None),
+            claude_launch_args(false, Some(""), None, None),
             ["--permission-mode", "bypassPermissions", "--resume"]
         );
         assert_eq!(
-            claude_launch_args(false, Some("session-123"), Some("claude-opus-5")),
+            claude_launch_args(false, Some("session-123"), Some("claude-opus-5"), None,),
             [
                 "--permission-mode",
                 "bypassPermissions",
@@ -259,6 +275,21 @@ mod launcher_tests {
                 "claude-opus-5",
                 "--resume",
                 "session-123",
+            ]
+        );
+    }
+
+    #[test]
+    fn launcher_overrides_settings_with_full_context_window() {
+        assert_eq!(
+            claude_launch_args(false, None, Some("sonnet[1m]"), Some(1_000_000)),
+            [
+                "--permission-mode",
+                "bypassPermissions",
+                "--model",
+                "sonnet[1m]",
+                "--autocompact",
+                "1000000"
             ]
         );
     }

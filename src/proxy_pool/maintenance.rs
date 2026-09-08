@@ -78,8 +78,10 @@ impl ProxyPool {
         } else {
             warn!(
                 node_id = %node.id,
+                role = ?node.role,
+                lifecycle = ?node.lifecycle,
                 failures = node.consecutive_failures,
-                "protected standby opened its circuit; lifecycle action is forbidden"
+                "protected egress node opened its circuit; lifecycle action is forbidden"
             );
         }
     }
@@ -812,7 +814,13 @@ async fn verify_proxy_identity(
 
     let mut last_error = "identity probe did not run".to_string();
     for attempt in 1..=12 {
-        match probe_exit_identity(&client, endpoints).await {
+        match probe_exit_identity(
+            &client,
+            endpoints,
+            super::types::requires_warp_attestation(port),
+        )
+        .await
+        {
             Ok(identity) => return Ok(identity),
             Err(error) => last_error = error,
         }

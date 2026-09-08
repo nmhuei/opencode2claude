@@ -542,6 +542,7 @@ fn resolve_anonymous_model(
 
     let is_opencode = crate::application::prober::is_opencode_upstream(upstream_base_url)
         || configured_clean.is_some_and(|c| c.starts_with("opencode/"));
+    let is_cline = crate::application::prober::is_cline_upstream(upstream_base_url);
 
     if let Some(req) = requested_clean {
         let req_lower = req.to_ascii_lowercase();
@@ -557,6 +558,15 @@ fn resolve_anonymous_model(
                     }
                 }
                 return "opencode/x-preview-f-free".to_string();
+            } else if is_cline {
+                if let Some(cfg) = configured_clean {
+                    if crate::application::models::resolve_model_profile(cfg).context_window
+                        >= 1_000_000
+                    {
+                        return cfg.to_string();
+                    }
+                }
+                return "z-ai/glm-5.3-flash".to_string();
             } else {
                 if let Some(cfg) = configured_clean {
                     if crate::application::models::resolve_model_profile(cfg).context_window
@@ -579,6 +589,11 @@ fn resolve_anonymous_model(
                     }
                 }
                 return "opencode/mimo-v2.5-free".to_string();
+            } else if is_cline {
+                if let Some(cfg) = configured_clean {
+                    return cfg.to_string();
+                }
+                return "z-ai/glm-5.3-flash".to_string();
             } else {
                 if let Some(cfg) = configured_clean {
                     if crate::application::models::resolve_model_profile(cfg).context_window
@@ -596,6 +611,12 @@ fn resolve_anonymous_model(
             if crate::application::models::is_supported_free_model(req) {
                 return req.to_string();
             }
+        } else if is_cline {
+            for candidate in crate::application::cline::CLINE_FREE_MODELS {
+                if candidate.id.eq_ignore_ascii_case(req) {
+                    return candidate.id.to_string();
+                }
+            }
         } else {
             for p in crate::application::models::API_MODEL_PROFILES {
                 if p.id.eq_ignore_ascii_case(req) {
@@ -607,7 +628,12 @@ fn resolve_anonymous_model(
         // Fallback for custom or unknown model: configured wins if present
         configured_clean.unwrap_or(req).to_string()
     } else {
-        configured_clean.unwrap_or(DEFAULT_MODEL).to_string()
+        let default_model = if is_cline {
+            "z-ai/glm-5.3-flash"
+        } else {
+            DEFAULT_MODEL
+        };
+        configured_clean.unwrap_or(default_model).to_string()
     }
 }
 

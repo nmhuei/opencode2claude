@@ -520,6 +520,9 @@ pub enum ProviderSubcommand {
     /// Use OpenCode Zen. Model defaults to mimo-v2.5-free.
     Opencode(ProviderOpenCodeArgs),
 
+    /// Use Cline backend API. Model defaults to z-ai/glm-5.3-flash.
+    Cline(ProviderClineArgs),
+
     /// Use a custom OpenAI-compatible API endpoint.
     Api(ProviderApiArgs),
 
@@ -535,6 +538,21 @@ pub struct ProviderOpenCodeArgs {
     /// OpenCode model id, with or without the opencode/ prefix
     #[arg(default_value = "mimo-v2.5-free")]
     pub model: String,
+
+    /// Config file to update; defaults to the resolved active config
+    #[arg(short, long)]
+    pub config: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ProviderClineArgs {
+    /// Cline model id; defaults to z-ai/glm-5.3-flash
+    #[arg(default_value = "z-ai/glm-5.3-flash")]
+    pub model: String,
+
+    /// Read the Bearer API key from standard input instead of local Cline auth (~/.cline/data/settings/providers.json)
+    #[arg(long = "api-key-stdin")]
+    pub api_key_stdin: bool,
 
     /// Config file to update; defaults to the resolved active config
     #[arg(short, long)]
@@ -769,6 +787,32 @@ mod tests {
             panic!("expected provider opencode");
         };
         assert_eq!(args.model, "mimo-v2.5-free");
+
+        let cline = parse(&["provider", "cline"]).expect("provider cline");
+        let Command::Provider(args) = cline.command.unwrap() else {
+            panic!("expected provider command");
+        };
+        let Some(ProviderSubcommand::Cline(args)) = args.command else {
+            panic!("expected provider cline");
+        };
+        assert_eq!(args.model, "z-ai/glm-5.3-flash");
+        assert!(!args.api_key_stdin);
+
+        let cline_custom = parse(&[
+            "provider",
+            "cline",
+            "nvidia/nemotron-3.5-lightning:free",
+            "--api-key-stdin",
+        ])
+        .expect("provider cline custom");
+        let Command::Provider(args) = cline_custom.command.unwrap() else {
+            panic!("expected provider command");
+        };
+        let Some(ProviderSubcommand::Cline(args)) = args.command else {
+            panic!("expected provider cline");
+        };
+        assert_eq!(args.model, "nvidia/nemotron-3.5-lightning:free");
+        assert!(args.api_key_stdin);
 
         let api = parse(&[
             "provider",

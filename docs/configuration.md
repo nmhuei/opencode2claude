@@ -40,12 +40,15 @@ Upstream Bearer credentials are sent only over HTTPS, except for loopback HTTP e
 
 ### Curated custom-API model profiles
 
-| Model | Context window | 80% auto-compact | Max output | Default output | Billing |
+| Model | Context window | Auto-compact | Max output | Default output | Billing |
 |---|---:|---:|---:|---:|---|
-| deepseek-v4-flash | 1,000,000 | 800,000 | 384,000 | provider-defined | Free (0 Credits) |
-| deepseek-v4-flash-vision-exp | 1,000,000 | 800,000 | 384,000 | provider-defined | Free (0 Credits) |
-| glm-5.3-flash | 1,000,000 | 800,000 | 131,072 | 65,536 | Free (0 Credits) |
+| deepseek-v4-flash | 1,000,000 | 500,000 (50%) | 384,000 | provider-defined | Free (0 Credits) |
+| deepseek-v4-flash-vision-exp | 1,000,000 | 500,000 (50%) | 384,000 | provider-defined | Free (0 Credits) |
+| glm-5.3-flash | 1,000,000 | 500,000 (50%) | 131,072 | 65,536 | Free (0 Credits) |
 | qwen3.8-flash | 128,000 | 102,400 | 16,384 | provider-defined | Free (0 Credits) |
+
+Model profiles with a 1,000,000-token-or-larger context window compact at 50% of
+their context window. Smaller profiles compact at 80%.
 
 These exact profiles are applied to Claude Code environment tuning and to model discovery output when the API exposes the matching IDs.
 

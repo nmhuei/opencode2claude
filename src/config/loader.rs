@@ -486,6 +486,18 @@ pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
     resolved.retry.upstream_api_key =
         single_upstream_key.or_else(|| upstream_keys.first().cloned());
     resolved.retry.upstream_api_keys = upstream_keys;
+
+    if resolved.retry.upstream_api_key.is_none()
+        && !overrides.clear_upstream_api_key
+        && crate::application::prober::is_cline_upstream(&resolved.retry.upstream_base_url)
+    {
+        if let Ok(token) = crate::application::cline::find_cline_token() {
+            if let Some(secret) = SecretString::new(token) {
+                resolved.retry.upstream_api_key = Some(secret.clone());
+                resolved.retry.upstream_api_keys.insert(0, secret);
+            }
+        }
+    }
     resolved.retry.model_fallbacks = env_string("OPENCODE_MODEL_FALLBACKS")
         .map(|value| parse_csv(&value))
         .or_else(|| {

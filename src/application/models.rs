@@ -4,6 +4,18 @@ use crate::management::{config_apply, dto};
 use crate::state::AppState;
 use serde::Serialize;
 
+pub const fn auto_compact_percent_for_context(context_window: usize) -> usize {
+    if context_window >= 1_000_000 {
+        50
+    } else {
+        80
+    }
+}
+
+const fn auto_compact_window_for_context(context_window: usize) -> usize {
+    (context_window * auto_compact_percent_for_context(context_window)) / 100
+}
+
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 pub struct ModelProfile {
     pub id: &'static str,
@@ -18,7 +30,7 @@ pub struct ModelProfile {
 impl ModelProfile {
     #[inline]
     pub const fn auto_compact_window(&self) -> usize {
-        (self.context_window * 80) / 100
+        auto_compact_window_for_context(self.context_window)
     }
 }
 
@@ -38,7 +50,7 @@ pub struct FreeModel {
 impl FreeModel {
     #[inline]
     pub const fn auto_compact_window(&self) -> usize {
-        (self.context_window * 80) / 100
+        auto_compact_window_for_context(self.context_window)
     }
 
     pub fn to_profile(&self) -> ModelProfile {
@@ -50,7 +62,7 @@ impl FreeModel {
             max_output_tokens: self.max_output_tokens,
             supports_thinking: self.supports_thinking,
             anthropic_alias: if self.context_window >= 1_000_000 {
-                "claude-opus-5"
+                "sonnet[1m]"
             } else {
                 "claude-sonnet-5"
             },
@@ -154,9 +166,20 @@ pub const FREE_MODELS: &[FreeModel] = &[
         protocol: "openai_chat_completions",
         limited_time: true,
         privacy_notice: "Contributor free tier.",
-        context_window: 128_000,
-        max_output_tokens: 16_384,
-        supports_thinking: false,
+        context_window: 1_048_576,
+        max_output_tokens: 131_072,
+        supports_thinking: true,
+    },
+    FreeModel {
+        id: "opencode/muse-spark-1.3-contributor-free",
+        label: "Muse Spark 1.3 Contributor Free",
+        provider: "OpenCode",
+        protocol: "openai_chat_completions",
+        limited_time: true,
+        privacy_notice: "Contributor free tier.",
+        context_window: 1_048_576,
+        max_output_tokens: 943_718,
+        supports_thinking: true,
     },
     FreeModel {
         id: "opencode/north-mini-code-free",
@@ -227,7 +250,9 @@ pub fn model_pricing(model: &str) -> &'static str {
         "deepseek-v4-flash" | "deepseek-v4-flash-vision-exp" | "glm-5.3-flash" => {
             "Free (0 Credits)"
         }
+        "z-ai/glm-5.3-flash" => "Free (Cline)",
         "qwen3.8-flash" => "Free (0 Credits)",
+        _ if clean.ends_with(":free") => "Free (Cline)",
         _ if is_supported_free_model(model) => "Free tier",
         _ => "Provider-defined",
     }
@@ -236,7 +261,7 @@ pub fn model_pricing(model: &str) -> &'static str {
 pub fn model_default_output_tokens(model: &str) -> Option<usize> {
     let clean = model.strip_prefix("opencode/").unwrap_or(model);
     match clean {
-        "glm-5.3-flash" => Some(65_536),
+        "glm-5.3-flash" | "z-ai/glm-5.3-flash" => Some(65_536),
         _ => None,
     }
 }
@@ -268,6 +293,12 @@ pub fn resolve_model_profile(model: &str) -> ModelProfile {
         }
     }
 
+    for candidate in crate::application::cline::CLINE_FREE_MODELS {
+        if candidate.id.eq_ignore_ascii_case(model) || candidate.id.eq_ignore_ascii_case(clean) {
+            return candidate.to_profile();
+        }
+    }
+
     if let Some(profile) = API_MODEL_PROFILES
         .iter()
         .find(|profile| profile.id.eq_ignore_ascii_case(clean))
@@ -276,7 +307,17 @@ pub fn resolve_model_profile(model: &str) -> ModelProfile {
     }
 
     let lower = clean.to_ascii_lowercase();
-    if lower.contains("gemini") {
+    if lower == "sonnet[1m]" || lower == "claude-sonnet-5[1m]" {
+        ModelProfile {
+            id: "sonnet[1m]",
+            label: "Claude Sonnet 1M",
+            provider: "Claude Code compatibility",
+            context_window: 1_000_000,
+            max_output_tokens: 128_000,
+            supports_thinking: true,
+            anthropic_alias: "sonnet[1m]",
+        }
+    } else if lower.contains("gemini") {
         ModelProfile {
             id: "gemini-3.7-flash",
             label: "Gemini Flash",
@@ -386,15 +427,17 @@ mod tests {
             assert!(model.id.starts_with("opencode/"));
             assert!(ids.insert(model.id));
             assert!(model.limited_time);
-            assert_eq!(
-                model.auto_compact_window(),
+            let expected = if model.context_window >= 1_000_000 {
+                (model.context_window * 50) / 100
+            } else {
                 (model.context_window * 80) / 100
-            );
+            };
+            assert_eq!(model.auto_compact_window(), expected);
         }
     }
 
     #[test]
-    fn test_resolve_model_profile_autocompact_is_80_percent() {
+    fn test_resolve_model_profile_autocompact_uses_50_percent_for_1m_models() {
         let mimo = resolve_model_profile("mimo-v2.5-free");
         assert_eq!(mimo.context_window, 256_000);
         assert_eq!(mimo.auto_compact_window(), 204_800);
@@ -408,27 +451,46 @@ mod tests {
         let deepseek_free = resolve_model_profile("opencode/deepseek-v4-flash-free");
         assert_eq!(deepseek_free.context_window, 1_000_000);
         assert_eq!(deepseek_free.max_output_tokens, 384_000);
-        assert_eq!(deepseek_free.auto_compact_window(), 800_000);
+        assert_eq!(deepseek_free.auto_compact_window(), 500_000);
 
         let deepseek = resolve_model_profile("deepseek-v4-flash");
         assert_eq!(deepseek.context_window, 1_000_000);
         assert_eq!(deepseek.max_output_tokens, 384_000);
-        assert_eq!(deepseek.auto_compact_window(), 800_000);
+        assert_eq!(deepseek.auto_compact_window(), 500_000);
 
         let vision = resolve_model_profile("deepseek-v4-flash-vision-exp");
         assert_eq!(vision.context_window, 1_000_000);
         assert_eq!(vision.max_output_tokens, 384_000);
-        assert_eq!(vision.auto_compact_window(), 800_000);
+        assert_eq!(vision.auto_compact_window(), 500_000);
 
         let glm = resolve_model_profile("glm-5.3-flash");
         assert_eq!(glm.context_window, 1_000_000);
         assert_eq!(glm.max_output_tokens, 131_072);
-        assert_eq!(glm.auto_compact_window(), 800_000);
+        assert_eq!(glm.auto_compact_window(), 500_000);
 
         let qwen = resolve_model_profile("qwen3.8-flash");
         assert_eq!(qwen.context_window, 128_000);
         assert_eq!(qwen.max_output_tokens, 16_384);
         assert_eq!(qwen.auto_compact_window(), 102_400);
+
+        let spark = resolve_model_profile("opencode/muse-spark-1.3-contributor-free");
+        assert_eq!(spark.context_window, 1_048_576);
+        assert_eq!(spark.max_output_tokens, 943_718);
+        assert_eq!(spark.auto_compact_window(), 524_288);
+        assert!(spark.supports_thinking);
+        assert_eq!(spark.anthropic_alias, "sonnet[1m]");
+        assert!(is_supported_free_model("muse-spark-1.3-contributor-free"));
+        assert_eq!(
+            model_pricing("opencode/muse-spark-1.3-contributor-free"),
+            "Free tier"
+        );
+
+        let spark12 = resolve_model_profile("muse-spark-1.2-contributor-free");
+        assert_eq!(spark12.context_window, 1_048_576);
+        assert_eq!(spark12.max_output_tokens, 131_072);
+        assert_eq!(spark12.auto_compact_window(), 524_288);
+        assert!(spark12.supports_thinking);
+        assert_eq!(spark12.anthropic_alias, "sonnet[1m]");
 
         assert_eq!(model_pricing("deepseek-v4-flash"), "Free (0 Credits)");
         assert_eq!(model_pricing("glm-5.3-flash"), "Free (0 Credits)");
@@ -457,5 +519,23 @@ mod tests {
             ]
         );
         assert_eq!(model_pricing("qwen3.8-flash"), "Free (0 Credits)");
+    }
+
+    #[test]
+    fn cline_free_models_resolve_correctly() {
+        let glm = resolve_model_profile("z-ai/glm-5.3-flash");
+        assert_eq!(glm.id, "z-ai/glm-5.3-flash");
+        assert_eq!(glm.context_window, 1_000_000);
+        assert_eq!(glm.max_output_tokens, 131_072);
+        assert_eq!(glm.auto_compact_window(), 500_000);
+        assert!(glm.supports_thinking);
+        assert_eq!(glm.anthropic_alias, "sonnet[1m]");
+        assert_eq!(model_pricing("z-ai/glm-5.3-flash"), "Free (Cline)");
+        assert_eq!(model_default_output_tokens("z-ai/glm-5.3-flash"), Some(65_536));
+
+        let nemotron = resolve_model_profile("nvidia/nemotron-3.5-lightning:free");
+        assert_eq!(nemotron.id, "nvidia/nemotron-3.5-lightning:free");
+        assert_eq!(nemotron.context_window, 256_000);
+        assert_eq!(model_pricing("nvidia/nemotron-3.5-lightning:free"), "Free (Cline)");
     }
 }

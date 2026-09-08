@@ -206,8 +206,8 @@ pub async fn forward_to_llm_sync(
             )));
         }
 
-        let openai_resp: OpenAiResponse = match serde_json::from_slice(&body) {
-            Ok(response) => response,
+        let openai_resp: OpenAiResponse = match serde_json::from_slice::<OpenAiResponseEnvelope>(&body) {
+            Ok(envelope) => envelope.into_response(),
             Err(error) => {
                 capture.attempt_finished(
                     Some(status.as_u16()),

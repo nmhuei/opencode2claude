@@ -197,6 +197,7 @@ pub(crate) async fn reconcile_once(
             verifier,
             &candidate.client,
             &config.egress.identity_endpoints,
+            super::types::requires_warp_attestation(candidate.port),
             config.egress.verify_timeout,
         )
         .await
@@ -304,6 +305,14 @@ async fn ensure_candidate(
     candidate: &ReconcileCandidate,
     config: &BridgeConfig,
 ) -> Result<(), String> {
+    // External (non-docker) proxies are operator-managed: there is no
+    // container to inspect or start, so bootstrap stops here and the
+    // transport/identity/route stages below decide eligibility.
+    // `requires_warp_attestation` is exactly the docker-pool port range
+    // (managed 40001-40003 + protected 40004-40005).
+    if !super::types::requires_warp_attestation(candidate.port) {
+        return Ok(());
+    }
     let spec = ProxySpec::new(candidate.port, config.runtime.warp_image.clone())
         .map_err(|error| format!("proxy {} spec is invalid: {error}", candidate.id))?;
     let timeout = config

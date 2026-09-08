@@ -296,6 +296,14 @@ pub fn is_managed_proxy_port(port: u16) -> bool {
     matches!(port, 40001..=40003)
 }
 
+/// Docker-pool (WARP) nodes must attest `warp=on` during exit verification.
+/// External proxies (any port outside the 40001-40005 docker range) verify
+/// by stable-exit consensus instead: a consistent public IP across identity
+/// endpoints proves the relay works without requiring a WARP signal.
+pub fn requires_warp_attestation(port: u16) -> bool {
+    is_managed_proxy_port(port) || is_protected_proxy_port(port)
+}
+
 pub fn ensure_not_protected(port: u16) -> Result<(), String> {
     if is_protected_proxy_port(port) {
         Err(format!(
@@ -360,5 +368,16 @@ mod configured_topology_tests {
 
         assert_eq!(configured_primary_ports(&config), vec![40001]);
         assert_eq!(configured_warm_standby_ports(&config), vec![40004]);
+    }
+
+    #[test]
+    fn warp_attestation_required_only_for_docker_pool_ports() {
+        use super::requires_warp_attestation;
+        for port in [40001_u16, 40002, 40003, 40004, 40005] {
+            assert!(requires_warp_attestation(port), "port {port}");
+        }
+        for port in [40006_u16, 40010, 40099, 8080] {
+            assert!(!requires_warp_attestation(port), "port {port}");
+        }
     }
 }

@@ -67,6 +67,13 @@ pub fn is_opencode_upstream(base_url: &str) -> bool {
         .is_some_and(|host| host == "opencode.ai" || host.ends_with(".opencode.ai"))
 }
 
+pub fn is_cline_upstream(base_url: &str) -> bool {
+    reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|host| host == "cline.bot" || host.ends_with(".cline.bot"))
+}
+
 fn is_bai_upstream(base_url: &str) -> bool {
     reqwest::Url::parse(base_url)
         .ok()
@@ -96,6 +103,13 @@ pub fn should_list_upstream_model(base_url: &str, id: &str) -> bool {
         BAI_CURATED_MODELS
             .iter()
             .any(|candidate| candidate.eq_ignore_ascii_case(clean))
+    } else if is_cline_upstream(base_url) {
+        clean.ends_with(":free")
+            || clean.eq_ignore_ascii_case("z-ai/glm-5.3-flash")
+            || clean.eq_ignore_ascii_case("glm-5.3-flash")
+            || clean.eq_ignore_ascii_case("deepseek/deepseek-v4-flash")
+            || clean.eq_ignore_ascii_case("deepseek/deepseek-v4-flash-vision-exp")
+            || clean.eq_ignore_ascii_case("qwen/qwen3.8-flash")
     } else {
         true
     }
@@ -108,6 +122,8 @@ fn static_catalog(base_url: &str) -> Vec<FreeModel> {
             .copied()
             .filter(|model| is_free_model_id(model.id))
             .collect()
+    } else if is_cline_upstream(base_url) {
+        crate::application::cline::CLINE_FREE_MODELS.to_vec()
     } else {
         Vec::new()
     }
@@ -174,11 +190,19 @@ pub async fn probe_single_model(
     let clean_id = model_id.strip_prefix("opencode/").unwrap_or(model_id);
 
     let start = Instant::now();
-    let body = serde_json::json!({
-        "model": clean_id,
-        "messages": [{"role": "user", "content": "ping"}],
-        "max_tokens": 5
-    });
+    let body = if is_cline_upstream(base_url) {
+        serde_json::json!({
+            "model": clean_id,
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": true,
+        })
+    } else {
+        serde_json::json!({
+            "model": clean_id,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 5
+        })
+    };
 
     let mut req = client
         .post(&url)
@@ -438,6 +462,8 @@ pub fn infer_upstream_service_name(base_url: &str, owned_by: Option<&str>) -> &'
         .is_some_and(|h| host_matches(h, "opencode.ai"))
     {
         "OpenCode"
+    } else if host.as_deref().is_some_and(|h| host_matches(h, "cline.bot")) {
+        "Cline"
     } else if host.as_deref().is_some_and(|h| host_matches(h, "b.ai")) {
         "b.ai"
     } else if host.as_deref().is_some_and(|h| host_matches(h, "groq.com")) {
@@ -564,7 +590,7 @@ mod tests {
             label: "DeepSeek V4 Flash".to_string(),
             provider: "OpenCode".to_string(),
             context_window: 1_000_000,
-            auto_compact_window: 800_000,
+            auto_compact_window: 500_000,
             max_output_tokens: 384_000,
             supports_thinking: true,
             status: ModelStatus::Unavailable,
@@ -600,6 +626,13 @@ mod tests {
         assert!(!is_opencode_upstream(
             "https://opencode.ai.attacker.example/v1"
         ));
+        assert!(is_cline_upstream("https://api.cline.bot/api/v1"));
+        assert!(is_cline_upstream("https://cline.bot/v1"));
+        assert!(!is_cline_upstream("https://cline.bot.attacker.example/v1"));
+        assert_eq!(
+            infer_upstream_service_name("https://api.cline.bot/api/v1", None),
+            "Cline"
+        );
         assert_eq!(
             infer_upstream_service_name("https://groq.com.attacker.example/v1", None),
             "groq.com.attacker.example"
@@ -608,5 +641,9 @@ mod tests {
             infer_upstream_service_name("https://api.groq.com/openai/v1", None),
             "Groq"
         );
+
+        let cline_models = catalog_models_without_network("https://api.cline.bot/api/v1");
+        assert!(!cline_models.is_empty());
+        assert!(cline_models.iter().any(|m| m.id == "z-ai/glm-5.3-flash"));
     }
 }

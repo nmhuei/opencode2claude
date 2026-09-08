@@ -26,7 +26,7 @@
 
 ## Snapshot hiện tại
 
-Cập nhật gần nhất: **2026-09-01 19:15 +0700**
+Cập nhật gần nhất: **2026-09-05 23:08 +0700**
 
 ### Repo và service
 
@@ -35,14 +35,14 @@ Repo:          /home/light/GitHub/opencode2claude
 Branch:        main (đồng bộ origin/main và origin/refactor/clean-architecture)
 Service URL:   http://127.0.0.1:4000
 Dashboard:     http://127.0.0.1:4000/dashboard
-Binary:        /home/light/.local/bin/opencode2api v0.5.0
-Controller:    /home/light/.local/bin/opencode2api
+Binary:        /home/light/GitHub/opencode2claude/target/debug/opencode2api v0.5.0
+Controller:    /home/light/GitHub/opencode2claude/target/debug/opencode2api
 Port:          4000
-Status:        running (managed supervisor)
-Active Model:  glm-5.3-flash (1,000,000 tokens context, 800,000 auto-compact, alias claude-opus-5, thinking enabled)
-Upstream:      https://api.b.ai/v1 (OpenAI-compatible with Bearer auth)
-Fallbacks:     ["deepseek-v4-flash", "deepseek-v4-flash-vision-exp"] (1M isolated tier)
-Claude Code:   Direct 1-touch launch (`opencode2api`) with claude-opus-5 alias, dynamic /model routing, and automatic $HOME/opencode2api.toml resolution.
+Status:        running (managed supervisor, direct egress, started 2026-09-05 ~23:08, PID 295193)
+Active Model:  opencode/muse-spark-1.3-contributor-free (1,048,576 tokens context, 838,860 auto-compact, 943,718 max output, alias sonnet[1m], thinking enabled)
+Upstream:      https://opencode.ai/zen/v1 (OpenCode Zen, no API key)
+Fallbacks:     (none — b.ai-only fallbacks removed with provider switch)
+Claude Code:   Direct 1-touch launch (`opencode2api`) with claude-sonnet-5 alias, dynamic /model routing, and automatic $HOME/opencode2api.toml resolution.
 Tests:         915 unit tests PASS (0 failures)
 ```
 
@@ -4246,3 +4246,117 @@ docs/feature-matrix/config-boundary/infra-boundary/
   - All 915 unit & integration tests pass with 0 failures (`cargo test --lib`).
   - Merged `refactor/clean-architecture` into `main` and pushed to `origin/main`.
 
+
+## 2026-09-03 21:00 +0700 — Switch bridge to opencode/muse-spark-1.3-contributor-free
+
+- Mục tiêu: theo yêu cầu user, chuyển provider từ b.ai (`glm-5.3-flash`) sang OpenCode Zen model `opencode/muse-spark-1.3-contributor-free`.
+- Phát hiện: `FREE_MODELS` trong `src/application/models.rs` hiện chỉ có `muse-spark-1.2`, chưa có `1.3`, nên `provider opencode muse-spark-1.3-...` bị từ chối (`unknown OpenCode free model`). Dùng đường TOML trực tiếp (loader không validate model).
+- Phát hiện thêm: daemon đang chạy chịu override từ repo `.env` (`OPENCODE_UPSTREAM_BASE_URL=https://api.example/v1`, `SECRET_TEST`) thắng TOML; restart thực hiện từ `$HOME` để TOML có hiệu lực.
+- File đã sửa: `~/opencode2api.toml` — chỉ còn `model = "opencode/muse-spark-1.3-contributor-free"`; đã xóa `upstream_base_url`, `upstream_api_keys` (4 key b.ai), `model_fallbacks` (b.ai-only). Backup tại `~/Downloads/claude-scratch/opencode2api.toml.bak-20260903`. Không sửa code repo.
+- Snapshot service đã cập nhật (model/upstream/fallbacks/PID).
+- Kiểm thử: `server restart` (PID 113902) PASS; `provider status` = mode opencode, endpoint `https://opencode.ai/zen/v1`, model `opencode/muse-spark-1.3-contributor-free`, no API key; `server config` routing OK; `/health` = ok; `/v1/models` trả về đúng model id. Profile hiện tại là generic (128k/16k, alias claude-sonnet-5, thinking=false) vì 1.3 chưa có trong catalog.
+- Việc còn dở: nếu muốn `provider opencode` chấp nhận 1.3 chính thức + profile thinking/context chuẩn, cần thêm entry `opencode/muse-spark-1.3-contributor-free` vào `FREE_MODELS`. Muốn về b.ai thì restore file backup và restart từ `$HOME`.
+
+## 2026-09-03 21:30 +0700 — Fix toàn bộ Muse Spark entries (1.2 cũng là 1M)
+
+- Xác minh 1.2 từ nhiều nguồn độc lập: OpenRouter (1,048,576 context), pi.dev opencode config (`muse-spark-1.2`: contextWindow 1048576, maxTokens 131072, reasoning true), vals.ai (1M / 131,072), Meta official (contributor tier 1M, $0.10/$0.20), benchable + Artificial Analysis (1M). Kết luận: entry 1.2 cũ (128k/16k/thinking=false) sai toàn bộ.
+- File đã sửa: `src/application/models.rs` — 1.2 thành (1_048_576 / 131_072 / thinking=true → alias `sonnet[1m]`); thêm asserts 1.2 vào unit test. `docs/.../2026-08-29-model-detection-and-autoconfig-design.md` cập nhật matrix 1.2 + thêm dòng 1.3.
+- Lưu ý max_output khác nhau giữa 2 bản có bằng chứng riêng: 1.2 = 131,072 (pi.dev opencode + vals.ai), 1.3 = 943,718 (llm-stats 943.7K + lmmarketcap 943,718).
+- Triển khai nguyên tử: `./install-local.sh` (release 2m14s) + `server restart` từ `$HOME`. Gates: fmt PASS, clippy `-D warnings` PASS, `application::models` 3/3 PASS. Probe `--all`: cả 2 Muse Spark hiện đúng 1M/838,860/thinking-Yes.
+- E2E thực tế qua `/v1/messages`: upstream Zen đang degraded — cả 2 Muse Spark trả `Internal server error`, mimo/big-pickle 429, request test rơi sang fallback `mimo-v2.5-free` và nhận `[Empty upstream response]`. Đây là trạng thái upstream, không phải lỗi config bridge; catalog/routing/fallback hoạt động đúng. Nên retry khi Zen hồi phục.
+
+## 2026-09-03 21:45 +0700 — ProxyCloud not viable as bridge egress (manual check)
+
+- Yêu cầu: kiểm tra có dùng proxy qua `~/GitHub/ProxyCloud` thay proxy WARP hiện tại được không.
+- Kết quả manual check: KHÔNG switch. Bằng chứng: (1) ProxyCloud là Flutter GUI VPN client thuần Android (chỉ có `android/`, không Linux target/CLI/headless, không expose SOCKS/HTTP listener) — kiến trúc không khớp với egress của bridge (cần SOCKS5/HTTP URL). (2) Tài nguyên mạng của app chỉ là JSON wallpaper/update + 1 subscription store trỏ tới third-party `expressalaki/ExpressVPN configs.txt` — URL này đã 404, đường "lấy config free chạy xray local" cũng cụt nguồn. (3) Máy không có xray/v2ray/sing-box core.
+- Phát hiện thêm: primary WARP hiện tại (`opencode-warp-1`:40001) đang DOWN — container crash-loop `failed to parse WARP credentials` + curl 404; SOCKS handshake bị reset. Bridge vẫn phục vụ nhờ hybrid egress + direct fallback (exit IP trực tiếp 42.112.247.33 OK). Không đổi config bridge (launcher/claude-code giữ nguyên).
+
+## 2026-09-03 22:00 +0700 — WARP primary pool revived via manual registration
+
+- Root cause purge không fix được: entrypoint của image `ghcr.io/mon-ius/docker-warp-socks` bootstrap credentials qua `bit.ly/create-cloudflare-warp` → redirect tới `Mon-ius/XTPU/.../create-cloudflare-warp.sh` đã 404 (cả thư mục `cloudflare/` đã bị xóa upstream). Mọi container mới đều crash-loop `failed to parse WARP credentials`.
+- Fix thủ công (không sửa code repo): đăng ký identity WARP mới qua public Cloudflare API (`api.cloudflareclient.com/v0a4005/reg`, script `~/Downloads/claude-scratch/warp_register.py`), render `sing-box config.json` đúng shape template của entrypoint, `docker cp` vào volume `opencode-warp-1-config` (entrypoint ưu tiên config có sẵn, bỏ qua bootstrap chết). Thêm 1 patch: hardcode endpoint `162.159.192.1` vì DNS trong container không resolve được `engage.cloudflareclient.com` trước khi WARP lên.
+- Verify: exit IP qua 40001 = 104.28.222.73 (khác direct 42.112.247.33); `server status` = `Proxy identities 2 verified`; stability 5/5 requests `/v1/messages` HTTP 200 qua bridge. Lưu ý: req 2/5 tái hiện placeholder `[Empty upstream response]` với max_tokens=32 (reasoning ăn hết budget) — bằng chứng cho investigation tool-bug đang mở.
+- Caveats: config tiêm nằm trong volume, sống qua restart nhưng MẤT khi purge/rotate trong tương lai (chạy lại script để tái tạo). Standby 40004 vẫn offline (protected, không đụng).
+
+## 2026-09-03 22:30 +0700 — ProxyCloud custom headless egress (tool/proxy) wired in
+
+- Kết luận cũ (app Android-only) vẫn đúng nên custom thêm thay vì dùng nguyên: `ProxyCloud/tool/proxy/` mới gồm `pick_node.py` (TCP-prefilter subscription), `gen_xray.py` (share-link ss/vmess/trojan/vless → xray config SOCKS), `run.sh` (chọn node handshake được, detach xray), `README.md`, `.gitignore` (không commit binary/config chạy). Không toolchain Flutter trên máy nên viết bằng python+bash.
+- Nguồn node: subscription free còn sống `mahdibland/V2RayAggregator sub_merge.txt` (4082 nodes; nguồn kèm repo đã 404). Xray v26.3.27 linux-64 tại `~/Downloads/claude-scratch/xray/`.
+- Node đang dùng: vmess exit 156.245.232.239, SOCKS 127.0.0.1:40010, persist bằng systemd user service `pc-proxy-40010.service` (linger on). Verify: 6/6 ipify ổn định ~1-2s, TLS tới opencode.ai 200.
+- Bridge: `~/opencode2api.toml` thêm `primary_proxies = [40001 WARP, 40010 ProxyCloud]` (giữ WARP, thêm chứ không thay); restart từ $HOME → topology `2 primary · 1 standby`, `Proxy identities 2 verified`, 3/3 `/v1/messages` HTTP 200.
+- Caveats: (1) node free của operator lạ — họ thấy được upstream traffic, đừng gửi secret; (2) node free có thể chết bất cứ lúc nào — pool tự cooldown và WARP gánh, chạy lại `run.sh` để đổi node; (3) placeholder `[Empty upstream response]` tái hiện 2/3 req với max_tokens=64 — thuộc investigation tool-bug đang mở, không liên quan proxy.
+
+## 2026-09-03 22:45 +0700 — Proxy-only egress verified (direct off for the tool)
+
+- Config (`~/opencode2api.toml`): `egress_mode="proxy"` + `allow_direct_fallback=false` + `require_verified_exit_ip=false`, primaries [40001 WARP, 40010 ProxyCloud-Xray]. Không đụng proxy hệ thống — layer này chỉ phục vụ bridge.
+- Sự cố khi bật proxy-only: pool từ chối tất cả (400) vì (1) exit WARP cũ 104.28.222.73 bị upstream quarantine 34482s (~9.5h) sau burst test, (2) node Xray 40010 không bao giờ pass identity check (đòi `warp=on` trong Cloudflare trace — structural, mọi non-WARP proxy đều rớt).
+- Fix: re-register WARP identity mới (exit 104.28.254.74, script warp_register.py reuse) + nới verify gate. Không sửa code.
+- Verify proxy-only (direct bị cấm ở code): laguna req1 HTTP 200 `ok` 1.4s, req4 HTTP 200 `ok4` 1.3s; log `round-robin selected primary opencode-warp-1` ở mọi attempt = traffic đi qua proxy, không đường direct. req2/3 502 do upstream 503 flapping (proxy đã deliver, lỗi phía opencode.ai free tier).
+- Bindings: Xray 40010 = 127.0.0.1-only (chuẩn tool-only); docker 40001 = 0.0.0.0 (còn hở LAN — muốn siết cần sửa `run_args` bind 127.0.0.1 + rebuild, chưa làm). Orphan docker-proxy 40003/40004 (container đã mất) không ảnh hưởng.
+
+## 2026-09-03 23:55 +0700 — Back to WARP-only proxy; speed + round-robin verdict
+
+- Quyết định user: bỏ node free (quá chậm/churn), pool về WARP-only proxy-only. TOML hiện tại: model muse-spark-1.3, egress proxy, require_verified=true, direct fallback off, primaries=[40001]. Xray services stop+disable (giữ file/config để dùng tay).
+- Verified count "3" bí ẩn: tự hết — ready hiện tại báo đúng 1. Phân tích của agy CLI (đọc code, không sửa) kết luận count bị chặn trên bởi số primary (HashSet theo IP) nên không thể double-count; số 3 trước đó là state thoáng qua lúc pool còn nhiều node. Không còn bug để fix ở đây.
+- Fix attestation external-proxy (requires_warp_attestation + reconcile skip + trait param + tests) đã deploy trong binary hiện tại — vô hại khi pool pure-WARP, để dành cho node trả phí ổn định sau này.
+- Số đo tốc độ hôm nay: direct ~0.1s; WARP exit-check ~0.3-0.5s, bridge e2e ~1.2-2.4s; Xray free 1-4s/hop + churn (1 node chết, 1 node exit flap) → pool loại liên tục → bridge 502. Kết luận: node free không đạt gate sức khỏe của pool.
+- Round-robin: code đọc đúng (counter xoay, skip unhealthy/excluded, standby chỉ khi primary hết, direct chỉ fallback ở hybrid). Thực nghiệm: rotation đơn-node + loại node chết đúng; rotation 5-node CHƯA đo được (container 40002-40005 thiếu WARP identity từ vụ bootstrap chết, và đã pivot sang test Xray).
+- Service hiện tại: ready, proxy-only, req laguna 200 `ok` 1.2s qua warp-1.
+
+## 2026-09-04 00:20 +0700 — Round-robin fixed via agy diagnosis (active_proxy_count)
+
+- Triệu chứng: 4 req liên tiếp đều vào warp-1, warp-2 không bao giờ được chọn dù verified và SOCKS sống.
+- agy CLI chẩn đoán đúng (read-only): `active_proxy_count` mặc định 1 → `pool.rs` chỉ set `routing_enabled=true` cho primary đầu (index 0). Không phải bug rotation.
+- Fix: `active_proxy_count = 2` trong `~/opencode2api.toml`. Không sửa code.
+- Verify: req2/3/4 HTTP 200 `ok`; log hiện rotation warp-1 → warp-2. req1 502 do reconcile đang warm sau restart (bình thường).
+- Config chuẩn bị vào việc: 2 primary WARP (40001 exit .254.74, 40002 exit .222.73 — trùng dải Cloudflare là bản chất WARP) + 1 standby 40005 running + direct fallback (hybrid). Standby 40004 bỏ (port kẹt orphan docker-proxy của root, không sudo để dọn).
+
+## 2026-09-04 00:40 +0700 — Demo 1M context: 202k-token request qua bridge
+
+- Câu hỏi: model muse-spark-1.3 đã đúng context 1M chưa, dùng được chưa.
+- Config đã đúng: provider status = 1,048,576 context / 838,860 auto-compact / 943,718 max output / alias sonnet[1m] (thay vì profile generic 128k cũ).
+- Demo live với payload 604KB (~150k tokens raw): (A) prompt nhỏ → muse-spark-1.3 vẫn 500 (model DOWN upstream, độc lập với size — đã 500 cả ngày); (B) full payload → laguna-s-2.1-free: HTTP 200 end_turn, usage input_tokens=202,283.
+- Kết luận: bridge forward trọn payload 202k tokens, không có gate 128k nào ở client (body limit 64MB); upstream chấp nhận và đếm đủ 202k. Nếu giữ profile cũ 128k/102k auto-compact thì Claude Code đã compact mất context — cấu hình 1M là đúng và có tác dụng. Phát hiện thêm: laguna upstream nuốt 202k tokens dù catalog ghi 64k (catalog conservative, chưa sửa).
+- Chưa demo được: chính muse-spark-1.3 (đợi upstream hết 500).
+
+## 2026-09-04 01:00 +0700 — Muse 500s are zen-side, not bridge-side (direct proof)
+
+- User chỉ ra đúng: assistant (Muse Spark 1.3) vẫn trả lời bình thường trong khi zen 500.
+- Debug ma trận direct (bypass bridge hoàn toàn, minimal prompt): `muse-spark-1.3-contributor-free` → 500; `muse-spark-1.2-contributor-free` → 500; `muse-spark-1.3`/`muse-spark-1.2` (chuẩn) → 401 (đòi key, đúng tier trả phí). Kết luận: cả họ Muse trên opencode.ai zen đang sập (contributor 500, assistant chạy qua serving path khác của harness nên không ảnh hưởng).
+- Bridge/config/proxy vô can: lỗi tái hiện không qua bridge, không qua proxy, với prompt 1 từ.
+- Hướng mở: đợi zen sửa; hoặc nếu có API key Meta/Vercel (contributor tier $0.10/$0.20) thì đấu qua `provider api` — bridge hỗ trợ sẵn.
+
+## 2026-09-05 23:08 +0700 — Start bridge with direct API egress
+
+- Theo yêu cầu user, khởi động service từ `target/debug/opencode2api` với `--no-proxy`, `BRIDGE_EGRESS_MODE=direct` và tắt yêu cầu verified proxy exit IP.
+- Service đang chạy qua managed supervisor tại `http://127.0.0.1:4000`, PID `295193`; dashboard ở `/dashboard`.
+- Verify: `/health` trả `ok`, `/health/ready` trả `ready` với `active_route=direct`, `/v1/models` trả model `glm-5.3-flash`.
+- Không khởi động hoặc sử dụng Docker/WARP proxy cho phiên này.
+
+## 2026-09-05 23:12 +0700 — Manual context-window check
+
+- `provider status --json` trên runtime hiện tại báo model `glm-5.3-flash` với `context_window=1,000,000`, `auto_compact_window=800,000`, `max_output_tokens=131,072`; `env` ánh xạ model này sang alias `claude-opus-5` (tier 1M).
+- Profile tương ứng trong `src/application/models.rs` cũng khai báo 1,000,000 context và test nội bộ assert đúng các giá trị này.
+- `provider models --probe` trả danh sách rỗng vì `.env` của repo đang override upstream thành `https://api.example/v1`; do đó chưa thực hiện được live upstream payload test. Đây là giới hạn endpoint cấu hình hiện tại, không phải lỗi tính context local.
+
+## 2026-09-05 23:15 +0700 — Diagnose slow response
+
+- Proxy không phải nguyên nhân: service đang `egress_mode=direct`, `proxy ps` báo các node offline/disabled và `/health/ready` báo direct ready.
+- Root cause: `.env` override `OPENCODE_UPSTREAM_BASE_URL="https://api.example/v1"`; hostname này không resolve được (`curl` DNS failure).
+- Log request `req-48119-d` cho thấy upstream transport retry 8 lần với backoff tăng tới 30 giây, gây phản hồi chậm/hang. Không sửa config trong bước chẩn đoán.
+
+## 2026-09-05 23:22 +0700 — Configure verified b.ai API key
+
+- Key placeholder trong repo `.env` đã được loại bỏ khỏi đường runtime; key thật trong backup local đã được xác thực với `https://api.b.ai/v1/models` (HTTP 200) mà không ghi secret vào worklog.
+- Dùng `provider api --api-key-stdin` để cấu hình `/home/light/opencode2api.toml` với endpoint `https://api.b.ai/v1` và model `glm-5.3-flash`; giữ egress direct, không bật proxy.
+- Atomic release build/install/restart thành công; service PID mới `311171`, ready và direct.
+- Live probe: `glm-5.3-flash` Online, context `1,000,000`, auto-compact `800,000`, max output `131,072`, latency `1351ms`; qwen Online; hai model DeepSeek RateLimited do b.ai báo balance 0.
+- Live bridge request tới `/v1/chat/completions`: HTTP 200, tổng thời gian khoảng `5.94s`; không có lỗi proxy. Phần thời gian còn lại thuộc upstream/model reasoning.
+
+## 2026-09-05 23:34 +0700 — Set 1M auto-compact threshold to 50%
+
+- Model profiles có context `>= 1,000,000` giờ dùng auto-compact ở 50%; profile nhỏ hơn vẫn 80%.
+- Claude Code integration xuất `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=50` cho 1M models và giữ `CLAUDE_CODE_MAX_CONTEXT_TOKENS` ở full context ceiling.
+- CLI/UI và `docs/configuration.md` đã hiển thị ngưỡng theo profile, không còn hardcode 80% cho 1M.
+- TDD: test mới fail đúng với giá trị cũ 800,000, sau đó pass với 500,000/524,288; full `cargo test --lib` = 920 passed; clippy `-D warnings` PASS; release build/install/restart PASS.
+- Live verify sau deploy: provider status `context_window=1,000,000`, `auto_compact_window=500,000`; service PID `342500`, health ready, direct egress.

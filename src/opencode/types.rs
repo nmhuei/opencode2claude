@@ -97,10 +97,32 @@ pub struct OpenAiFunction {
 
 #[derive(Debug, Deserialize)]
 pub struct OpenAiResponse {
+    #[serde(default)]
     pub id: String,
+    #[serde(default)]
     pub model: String,
     pub choices: Vec<OpenAiChoice>,
     pub usage: Option<OpenAiUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum OpenAiResponseEnvelope {
+    Wrapped {
+        data: OpenAiResponse,
+        #[serde(default)]
+        success: Option<bool>,
+    },
+    Direct(OpenAiResponse),
+}
+
+impl OpenAiResponseEnvelope {
+    pub fn into_response(self) -> OpenAiResponse {
+        match self {
+            Self::Wrapped { data, .. } => data,
+            Self::Direct(resp) => resp,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -378,6 +400,58 @@ mod golden_tests {
                 .as_ref()
                 .and_then(|function| function.arguments.as_deref()),
             None
+        );
+    }
+
+    #[test]
+    fn test_openai_response_envelope_parses_direct_and_wrapped() {
+        let direct_json = r#"{
+            "id": "chatcmpl-123",
+            "model": "gpt-4o",
+            "choices": [{
+                "message": {"content": "hello direct", "role": "assistant"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+        }"#;
+        let direct: OpenAiResponse = serde_json::from_str::<OpenAiResponseEnvelope>(direct_json)
+            .unwrap()
+            .into_response();
+        assert_eq!(direct.id, "chatcmpl-123");
+        assert_eq!(direct.model, "gpt-4o");
+        assert_eq!(
+            direct.choices[0].message.content.as_deref(),
+            Some("hello direct")
+        );
+
+        let wrapped_json = r#"{
+            "data": {
+                "id": "gen-cline-456",
+                "model": "z-ai/glm-5.3-flash",
+                "choices": [{
+                    "message": {
+                        "content": "hello wrapped",
+                        "reasoning": "thought process",
+                        "role": "assistant"
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 8}
+            },
+            "success": true
+        }"#;
+        let wrapped: OpenAiResponse = serde_json::from_str::<OpenAiResponseEnvelope>(wrapped_json)
+            .unwrap()
+            .into_response();
+        assert_eq!(wrapped.id, "gen-cline-456");
+        assert_eq!(wrapped.model, "z-ai/glm-5.3-flash");
+        assert_eq!(
+            wrapped.choices[0].message.content.as_deref(),
+            Some("hello wrapped")
+        );
+        assert_eq!(
+            wrapped.choices[0].message.reasoning_content.as_deref(),
+            Some("thought process")
         );
     }
 }

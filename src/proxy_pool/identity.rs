@@ -44,15 +44,16 @@ pub async fn refresh_exit_identities(pool: Arc<RwLock<ProxyPool>>, endpoints: &[
         pool.proxies
             .iter()
             .enumerate()
-            .map(|(index, node)| (index, node.id.clone(), node.client.clone()))
+            .map(|(index, node)| (index, node.id.clone(), node.port, node.client.clone()))
             .collect::<Vec<_>>()
     };
 
     let results = join_all(
         probes
             .into_iter()
-            .map(|(index, node_id, client)| async move {
-                let result = probe_exit_identity(&client, endpoints).await;
+            .map(|(index, node_id, port, client)| async move {
+                let result =
+                    probe_exit_identity(&client, endpoints, requires_warp_attestation(port)).await;
                 (index, node_id, result)
             }),
     )
@@ -65,6 +66,7 @@ pub async fn refresh_exit_identities(pool: Arc<RwLock<ProxyPool>>, endpoints: &[
 pub async fn probe_exit_identity(
     client: &reqwest::Client,
     endpoints: &[String],
+    require_warp: bool,
 ) -> Result<ExitIdentity, String> {
     if endpoints.is_empty() {
         return Err("no identity endpoints configured".to_string());
@@ -122,7 +124,10 @@ pub async fn probe_exit_identity(
     let warp_signals_present = matching
         .iter()
         .any(|observation| observation.warp.is_some());
-    if warp_signals_present
+    // Docker-pool nodes must prove they egress via WARP. External proxies
+    // have no WARP signal to give, so a stable exit IP is sufficient.
+    if require_warp
+        && warp_signals_present
         && !matching
             .iter()
             .any(|observation| observation.warp == Some(true))
@@ -406,9 +411,16 @@ impl ProxyPool {
     }
 
     pub fn verified_unique_exit_count(&self) -> usize {
+        let now = Instant::now();
         self.proxies
             .iter()
-            .filter(|node| node.exit_identity.is_some() && node.duplicate_of.is_none())
+            .filter(|node| {
+                node.role == EgressRole::Primary
+                    && node.health != HealthState::Unhealthy
+                    && !node.circuit.is_open(now)
+                    && node.exit_identity.is_some()
+                    && node.duplicate_of.is_none()
+            })
             .filter_map(|node| {
                 node.exit_identity
                     .as_ref()
@@ -419,9 +431,15 @@ impl ProxyPool {
     }
 
     pub fn verified_unique_exit_count_fresh(&self, ttl: Duration) -> usize {
+        let now = Instant::now();
         self.proxies
             .iter()
-            .filter(|node| node.duplicate_of.is_none())
+            .filter(|node| {
+                node.role == EgressRole::Primary
+                    && node.health != HealthState::Unhealthy
+                    && !node.circuit.is_open(now)
+                    && node.duplicate_of.is_none()
+            })
             .filter_map(|node| node.exit_identity.as_ref())
             .filter(|identity| identity.is_fresh(ttl))
             .map(|identity| &identity.public_ip)
@@ -793,17 +811,73 @@ mod tests {
             server("ip=1.1.1.1\ncolo=SIN\nwarp=on\n").await,
             server(r#"{"ip":"1.1.1.1"}"#).await,
         ];
-        let identity = probe_exit_identity(&reqwest::Client::new(), &endpoints)
+        let identity = probe_exit_identity(&reqwest::Client::new(), &endpoints, true)
             .await
             .expect("consensus");
         assert_eq!(identity.public_ip, "1.1.1.1");
         assert_eq!(identity.provider.as_deref(), Some("cloudflare-warp"));
+    }
+
+    #[tokio::test]
+    async fn external_proxy_accepts_stable_exit_without_warp_signal() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        async fn server(body: &'static str) -> String {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0_u8; 1024];
+                let _ = socket.read(&mut request).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            });
+            format!("http://{address}")
+        }
+
+        // Docker-pool (WARP) nodes keep the strict gate: warp=off is rejected.
+        let strict_endpoints = vec![
+            server("ip=9.9.9.9\ncolo=XYZ\nwarp=off\n").await,
+            server(r#"{"ip":"9.9.9.9"}"#).await,
+        ];
+        assert!(
+            probe_exit_identity(&reqwest::Client::new(), &strict_endpoints, true)
+                .await
+                .is_err()
+        );
+
+        // External (non-docker) proxies verify by stable-exit consensus instead.
+        let external_endpoints = vec![
+            server("ip=9.9.9.9\ncolo=XYZ\nwarp=off\n").await,
+            server(r#"{"ip":"9.9.9.9"}"#).await,
+        ];
+        let identity = probe_exit_identity(&reqwest::Client::new(), &external_endpoints, false)
+            .await
+            .expect("external consensus");
+        assert_eq!(identity.public_ip, "9.9.9.9");
     }
 }
 
 #[cfg(test)]
 mod freshness_tests {
     use super::*;
+
+    fn identity(ip: &str) -> ExitIdentity {
+        ExitIdentity {
+            public_ip: ip.to_string(),
+            provider: Some("cloudflare-warp".to_string()),
+            colo: Some("SIN".to_string()),
+            verified_at_unix_secs: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        }
+    }
 
     #[test]
     fn stale_identity_is_not_ready_or_routable_in_strict_mode() {
@@ -829,5 +903,46 @@ mod freshness_tests {
         );
         assert!(!pool.egress_ready(1, Duration::from_secs(30)));
         assert!(pool.select_proxy_for_key("stale-session").is_none());
+    }
+
+    #[test]
+    fn pool_with_two_verified_primaries_counts_exactly_two() {
+        let mut pool = ProxyPool::new(&[
+            "socks5://127.0.0.1:40010".to_string(),
+            "socks5://127.0.0.1:40012".to_string(),
+            "socks5://127.0.0.1:40004".to_string(),
+        ]);
+        pool.proxies[0].exit_identity = Some(identity("198.51.100.10"));
+        pool.proxies[1].exit_identity = Some(identity("198.51.100.12"));
+        // 40004 is an offline warm-standby whose circuit is open and has an exit identity
+        pool.proxies[2].exit_identity = Some(identity("198.51.100.4"));
+        pool.proxies[2].health = HealthState::Unhealthy;
+        pool.proxies[2].circuit = CircuitState::Open {
+            until: Instant::now() + Duration::from_secs(120),
+        };
+        pool.suppress_duplicate_exits();
+
+        assert_eq!(pool.proxies[0].role, EgressRole::Primary);
+        assert_eq!(pool.proxies[1].role, EgressRole::Primary);
+        assert_eq!(pool.proxies[2].role, EgressRole::WarmStandby);
+        assert_eq!(pool.verified_unique_exit_count(), 2);
+        assert_eq!(
+            pool.verified_unique_exit_count_fresh(Duration::from_secs(300)),
+            2
+        );
+
+        // Even with standalone 2 primaries without standby, count is exactly 2.
+        let mut two_node_pool = ProxyPool::new(&[
+            "socks5://127.0.0.1:40010".to_string(),
+            "socks5://127.0.0.1:40012".to_string(),
+        ]);
+        two_node_pool.proxies[0].exit_identity = Some(identity("198.51.100.10"));
+        two_node_pool.proxies[1].exit_identity = Some(identity("198.51.100.12"));
+        two_node_pool.suppress_duplicate_exits();
+        assert_eq!(two_node_pool.verified_unique_exit_count(), 2);
+        assert_eq!(
+            two_node_pool.verified_unique_exit_count_fresh(Duration::from_secs(300)),
+            2
+        );
     }
 }

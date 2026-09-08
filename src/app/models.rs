@@ -1,5 +1,6 @@
 use crate::application::models::{
-    model_default_output_tokens, model_pricing, resolve_model_profile,
+    auto_compact_percent_for_context, model_default_output_tokens, model_pricing,
+    resolve_model_profile,
 };
 use crate::application::prober::{
     all_models_rejected_for_auth, check_upstream_health, fetch_and_probe_models, ModelStatus,
@@ -7,7 +8,8 @@ use crate::application::prober::{
 };
 use crate::cli::{
     ListArgs, ModelArgs, ModelSetArgs, ModelSubcommand, ProviderApiArgs, ProviderArgs,
-    ProviderOpenCodeArgs, ProviderSubcommand, UpstreamArgs, UpstreamSetArgs, UpstreamSubcommand,
+    ProviderClineArgs, ProviderOpenCodeArgs, ProviderSubcommand, UpstreamArgs, UpstreamSetArgs,
+    UpstreamSubcommand,
 };
 use crate::config::{BridgeConfig, CliOverrides};
 use crate::infrastructure::file_store::{AtomicFileStore, FileStore};
@@ -330,7 +332,10 @@ pub async fn cmd_list(args: ListArgs, fmt: OutputFormat) {
     } else {
         let cached = read_model_probe_cache(&cache_path, upstream_url);
         cache_hit = cached.is_some();
-        (cached.unwrap_or_default(), None)
+        let models = cached.unwrap_or_else(|| {
+            crate::application::prober::catalog_models_without_network(upstream_url)
+        });
+        (models, None)
     };
 
     let active_model = config.model.as_deref().unwrap_or("opencode/mimo-v2.5-free");
@@ -406,7 +411,7 @@ pub async fn cmd_list(args: ListArgs, fmt: OutputFormat) {
                     "MODEL ID",
                     "PROVIDER",
                     "CONTEXT",
-                    "AUTO-COMPACT (80%)",
+                    "AUTO-COMPACT",
                     "MAX OUT",
                     "THINKING",
                 ];
@@ -657,7 +662,12 @@ fn cmd_model_set(args: ModelSetArgs, fmt: OutputFormat) {
             );
             println!(
                 "  Auto-Compact Window: {} ({} tokens)",
-                "80%".yellow().bold(),
+                format!(
+                    "{}%",
+                    auto_compact_percent_for_context(profile.context_window)
+                )
+                .yellow()
+                .bold(),
                 format_number(profile.auto_compact_window())
             );
             println!(
@@ -710,7 +720,12 @@ fn cmd_model_status(fmt: OutputFormat) {
             );
             println!(
                 "  Auto-Compact Window: {} ({} tokens)",
-                "80%".yellow().bold(),
+                format!(
+                    "{}%",
+                    auto_compact_percent_for_context(profile.context_window)
+                )
+                .yellow()
+                .bold(),
                 format_number(profile.auto_compact_window())
             );
             println!(
@@ -736,6 +751,7 @@ fn cmd_model_status(fmt: OutputFormat) {
 pub async fn cmd_provider(args: ProviderArgs, fmt: OutputFormat) {
     match args.command {
         Some(ProviderSubcommand::Opencode(args)) => cmd_provider_opencode(args, fmt).await,
+        Some(ProviderSubcommand::Cline(args)) => cmd_provider_cline(args, fmt).await,
         Some(ProviderSubcommand::Api(args)) => cmd_provider_api(args, fmt).await,
         Some(ProviderSubcommand::Models(args)) => cmd_list(args, fmt).await,
         None | Some(ProviderSubcommand::Status) => cmd_provider_status(fmt).await,
@@ -794,6 +810,47 @@ async fn cmd_provider_opencode(args: ProviderOpenCodeArgs, fmt: OutputFormat) {
         "opencode",
         "https://opencode.ai/zen/v1",
         false,
+        &model,
+        &config_path,
+    );
+}
+
+async fn cmd_provider_cline(args: ProviderClineArgs, fmt: OutputFormat) {
+    ensure_provider_env_is_persistable(fmt);
+    let model = crate::application::cline::normalize_cline_model(&args.model);
+    if model.is_empty() {
+        exit_cli_error(fmt, "Cline model id must not be empty");
+    }
+
+    let token = if args.api_key_stdin {
+        read_api_key_from_stdin(true, fmt).unwrap()
+    } else {
+        match crate::application::cline::find_cline_token() {
+            Ok(key) => key,
+            Err(error) => exit_cli_error(
+                fmt,
+                format!("{error}\nTip: Run 'cline' to authenticate, or pass '--api-key-stdin'"),
+            ),
+        }
+    };
+
+    let upstream_url = crate::application::cline::CLINE_BASE_URL;
+    let config_path = resolved_config_path(args.config);
+
+    if let Err(error) = apply_provider_configuration(
+        &config_path,
+        Some(upstream_url),
+        Some(&token),
+        &model,
+    ) {
+        exit_cli_error(fmt, error);
+    }
+
+    render_provider_changed(
+        fmt,
+        "cline",
+        upstream_url,
+        true,
         &model,
         &config_path,
     );
@@ -871,7 +928,8 @@ fn render_provider_changed(
                 format_number(profile.context_window)
             );
             println!(
-                "  Auto-Compact (80%):  {} tokens",
+                "  Auto-Compact ({}%):  {} tokens",
+                auto_compact_percent_for_context(profile.context_window),
                 format_number(profile.auto_compact_window())
             );
             println!(
@@ -897,12 +955,21 @@ fn render_provider_changed(
 async fn cmd_provider_status(fmt: OutputFormat) {
     let config = BridgeConfig::from_env_and_cli(CliOverrides::default());
     let upstream_url = config.retry.upstream_base_url.as_str();
-    let mode = if crate::application::prober::is_opencode_upstream(upstream_url) {
+    let is_opencode = crate::application::prober::is_opencode_upstream(upstream_url);
+    let is_cline = crate::application::prober::is_cline_upstream(upstream_url);
+    let mode = if is_opencode {
         "opencode"
+    } else if is_cline {
+        "cline"
     } else {
         "api"
     };
-    let model = config.model.as_deref().unwrap_or("opencode/mimo-v2.5-free");
+    let default_model = if is_cline {
+        "z-ai/glm-5.3-flash"
+    } else {
+        "opencode/mimo-v2.5-free"
+    };
+    let model = config.model.as_deref().unwrap_or(default_model);
     let profile = resolve_model_profile(model);
     let api_key_set = config.retry.upstream_api_key.is_some();
 
@@ -932,7 +999,8 @@ async fn cmd_provider_status(fmt: OutputFormat) {
                 format_number(profile.context_window)
             );
             println!(
-                "  Auto-Compact (80%):  {} tokens",
+                "  Auto-Compact ({}%):  {} tokens",
+                auto_compact_percent_for_context(profile.context_window),
                 format_number(profile.auto_compact_window())
             );
             println!(

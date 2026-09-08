@@ -4,8 +4,6 @@ use super::integration::IntegrationEnvironment;
 use serde::Serialize;
 use std::str::FromStr;
 
-const CLAUDE_CODE_COMPAT_MODEL: &str = "claude-opus-5";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientConfigFormat {
     Env,
@@ -103,14 +101,35 @@ fn dotenv(environment: &IntegrationEnvironment, api_key: &str, model: &str) -> S
 }
 
 fn claude_code(environment: &IntegrationEnvironment, api_key: &str, model: &str) -> String {
+    let profile = super::models::resolve_model_profile(model);
+    let mut env = serde_json::Map::from_iter([
+        (
+            "ANTHROPIC_API_KEY".to_string(),
+            serde_json::Value::String(api_key.to_string()),
+        ),
+        (
+            "ANTHROPIC_BASE_URL".to_string(),
+            serde_json::Value::String(environment.anthropic_base_url.clone()),
+        ),
+        (
+            "OPENCODE_MODEL".to_string(),
+            serde_json::Value::String(model.to_string()),
+        ),
+        (
+            "ANTHROPIC_MODEL".to_string(),
+            serde_json::Value::String(
+                super::integration::client_model_alias_for_profile(&profile).to_string(),
+            ),
+        ),
+    ]);
+    for (key, value) in super::integration::model_claude_code_vars(&profile) {
+        env.insert(key.to_string(), serde_json::Value::String(value));
+    }
+
     serde_json::to_string_pretty(&serde_json::json!({
         "$schema": "https://json.schemastore.org/claude-code-settings.json",
-        "env": {
-            "ANTHROPIC_API_KEY": api_key,
-            "ANTHROPIC_BASE_URL": environment.anthropic_base_url,
-            "OPENCODE_MODEL": model
-        },
-        "model": CLAUDE_CODE_COMPAT_MODEL,
+        "env": env,
+        "model": super::integration::client_model_alias_for_profile(&profile),
         "ultracode": true,
         "alwaysThinkingEnabled": true
     }))
@@ -201,7 +220,14 @@ mod tests {
             parsed["$schema"],
             "https://json.schemastore.org/claude-code-settings.json"
         );
-        assert_eq!(parsed["model"], "claude-opus-5");
+        assert_eq!(parsed["model"], "sonnet[1m]");
+        assert_eq!(parsed["env"]["ANTHROPIC_MODEL"], "sonnet[1m]");
+        assert_eq!(parsed["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "1000000");
+        assert_eq!(parsed["env"]["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"], "50");
+        assert!(parsed["env"].get("ANTHROPIC_AUTH_TOKEN").is_none());
+        assert!(parsed["env"]
+            .get("CLAUDE_CODE_AUTO_COMPACT_WINDOW")
+            .is_none());
         assert_eq!(parsed["ultracode"], true);
     }
 

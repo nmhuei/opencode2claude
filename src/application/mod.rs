@@ -1,5 +1,6 @@
 //! Shared application services used by both CLI and HTTP transports.
 
+pub mod cline;
 pub mod client_config;
 pub mod completion;
 pub mod integration;

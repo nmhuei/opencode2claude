@@ -85,6 +85,7 @@ mod verification_tests {
             &self,
             _client: &reqwest::Client,
             _endpoints: &[String],
+            _require_warp: bool,
             _timeout: Duration,
         ) -> Result<ExitIdentity, String> {
             self.identity_calls.fetch_add(1, Ordering::Relaxed);
@@ -128,6 +129,7 @@ mod verification_tests {
             &test_client(),
             &endpoints(),
             "https://upstream.invalid/v1",
+            true,
             Duration::from_millis(50),
         )
         .await;
@@ -143,6 +145,7 @@ mod verification_tests {
             &test_client(),
             &endpoints(),
             "https://upstream.invalid/v1",
+            true,
             Duration::from_millis(50),
         )
         .await;
@@ -159,6 +162,7 @@ mod verification_tests {
             &test_client(),
             &endpoints(),
             "https://upstream.invalid/v1",
+            true,
             Duration::from_millis(50),
         )
         .await;
@@ -175,6 +179,7 @@ mod verification_tests {
             &test_client(),
             &endpoints(),
             "https://upstream.invalid/v1",
+            true,
             Duration::from_millis(10),
         )
         .await;
@@ -191,6 +196,7 @@ mod verification_tests {
             &test_client(),
             &endpoints(),
             "https://upstream.invalid/v1",
+            true,
             Duration::from_millis(50),
         )
         .await
@@ -302,6 +308,7 @@ mod reconciler_tests {
             &self,
             _client: &reqwest::Client,
             _endpoints: &[String],
+            _require_warp: bool,
             _timeout: Duration,
         ) -> Result<ExitIdentity, String> {
             Ok(ExitIdentity {
@@ -540,6 +547,7 @@ mod reconciler_tests {
             &self,
             _client: &reqwest::Client,
             _endpoints: &[String],
+            _require_warp: bool,
             _timeout: Duration,
         ) -> Result<ExitIdentity, String> {
             let sequence = self.identity_calls.fetch_add(1, Ordering::SeqCst);

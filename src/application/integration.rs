@@ -4,9 +4,8 @@ use crate::config::BridgeConfig;
 use serde::Serialize;
 
 pub const OX_ALPHA_MODEL: &str = "opencode/x-preview-f-free";
-pub const OX_ALPHA_CLAUDE_MODEL: &str = "claude-opus-5";
+pub const OX_ALPHA_CLAUDE_MODEL: &str = "sonnet[1m]";
 pub const OX_ALPHA_MAX_OUTPUT_TOKENS: &str = "128000";
-pub const OX_ALPHA_AUTO_COMPACT_WINDOW: &str = "450000";
 pub const OX_ALPHA_MAX_THINKING_TOKENS: &str = "120000";
 
 #[derive(Debug, Clone, Serialize)]
@@ -55,7 +54,7 @@ pub fn process_environment(config: &BridgeConfig) -> Vec<(String, Option<String>
         ("ANTHROPIC_AUTH_TOKEN".to_string(), None),
         (
             "ANTHROPIC_MODEL".to_string(),
-            Some(profile.anthropic_alias.to_string()),
+            Some(client_model_alias_for_profile(&profile).to_string()),
         ),
         ("OPENCODE_MODEL".to_string(), Some(effective_model.clone())),
     ];
@@ -63,6 +62,11 @@ pub fn process_environment(config: &BridgeConfig) -> Vec<(String, Option<String>
     for (k, v) in model_claude_code_vars(&profile) {
         vars.push((k.to_string(), Some(v)));
     }
+
+    // This legacy override has higher precedence than the 1M model window in
+    // Claude Code. Remove it explicitly so a stale shell export cannot make
+    // `/context` report the compaction threshold as the context ceiling.
+    vars.push(("CLAUDE_CODE_AUTO_COMPACT_WINDOW".to_string(), None));
 
     vars
 }
@@ -90,15 +94,28 @@ pub fn environment(config: &BridgeConfig) -> IntegrationEnvironment {
         anthropic_base_url: base.clone(),
         openai_base_url: format!("{base}/v1"),
         api_key: key,
-        model: Some(profile.anthropic_alias.to_string()),
+        model: Some(client_model_alias_for_profile(&profile).to_string()),
         shell_exports,
+    }
+}
+
+/// Claude Code 2.1+ only enables the extended context contract when the
+/// client model uses the `[1m]` suffix. An upstream model ID remains in
+/// `OPENCODE_MODEL`; this value is only the compatibility identity sent to
+/// Claude Code and displayed by `/context`.
+pub fn client_model_alias_for_profile(
+    profile: &crate::application::models::ModelProfile,
+) -> &'static str {
+    if profile.context_window >= 1_000_000 {
+        OX_ALPHA_CLAUDE_MODEL
+    } else {
+        profile.anthropic_alias
     }
 }
 
 pub fn model_claude_code_vars(
     profile: &crate::application::models::ModelProfile,
 ) -> Vec<(&'static str, String)> {
-    let auto_compact = profile.auto_compact_window().to_string();
     let max_output = profile.max_output_tokens.to_string();
     let disable_1m = if profile.context_window >= 1_000_000 {
         "0"
@@ -115,6 +132,9 @@ pub fn model_claude_code_vars(
         .saturating_sub(1024)
         .min(120_000)
         .to_string();
+    let auto_compact_percent =
+        crate::application::models::auto_compact_percent_for_context(profile.context_window)
+            .to_string();
 
     vec![
         ("CLAUDE_CODE_DISABLE_1M_CONTEXT", disable_1m.to_string()),
@@ -123,7 +143,9 @@ pub fn model_claude_code_vars(
             profile.context_window.to_string(),
         ),
         ("CLAUDE_CODE_MAX_OUTPUT_TOKENS", max_output),
-        ("CLAUDE_CODE_AUTO_COMPACT_WINDOW", auto_compact),
+        // Keep the full model window visible to `/context`; Claude Code uses
+        // this percentage as the compaction trigger independently.
+        ("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", auto_compact_percent),
         ("CLAUDE_CODE_DISABLE_THINKING", disable_thinking.to_string()),
         (
             "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING",
@@ -136,10 +158,13 @@ pub fn model_claude_code_vars(
 
 pub fn ox_alpha_claude_code_exports() -> Vec<String> {
     let profile = crate::application::models::resolve_model_profile(OX_ALPHA_MODEL);
-    std::iter::once(("ANTHROPIC_MODEL", profile.anthropic_alias.to_string()))
-        .chain(model_claude_code_vars(&profile))
-        .map(|(key, value)| format!("export {key}={}", shell_quote(&value)))
-        .collect()
+    std::iter::once((
+        "ANTHROPIC_MODEL",
+        client_model_alias_for_profile(&profile).to_string(),
+    ))
+    .chain(model_claude_code_vars(&profile))
+    .map(|(key, value)| format!("export {key}={}", shell_quote(&value)))
+    .collect()
 }
 
 fn shell_quote(value: &str) -> String {
@@ -172,7 +197,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_environment_exports_80_percent_autocompact_window() {
+    fn dynamic_environment_exports_model_specific_autocompact_window() {
         let config_mimo = BridgeConfig {
             model: Some("opencode/mimo-v2.5-free".to_string()),
             ..Default::default()
@@ -183,7 +208,10 @@ mod tests {
             .any(|line| line == "export ANTHROPIC_MODEL='claude-sonnet-5'"));
         assert!(exports
             .iter()
-            .any(|line| line == "export CLAUDE_CODE_AUTO_COMPACT_WINDOW='204800'"));
+            .any(|line| line == "export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE='80'"));
+        assert!(exports
+            .iter()
+            .any(|line| line == "unset CLAUDE_CODE_AUTO_COMPACT_WINDOW"));
         assert!(
             exports
                 .iter()
@@ -207,7 +235,7 @@ mod tests {
         let exports_nemotron = environment(&config_nemotron).shell_exports;
         assert!(exports_nemotron
             .iter()
-            .any(|line| line == "export CLAUDE_CODE_AUTO_COMPACT_WINDOW='102400'"));
+            .any(|line| line == "export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE='80'"));
 
         let million = BridgeConfig {
             model: Some("opencode/x-preview-f-free".to_string()),
@@ -219,7 +247,7 @@ mod tests {
             .any(|line| line == "export CLAUDE_CODE_MAX_CONTEXT_TOKENS='1000000'"));
         assert!(exports_million
             .iter()
-            .any(|line| line == "export CLAUDE_CODE_AUTO_COMPACT_WINDOW='800000'"));
+            .any(|line| line == "export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE='50'"));
         assert!(exports_million
             .iter()
             .all(|line| line != "export DISABLE_COMPACT='1'"));
@@ -234,7 +262,7 @@ mod tests {
             .any(|line| line == "export CLAUDE_CODE_MAX_CONTEXT_TOKENS='1000000'"));
         assert!(deepseek_exports
             .iter()
-            .any(|line| line == "export CLAUDE_CODE_AUTO_COMPACT_WINDOW='800000'"));
+            .any(|line| line == "export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE='50'"));
         assert!(deepseek_exports
             .iter()
             .any(|line| line == "export CLAUDE_CODE_MAX_OUTPUT_TOKENS='384000'"));
@@ -249,12 +277,34 @@ mod tests {
             .any(|line| line == "export CLAUDE_CODE_MAX_CONTEXT_TOKENS='1000000'"));
         assert!(glm_exports
             .iter()
-            .any(|line| line == "export CLAUDE_CODE_AUTO_COMPACT_WINDOW='800000'"));
+            .any(|line| line == "export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE='50'"));
         assert!(glm_exports
             .iter()
             .any(|line| line == "export CLAUDE_CODE_MAX_OUTPUT_TOKENS='131072'"));
         assert!(glm_exports
             .iter()
-            .any(|line| line == "export ANTHROPIC_MODEL='claude-opus-5'"));
+            .any(|line| line == "export ANTHROPIC_MODEL='sonnet[1m]'"));
+    }
+
+    #[test]
+    fn one_million_context_keeps_context_ceiling_at_one_million() {
+        let config = BridgeConfig {
+            model: Some("deepseek-v4-flash".to_string()),
+            ..Default::default()
+        };
+        let exports = environment(&config).shell_exports;
+
+        assert!(exports
+            .iter()
+            .any(|line| line == "export CLAUDE_CODE_MAX_CONTEXT_TOKENS='1000000'"));
+        assert!(exports
+            .iter()
+            .any(|line| line == "export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE='50'"));
+        assert!(
+            exports
+                .iter()
+                .all(|line| !line.starts_with("export CLAUDE_CODE_AUTO_COMPACT_WINDOW=")),
+            "the auto-compact threshold must not replace the 1M context ceiling"
+        );
     }
 }

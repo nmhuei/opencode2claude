@@ -87,7 +87,7 @@
 
 **Interfaces:**
 - Resolves effective model: if configured model is invalid or unset, uses detected working free model (e.g. `mimo-v2.5-free`).
-- Injects dynamic environment variables: `ANTHROPIC_MODEL`, `CLAUDE_CODE_AUTO_COMPACT_WINDOW` (80%), `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `CLAUDE_CODE_DISABLE_1M_CONTEXT`, `CLAUDE_CODE_DISABLE_THINKING`.
+- Injects dynamic environment variables: `ANTHROPIC_MODEL`, `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=80`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `CLAUDE_CODE_DISABLE_1M_CONTEXT`, `CLAUDE_CODE_DISABLE_THINKING`; removes the legacy `CLAUDE_CODE_AUTO_COMPACT_WINDOW` override.
 
 - [ ] **Step 1: Write test for dynamic launcher environment generation**
 - [ ] **Step 2: Update `launch_claude_code` in `src/app/mod.rs`**
