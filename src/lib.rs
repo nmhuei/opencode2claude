@@ -30,6 +30,7 @@ pub mod pidfile;
 pub mod presentation;
 pub mod proxy_pool;
 pub mod rest_api;
+pub mod router;
 pub mod runtime;
 pub mod server;
 pub mod shell;
