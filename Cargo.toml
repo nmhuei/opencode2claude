@@ -46,6 +46,7 @@ bytes = "1.10"
 memchr = "2.8"
 regex = "1.11"
 rusqlite = { version = "0.32", features = ["bundled"] }
+base64 = "0.22"
 
 # Raw syscall wrappers (pidfd_open/pidfd_send_signal/kill) for the process
 # boundary. Already present transitively via tokio/console/dirs, so this adds
