@@ -191,12 +191,26 @@ async fn execute_retryable_request<T: RetryableOpenAiRequest>(
     request: &T,
 ) -> Result<LeasedResponse, BridgeError> {
     let max_retries = state.config.retry.max_network_attempts as u32;
-    let models = build_model_retry_list(
-        request.model(),
-        request.stream(),
-        &state.config.retry,
-        crate::opencode::mapper::uses_opencode_model_aliases(&state.config.retry.upstream_base_url),
-    );
+    let combo_models = state.combo_resolver.resolve(request.model());
+    let models: Vec<String> = if combo_models.len() > 1 {
+        combo_models
+            .into_iter()
+            .map(|t| {
+                if t.provider.is_empty() {
+                    t.model
+                } else {
+                    format!("{}/{}", t.provider, t.model)
+                }
+            })
+            .collect()
+    } else {
+        build_model_retry_list(
+            request.model(),
+            request.stream(),
+            &state.config.retry,
+            crate::opencode::mapper::uses_opencode_model_aliases(&state.config.retry.upstream_base_url),
+        )
+    };
     let upstream_url = format!(
         "{}/chat/completions",
         state.config.retry.upstream_base_url.trim_end_matches('/')
@@ -216,6 +230,7 @@ async fn execute_retryable_request<T: RetryableOpenAiRequest>(
     let mut last_failed_proxy = None;
     let mut retained_rate_limit_route: Option<SelectedRoute> = None;
     let mut compatible_request = request.clone();
+    let mut excluded_accounts: Vec<String> = Vec::new();
     let upstream_key_start = (!state.config.retry.upstream_api_keys.is_empty()).then(|| {
         state
             .upstream_key_index
@@ -223,16 +238,43 @@ async fn execute_retryable_request<T: RetryableOpenAiRequest>(
     });
 
     loop {
-        let current_model = models
+        let current_model_raw = models
             .get(model_index)
             .cloned()
             .unwrap_or_else(|| request.model().to_string());
+
+        // Parse provider prefix if any (e.g. "cline/z-ai/glm-5.3-flash")
+        let (model_provider_override, current_model) = if let Some((prov, m)) = current_model_raw.split_once('/') {
+            if state.provider_registry.get(prov).is_some() || prov == "cline" || prov == "opencode" {
+                (Some(prov.to_string()), m.to_string())
+            } else {
+                (None, current_model_raw.clone())
+            }
+        } else {
+            (None, current_model_raw.clone())
+        };
 
         // Model identifiers returned by an OpenAI-compatible provider belong
         // to that provider. Forward them exactly; provider-specific alias
         // resolution happens before this retry layer.
         let mut attempt_request = compatible_request.clone();
         attempt_request.set_model(current_model.clone());
+
+        let effective_provider = if let Some(ref p) = model_provider_override {
+            p.clone()
+        } else if crate::application::prober::is_cline_upstream(&state.config.retry.upstream_base_url) {
+            "cline".to_string()
+        } else if crate::application::prober::is_opencode_upstream(&state.config.retry.upstream_base_url) {
+            "opencode".to_string()
+        } else {
+            "default".to_string()
+        };
+
+        let effective_upstream_url = if let Some(desc) = state.provider_registry.get(&effective_provider) {
+            format!("{}/chat/completions", desc.default_base_url.trim_end_matches('/'))
+        } else {
+            upstream_url.clone()
+        };
 
         let retrying_same_rate_limited_route = retained_rate_limit_route.is_some();
         let mut route = select_route_for_attempt(
@@ -243,10 +285,23 @@ async fn execute_retryable_request<T: RetryableOpenAiRequest>(
         )
         .await?;
 
-        let keys = &state.config.retry.upstream_api_keys;
-        let attempt_api_key = if !keys.is_empty() {
-            let idx = (upstream_key_start.unwrap_or_default() + key_attempts) % keys.len();
-            Some(keys[idx].expose())
+        // Multi-account selection from account pool
+        let selected_account = {
+            let pool = state.account_pool.read().await;
+            pool.select_account(&effective_provider, &current_model, &excluded_accounts)
+        };
+
+        let current_account_id = selected_account.as_ref().map(|a| a.id.clone());
+        let account_token = selected_account.as_ref().and_then(|a| {
+            a.api_key.as_deref().or(a.access_token.as_deref())
+        });
+
+        let fallback_keys = &state.config.retry.upstream_api_keys;
+        let attempt_api_key = if let Some(tok) = account_token {
+            Some(tok)
+        } else if !fallback_keys.is_empty() {
+            let idx = (upstream_key_start.unwrap_or_default() + key_attempts) % fallback_keys.len();
+            Some(fallback_keys[idx].expose())
         } else {
             state
                 .config
@@ -257,7 +312,7 @@ async fn execute_retryable_request<T: RetryableOpenAiRequest>(
         };
 
         let result =
-            prepare_upstream_request(&route, &upstream_url, &attempt_request, attempt_api_key)
+            prepare_upstream_request(&route, &effective_upstream_url, &attempt_request, attempt_api_key)
                 .send()
                 .await;
 
@@ -269,7 +324,62 @@ async fn execute_retryable_request<T: RetryableOpenAiRequest>(
                     clear_rate_limit_penalty_after_success(state, &route).await;
                 }
 
+                if status == StatusCode::UNAUTHORIZED {
+                    if let Some(ref acc_id) = current_account_id {
+                        warn!(
+                            account = %acc_id,
+                            provider = %effective_provider,
+                            "account unauthorized (401); rotating to next account in pool"
+                        );
+                        excluded_accounts.push(acc_id.clone());
+                        let has_next = {
+                            let pool = state.account_pool.read().await;
+                            pool.select_account(&effective_provider, &current_model, &excluded_accounts).is_some()
+                        };
+                        if has_next {
+                            retained_rate_limit_route = Some(route);
+                            tokio::time::sleep(Duration::from_millis(KEY_ROTATION_BACKOFF_MS)).await;
+                            continue;
+                        }
+                    }
+                }
+
                 if classify_status(status, None) == FailureClass::RateLimit {
+                    if let Some(ref acc_id) = current_account_id {
+                        let retry_after = response
+                            .headers()
+                            .get("retry-after")
+                            .and_then(|value| value.to_str().ok())
+                            .and_then(|value| {
+                                parse_retry_after(value, std::time::SystemTime::now())
+                            })
+                            .map(clamp_provider_retry_after);
+                        let cooldown = retry_after.unwrap_or_else(|| Duration::from_secs(60));
+
+                        // Lock this model on this account
+                        {
+                            let pool = state.account_pool.read().await;
+                            pool.lock_tracker().lock_model(acc_id, &current_model, cooldown);
+                        }
+                        excluded_accounts.push(acc_id.clone());
+
+                        // Check if another account in pool can take over
+                        let has_next = {
+                            let pool = state.account_pool.read().await;
+                            pool.select_account(&effective_provider, &current_model, &excluded_accounts).is_some()
+                        };
+                        if has_next {
+                            warn!(
+                                account = %acc_id,
+                                model = %current_model,
+                                "rate limited (429); locked model for account and failing over to next account"
+                            );
+                            retained_rate_limit_route = Some(route);
+                            tokio::time::sleep(Duration::from_millis(KEY_ROTATION_BACKOFF_MS)).await;
+                            continue;
+                        }
+                    }
+
                     let key_count = state.config.retry.upstream_api_keys.len();
                     if key_count > 1 && key_attempts + 1 < key_count {
                         key_attempts += 1;
@@ -291,6 +401,7 @@ async fn execute_retryable_request<T: RetryableOpenAiRequest>(
                     ) {
                         retry_count = 0;
                         last_failed_proxy = None;
+                        excluded_accounts.clear();
                         continue;
                     }
 
@@ -341,6 +452,7 @@ async fn execute_retryable_request<T: RetryableOpenAiRequest>(
                     ) {
                         retry_count = 0;
                         last_failed_proxy = None;
+                        excluded_accounts.clear();
                         continue;
                     }
 
@@ -364,6 +476,30 @@ async fn execute_retryable_request<T: RetryableOpenAiRequest>(
                             body = %body_text.chars().take(200).collect::<String>(),
                             "upstream encoded a rate limit as HTTP 400"
                         );
+
+                        if let Some(ref acc_id) = current_account_id {
+                            let cooldown = Duration::from_secs(60);
+                            {
+                                let pool = state.account_pool.read().await;
+                                pool.lock_tracker().lock_model(acc_id, &current_model, cooldown);
+                            }
+                            excluded_accounts.push(acc_id.clone());
+                            let has_next = {
+                                let pool = state.account_pool.read().await;
+                                pool.select_account(&effective_provider, &current_model, &excluded_accounts).is_some()
+                            };
+                            if has_next {
+                                warn!(
+                                    account = %acc_id,
+                                    model = %current_model,
+                                    "HTTP 400 rate limit; locked model for account and failing over to next account"
+                                );
+                                retained_rate_limit_route = Some(route);
+                                tokio::time::sleep(Duration::from_millis(KEY_ROTATION_BACKOFF_MS)).await;
+                                continue;
+                            }
+                        }
+
                         // A body-encoded rate limit is still a credential quota
                         // signal: rotate to the next configured key before the
                         // model-fallback / retry budget is consumed.
@@ -386,6 +522,7 @@ async fn execute_retryable_request<T: RetryableOpenAiRequest>(
                         ) {
                             retry_count = 0;
                             last_failed_proxy = None;
+                            excluded_accounts.clear();
                             continue;
                         }
 
@@ -440,6 +577,7 @@ async fn execute_retryable_request<T: RetryableOpenAiRequest>(
                     ) {
                         retry_count = 0;
                         last_failed_proxy = None;
+                        excluded_accounts.clear();
                         continue;
                     }
 
@@ -486,6 +624,7 @@ async fn execute_retryable_request<T: RetryableOpenAiRequest>(
                     ) {
                         retry_count = 0;
                         last_failed_proxy = None;
+                        excluded_accounts.clear();
                         continue;
                     }
                     return Err(BridgeError::UpstreamError(format!(

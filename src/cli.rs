@@ -531,6 +531,18 @@ pub enum ProviderSubcommand {
 
     /// Show active provider mode, endpoint, credential state, and model.
     Status,
+
+    /// List configured accounts, priorities, and active per-model locks.
+    Accounts(ProviderAccountsArgs),
+
+    /// Add an account or token for a provider.
+    AddAccount(ProviderAddAccountArgs),
+
+    /// Remove an account by ID.
+    RemoveAccount(ProviderRemoveAccountArgs),
+
+    /// Log in to a provider via OAuth in browser (e.g. Cline).
+    Login(ProviderLoginArgs),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -574,6 +586,42 @@ pub struct ProviderApiArgs {
     /// Config file to update; defaults to the resolved active config
     #[arg(short, long)]
     pub config: Option<String>,
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct ProviderAccountsArgs {
+    /// Optional provider filter (e.g. cline, opencode, deepseek)
+    pub provider: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ProviderAddAccountArgs {
+    /// Provider id (e.g. cline, deepseek, openai)
+    pub provider: String,
+    /// API key or bearer access token
+    pub token: String,
+    /// Account label/name
+    #[arg(long)]
+    pub name: Option<String>,
+    /// Priority (lower = higher priority, default: 1)
+    #[arg(long, default_value_t = 1)]
+    pub priority: u32,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ProviderRemoveAccountArgs {
+    /// Account ID to remove
+    pub id: String,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ProviderLoginArgs {
+    /// Provider to log in with (currently: cline)
+    #[arg(default_value = "cline")]
+    pub provider: String,
+    /// Callback server port (defaults to 20128)
+    #[arg(long, default_value_t = 20128)]
+    pub port: u16,
 }
 
 /// List available models.

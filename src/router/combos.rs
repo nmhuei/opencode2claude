@@ -52,7 +52,7 @@ impl ComboResolver {
         }
     }
 
-    pub fn register_combo(&mut self, combo: ModelCombo) {
+    pub fn register_combo(&self, combo: ModelCombo) {
         let mut map = self.combos.lock().unwrap();
         map.insert(combo.name.clone(), combo);
     }

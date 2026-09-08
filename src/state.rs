@@ -64,6 +64,12 @@ pub struct AppState {
     pub started_at: Arc<AtomicU64>,
     /// Shared atomic round-robin index for upstream API keys.
     pub upstream_key_index: Arc<std::sync::atomic::AtomicUsize>,
+    /// Router account pool with multi-account per-model lock support.
+    pub account_pool: Arc<RwLock<crate::router::accounts::AccountPool>>,
+    /// Model combo resolver for smart fallback chains.
+    pub combo_resolver: Arc<crate::router::combos::ComboResolver>,
+    /// Provider registry holding endpoints and protocol descriptors.
+    pub provider_registry: Arc<crate::router::registry::ProviderRegistry>,
 }
 
 /// Upper bound on the TCP/TLS connect phase of the shared HTTP client.
@@ -298,6 +304,9 @@ impl AppState {
             event_tx,
             started_at,
             upstream_key_index: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            account_pool: Arc::new(RwLock::new(crate::router::accounts::AccountPool::load_or_init())),
+            combo_resolver: Arc::new(crate::router::combos::ComboResolver::new()),
+            provider_registry: Arc::new(crate::router::registry::ProviderRegistry::default()),
         }
     }
 }

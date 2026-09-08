@@ -7,9 +7,9 @@ use crate::application::prober::{
     ProbedModel,
 };
 use crate::cli::{
-    ListArgs, ModelArgs, ModelSetArgs, ModelSubcommand, ProviderApiArgs, ProviderArgs,
-    ProviderClineArgs, ProviderOpenCodeArgs, ProviderSubcommand, UpstreamArgs, UpstreamSetArgs,
-    UpstreamSubcommand,
+    ListArgs, ModelArgs, ModelSetArgs, ModelSubcommand, ProviderAccountsArgs, ProviderAddAccountArgs,
+    ProviderApiArgs, ProviderArgs, ProviderClineArgs, ProviderLoginArgs, ProviderOpenCodeArgs,
+    ProviderRemoveAccountArgs, ProviderSubcommand, UpstreamArgs, UpstreamSetArgs, UpstreamSubcommand,
 };
 use crate::config::{BridgeConfig, CliOverrides};
 use crate::infrastructure::file_store::{AtomicFileStore, FileStore};
@@ -755,6 +755,232 @@ pub async fn cmd_provider(args: ProviderArgs, fmt: OutputFormat) {
         Some(ProviderSubcommand::Api(args)) => cmd_provider_api(args, fmt).await,
         Some(ProviderSubcommand::Models(args)) => cmd_list(args, fmt).await,
         None | Some(ProviderSubcommand::Status) => cmd_provider_status(fmt).await,
+        Some(ProviderSubcommand::Accounts(args)) => cmd_provider_accounts(args, fmt).await,
+        Some(ProviderSubcommand::AddAccount(args)) => cmd_provider_add_account(args, fmt).await,
+        Some(ProviderSubcommand::RemoveAccount(args)) => cmd_provider_remove_account(args, fmt).await,
+        Some(ProviderSubcommand::Login(args)) => cmd_provider_login(args, fmt).await,
+    }
+}
+
+async fn cmd_provider_accounts(args: ProviderAccountsArgs, fmt: OutputFormat) {
+    let pool = crate::router::accounts::AccountPool::load_or_init();
+    let accounts: Vec<&crate::router::accounts::Account> = pool
+        .get_accounts()
+        .iter()
+        .filter(|a| {
+            if let Some(ref filter) = args.provider {
+                a.provider.eq_ignore_ascii_case(filter)
+            } else {
+                true
+            }
+        })
+        .collect();
+
+    match fmt {
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&accounts).unwrap_or_default()
+            );
+        }
+        OutputFormat::Human => {
+            if accounts.is_empty() {
+                eprintln!("{}", "No accounts configured.".yellow());
+                eprintln!(
+                    "Tip: Add an account with 'opencode2api provider add-account <PROVIDER> <TOKEN>', or 'opencode2api provider login cline'"
+                );
+                return;
+            }
+
+            let mut table = Table::new();
+            table.load_preset(NOTHING);
+            table.set_content_arrangement(ContentArrangement::Dynamic);
+            table.set_header(vec![
+                CtCell::new("ID").fg(CtColor::Cyan),
+                CtCell::new("NAME").fg(CtColor::Cyan),
+                CtCell::new("PROVIDER").fg(CtColor::Cyan),
+                CtCell::new("PRIORITY").fg(CtColor::Cyan),
+                CtCell::new("STATUS").fg(CtColor::Cyan),
+                CtCell::new("AUTH TYPE").fg(CtColor::Cyan),
+            ]);
+
+            for acc in accounts {
+                let status_cell = if acc.is_active {
+                    CtCell::new("ACTIVE").fg(CtColor::Green)
+                } else {
+                    CtCell::new("DISABLED").fg(CtColor::DarkGrey)
+                };
+
+                let auth_type = if acc.access_token.is_some() && acc.refresh_token.is_some() {
+                    "OAuth (Refreshable)"
+                } else if acc.access_token.is_some() {
+                    "OAuth Token"
+                } else if acc.api_key.is_some() {
+                    "API Key"
+                } else {
+                    "No Auth / Local"
+                };
+
+                table.add_row(vec![
+                    CtCell::new(&acc.id),
+                    CtCell::new(&acc.name),
+                    CtCell::new(&acc.provider),
+                    CtCell::new(acc.priority.to_string()),
+                    status_cell,
+                    CtCell::new(auth_type),
+                ]);
+            }
+
+            println!("{table}");
+        }
+        OutputFormat::Quiet => {
+            for acc in accounts {
+                println!(
+                    "{}\t{}\t{}",
+                    acc.id,
+                    acc.provider,
+                    if acc.is_active { "active" } else { "disabled" }
+                );
+            }
+        }
+    }
+}
+
+async fn cmd_provider_add_account(args: ProviderAddAccountArgs, fmt: OutputFormat) {
+    let mut pool = crate::router::accounts::AccountPool::load_or_init();
+    let short_id = crate::infrastructure::random::secure_random_hex(4).unwrap_or_else(|_| "00000000".to_string());
+    let id = format!("{}-{}", args.provider.to_lowercase(), short_id);
+    let name = args
+        .name
+        .unwrap_or_else(|| format!("{} Account ({})", args.provider, &id));
+
+    let account = crate::router::accounts::Account {
+        id: id.clone(),
+        name,
+        provider: args.provider.to_lowercase(),
+        api_key: Some(args.token.clone()),
+        access_token: Some(args.token),
+        refresh_token: None,
+        email: None,
+        expires_at: None,
+        priority: args.priority,
+        is_active: true,
+    };
+
+    pool.add_account(account);
+    let path = crate::router::accounts::AccountPool::default_storage_path();
+    if let Err(e) = pool.save_to_file(&path) {
+        exit_cli_error(fmt, format!("Failed to save account: {e}"));
+    }
+
+    match fmt {
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "status": "success",
+                    "account_id": id,
+                    "provider": args.provider,
+                    "priority": args.priority
+                })
+            );
+        }
+        OutputFormat::Human => {
+            println!(
+                "{} Added account '{}' for provider '{}' (priority: {}).",
+                "✓".green().bold(),
+                id.cyan(),
+                args.provider.cyan(),
+                args.priority
+            );
+            println!("  Saved to: {}", path.display());
+        }
+        OutputFormat::Quiet => {
+            println!("{id}");
+        }
+    }
+}
+
+async fn cmd_provider_remove_account(args: ProviderRemoveAccountArgs, fmt: OutputFormat) {
+    let mut pool = crate::router::accounts::AccountPool::load_or_init();
+    let removed = pool.remove_account(&args.id);
+    if !removed {
+        exit_cli_error(fmt, format!("Account '{}' not found.", args.id));
+    }
+
+    let path = crate::router::accounts::AccountPool::default_storage_path();
+    if let Err(e) = pool.save_to_file(&path) {
+        exit_cli_error(fmt, format!("Failed to save accounts: {e}"));
+    }
+
+    match fmt {
+        OutputFormat::Json => println!("{}", serde_json::json!({ "status": "removed", "id": args.id })),
+        OutputFormat::Human => {
+            println!("{} Removed account '{}'.", "✓".green().bold(), args.id.cyan());
+        }
+        OutputFormat::Quiet => {
+            println!("{}", args.id);
+        }
+    }
+}
+
+async fn cmd_provider_login(args: ProviderLoginArgs, fmt: OutputFormat) {
+    if !args.provider.eq_ignore_ascii_case("cline") {
+        exit_cli_error(fmt, "Currently only 'cline' browser OAuth is supported via this command.");
+    }
+
+    let auth_url = crate::router::oauth::build_cline_auth_url(args.port);
+    if fmt == OutputFormat::Human {
+        println!("{}", "══════════════════════════════════════════════════════════════".cyan().dim());
+        println!("  {}", "Cline OAuth Login — Multi-Account Connection".bold());
+        println!("{}", "══════════════════════════════════════════════════════════════".cyan().dim());
+        println!("\n1. Open this URL in your browser to authorize your Cline account:\n");
+        println!("   {}\n", auth_url.cyan().underline());
+        println!("2. Waiting for browser authorization callback on port {}...", args.port);
+    }
+
+    match crate::router::oauth::wait_for_cline_callback(args.port, std::time::Duration::from_secs(120)).await {
+        Ok(tokens) => {
+            let mut pool = crate::router::accounts::AccountPool::load_or_init();
+            let short_id = crate::infrastructure::random::secure_random_hex(4).unwrap_or_else(|_| "00000000".to_string());
+            let id = format!("cline-{}", short_id);
+            let email_label = tokens.email.clone().unwrap_or_else(|| "User".to_string());
+            let name = format!("Cline ({email_label})");
+
+            let account = crate::router::accounts::Account {
+                id: id.clone(),
+                name,
+                provider: "cline".to_string(),
+                api_key: None,
+                access_token: Some(tokens.access_token),
+                refresh_token: tokens.refresh_token,
+                email: tokens.email,
+                expires_at: tokens.expires_at,
+                priority: 1,
+                is_active: true,
+            };
+
+            pool.add_account(account);
+            let path = crate::router::accounts::AccountPool::default_storage_path();
+            if let Err(e) = pool.save_to_file(&path) {
+                exit_cli_error(fmt, format!("Failed to save account: {e}"));
+            }
+
+            match fmt {
+                OutputFormat::Json => println!("{}", serde_json::json!({ "status": "success", "account_id": id })),
+                OutputFormat::Human => {
+                    println!("\n{} Successfully authenticated Cline account '{}'!", "✓".green().bold(), id.cyan());
+                    println!("  Saved to: {}", path.display());
+                    println!("  Tip: You can add more accounts by running this command again!");
+                }
+                OutputFormat::Quiet => {
+                    println!("{id}");
+                }
+            }
+        }
+        Err(e) => {
+            exit_cli_error(fmt, format!("Authentication failed: {e}"));
+        }
     }
 }
 

@@ -2,7 +2,7 @@ use opencode2api::router::combos::{ComboResolver, ComboStrategy, ModelCombo};
 
 #[test]
 fn test_combo_registration_and_fallback_resolution() {
-    let mut resolver = ComboResolver::new();
+    let resolver = ComboResolver::new();
     let combo = ModelCombo {
         name: "dev-combo".to_string(),
         models: vec![
@@ -43,7 +43,7 @@ fn test_single_model_resolution() {
 
 #[test]
 fn test_round_robin_combo_rotation() {
-    let mut resolver = ComboResolver::new();
+    let resolver = ComboResolver::new();
     let combo = ModelCombo {
         name: "rr-combo".to_string(),
         models: vec![

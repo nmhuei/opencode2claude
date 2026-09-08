@@ -106,6 +106,10 @@ impl ProviderRegistry {
         self.providers.get(&id.to_lowercase())
     }
 
+    pub fn get(&self, id: &str) -> Option<&ProviderDescriptor> {
+        self.get_provider(id)
+    }
+
     pub fn list_providers(&self) -> Vec<&ProviderDescriptor> {
         let mut list: Vec<&ProviderDescriptor> = self.providers.values().collect();
         list.sort_by_key(|p| p.id);

@@ -161,4 +161,78 @@ impl AccountPool {
         let mut usage = self.usage_counts.lock().unwrap();
         *usage.entry(account_id.to_string()).or_insert(0) += 1;
     }
+
+    pub fn default_storage_path() -> std::path::PathBuf {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        std::path::PathBuf::from(home)
+            .join(".config")
+            .join("opencode2api")
+            .join("accounts.json")
+    }
+
+    pub fn load_from_file(path: &std::path::Path) -> Result<Self, String> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read accounts file: {e}"))?;
+        let accounts: Vec<Account> = serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse accounts JSON: {e}"))?;
+        let mut pool = Self::new(AccountSelectionStrategy::FillFirst);
+        for acc in accounts {
+            pool.add_account(acc);
+        }
+        Ok(pool)
+    }
+
+    pub fn save_to_file(&self, path: &std::path::Path) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let json = serde_json::to_string_pretty(&self.accounts)
+            .map_err(|e| format!("Failed to serialize accounts: {e}"))?;
+        std::fs::write(path, json).map_err(|e| format!("Failed to write accounts file: {e}"))
+    }
+
+    pub fn load_or_init() -> Self {
+        let path = Self::default_storage_path();
+        if path.exists() {
+            if let Ok(pool) = Self::load_from_file(&path) {
+                return pool;
+            }
+        }
+
+        let mut pool = Self::new(AccountSelectionStrategy::FillFirst);
+
+        // Auto-import cline account if local cline is authenticated
+        if let Ok(token) = crate::application::cline::find_cline_token() {
+            pool.add_account(Account {
+                id: "cline-local".to_string(),
+                name: "Cline Local Account".to_string(),
+                provider: "cline".to_string(),
+                api_key: None,
+                access_token: Some(token),
+                refresh_token: None,
+                email: None,
+                expires_at: None,
+                priority: 1,
+                is_active: true,
+            });
+        }
+
+        // Auto-import OpenCode local server account
+        pool.add_account(Account {
+            id: "opencode-local".to_string(),
+            name: "OpenCode Local Daemon".to_string(),
+            provider: "opencode".to_string(),
+            api_key: None,
+            access_token: None,
+            refresh_token: None,
+            email: None,
+            expires_at: None,
+            priority: 1,
+            is_active: true,
+        });
+
+        // Best-effort save initial imported accounts
+        let _ = pool.save_to_file(&path);
+        pool
+    }
 }
