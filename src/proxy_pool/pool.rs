@@ -74,6 +74,7 @@ impl ProxyPool {
             require_verified_exit_ip,
             identity_ttl,
             max_restart_attempts: 3,
+            round_robin_counter: 0,
         }
     }
 
@@ -101,6 +102,23 @@ impl ProxyPool {
             .filter_map(|node| node.rate_limit_until)
             .filter_map(|until| until.checked_duration_since(now))
             .min()
+    }
+
+    /// True while a managed primary is recovering from an upstream rate limit.
+    ///
+    /// Rate limits observed through WARP are often scoped by provider/account or
+    /// shared exit identity, not by this process' local proxy index. During a
+    /// Claude Code retry burst, continuing to sample the remaining primaries can
+    /// quarantine the entire pool before the recovery worker gets a chance to
+    /// rotate the first node. Gate new routes briefly and surface 429 instead.
+    pub fn rate_limit_recovery_active(&self) -> bool {
+        let now = Instant::now();
+        self.proxies.iter().any(|node| {
+            node.lifecycle == LifecyclePolicy::Managed
+                && node.routing_enabled
+                && node.recovery_cause == Some(RecoveryCause::RateLimit)
+                && node.rate_limit_until.is_some_and(|until| now < until)
+        })
     }
 
     /// True when routing is temporarily blocked by startup/recovery identity

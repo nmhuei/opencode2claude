@@ -29,9 +29,9 @@ No authentication required (always public for monitoring tools).
   "proxy_pool": {
     "policy": "primary-with-warm-standby",
     "primary": {
-      "ports": [40001, 40002, 40003],
-      "total": 3,
-      "healthy": 3,
+      "ports": [40001],
+      "total": 1,
+      "healthy": 1,
       "degraded": 0,
       "cooldown": 0,
       "recovering": 0,
@@ -39,9 +39,9 @@ No authentication required (always public for monitoring tools).
       "protected": false
     },
     "warm_standby": {
-      "ports": [40004, 40005],
-      "total": 2,
-      "healthy": 2,
+      "ports": [40004],
+      "total": 1,
+      "healthy": 1,
       "degraded": 0,
       "cooldown": 0,
       "recovering": 0,
@@ -68,8 +68,8 @@ No authentication required (always public for monitoring tools).
 | Field | Type | Description |
 |-------|------|-------------|
 | `policy` | `string` | Always `primary-with-warm-standby` |
-| `primary` | `ProxyTierStats` | Primary managed proxy pool (40001–40003) |
-| `warm_standby` | `ProxyTierStats` | Warm-Standby protected pool (40004–40005) |
+| `primary` | `ProxyTierStats` | Configured primary managed proxy pool (default: 40001) |
+| `warm_standby` | `ProxyTierStats` | Configured warm-standby protected pool (default: 40004) |
 | `nodes` | `ProxyNodeStats[]` | Per-proxy status array |
 
 #### ProxyTierStats

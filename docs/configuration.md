@@ -59,9 +59,9 @@ Model fallback and transport retry are accounted independently. Provider errors 
 | Environment variable | TOML key | Default | Purpose |
 |---|---|---:|---|
 | `BRIDGE_EGRESS_MODE` | `egress_mode` | `proxy` | `proxy` or `direct`. Proxy mode fails closed. |
-| `BRIDGE_PRIMARY_PROXIES` | `primary_proxies` | ports `40001-40003` | Comma-separated managed primary proxy URLs. Use `socks5h://` for proxy-side DNS. |
-| `BRIDGE_WARM_STANDBY_PROXIES` | `warm_standby_proxies` | ports `40004-40005` | Protected standby proxy URLs. |
-| `BRIDGE_ACTIVE_PROXY_COUNT` | `active_proxy_count` | `3` | Number of primary nodes enabled for normal routing. |
+| `BRIDGE_PRIMARY_PROXIES` | `primary_proxies` | port `40001` | Comma-separated managed primary proxy URLs. Use `socks5h://` for proxy-side DNS. |
+| `BRIDGE_WARM_STANDBY_PROXIES` | `warm_standby_proxies` | port `40004` | Protected standby proxy URLs. |
+| `BRIDGE_ACTIVE_PROXY_COUNT` | `active_proxy_count` | `1` | Number of primary nodes enabled for normal routing. |
 | `BRIDGE_ALLOW_DIRECT_FALLBACK` | `allow_direct_fallback` | `false` | Direct fallback policy. It is rejected when proxy mode is configured. |
 | `BRIDGE_REQUIRE_VERIFIED_EXIT_IP` | `require_verified_exit_ip` | `false` | Requires fresh verified exit identity before routing. |
 | `BRIDGE_MINIMUM_UNIQUE_EXIT_IPS` | `minimum_unique_exit_ips` | `1` | Minimum unique verified public exits required for readiness. |

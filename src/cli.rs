@@ -69,6 +69,14 @@ pub enum Command {
     /// Display environment information for Claude Code
     Env,
 
+    /// Apply session settings through the installed shell integration
+    #[command(subcommand)]
+    Set(SetCommand),
+
+    /// Install or inspect the parent-shell integration hook
+    #[command(subcommand)]
+    Shell(ShellCommand),
+
     /// Generate and optionally persist bridge API keys
     #[command(name = "api-key", subcommand)]
     ApiKey(ApiKeyCommand),
@@ -305,6 +313,63 @@ pub type StatusArgs = StartArgs;
 
 /// Arguments for the `stop` subcommand (legacy).
 pub type StopArgs = StartArgs;
+
+/// Session-setting commands. `set env` is normally intercepted by the shell hook.
+#[derive(Subcommand, Debug, Clone)]
+pub enum SetCommand {
+    /// Load the canonical OpenCode2API client environment into the current shell
+    Env,
+}
+
+/// Shell-integration management commands.
+#[derive(Subcommand, Debug, Clone)]
+pub enum ShellCommand {
+    /// Install or refresh the managed shell hook
+    Install(ShellInstallArgs),
+    /// Remove the managed shell hook
+    Uninstall(ShellInstallArgs),
+    /// Print the managed shell hook without modifying files
+    Hook(ShellHookArgs),
+}
+
+/// Shells supported by the parent-shell integration.
+#[derive(Debug, Clone, Copy, clap::ValueEnum, PartialEq, Eq)]
+pub enum CliIntegrationShell {
+    Auto,
+    Bash,
+    Zsh,
+}
+
+impl std::fmt::Display for CliIntegrationShell {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            Self::Auto => "auto",
+            Self::Bash => "bash",
+            Self::Zsh => "zsh",
+        };
+        write!(f, "{value}")
+    }
+}
+
+/// Arguments for installing or removing the shell hook.
+#[derive(Args, Debug, Clone)]
+pub struct ShellInstallArgs {
+    /// Shell to configure; auto detects from $SHELL
+    #[arg(long, value_enum, default_value_t = CliIntegrationShell::Auto)]
+    pub shell: CliIntegrationShell,
+
+    /// Override the rc file path (primarily for managed/custom setups)
+    #[arg(long)]
+    pub rc: Option<String>,
+}
+
+/// Arguments for printing the shell hook.
+#[derive(Args, Debug, Clone)]
+pub struct ShellHookArgs {
+    /// Shell syntax to print; bash and zsh currently share the same hook
+    #[arg(long, value_enum, default_value_t = CliIntegrationShell::Auto)]
+    pub shell: CliIntegrationShell,
+}
 
 /// Arguments for `completion <shell>`.
 #[derive(Args, Debug)]

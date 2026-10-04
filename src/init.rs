@@ -76,21 +76,18 @@ schema_version = 1
 # ── Proxy Pool (WARP SOCKS5) ──────────────────────────────────────────
 # Egress mode: "direct" or "proxy". Proxy mode fails closed.
 # egress_mode = "proxy"
-# active_proxy_count = 3
+# active_proxy_count = 1
 # allow_direct_fallback = false
 
-# Primary proxies (managed, normal traffic)
+# Primary proxy (managed, normal traffic)
 # primary_proxies = [
 #     "socks5h://127.0.0.1:40001",
-#     "socks5h://127.0.0.1:40002",
-#     "socks5h://127.0.0.1:40003",
 # ]
 
-# Warm-standby proxies (protected failover only). The application never
-# restarts, stops, purges, or recreates these nodes.
+# Warm-standby proxy (protected failover only). The application never
+# restarts, stops, purges, or recreates this node.
 # warm_standby_proxies = [
 #     "socks5h://127.0.0.1:40004",
-#     "socks5h://127.0.0.1:40005",
 # ]
 
 # Exit identity verification policy.

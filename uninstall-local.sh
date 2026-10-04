@@ -46,6 +46,29 @@ for arg in "$@"; do
     esac
 done
 
+HOOK_BEGIN='# >>> opencode2api shell integration >>>'
+HOOK_END='# <<< opencode2api shell integration <<<'
+
+remove_shell_hook_file() {
+    local rc="$1"
+    [ -f "$rc" ] || return 0
+    grep -Fq "$HOOK_BEGIN" "$rc" || return 0
+    if [ "$DRY_RUN" = true ]; then
+        printf '  would remove shell integration from %s\n' "$rc"
+        return 0
+    fi
+
+    local tmp
+    tmp="$(mktemp "${rc}.opencode2api.XXXXXX")"
+    awk -v begin="$HOOK_BEGIN" -v end="$HOOK_END" '
+        $0 == begin { skip = 1; next }
+        $0 == end { skip = 0; next }
+        !skip { print }
+    ' "$rc" > "$tmp"
+    mv "$tmp" "$rc"
+    printf '  removed shell integration from %s\n' "$rc"
+}
+
 BINARIES=(opencode2claude opencode2api oc2api o2a opencode2api-serve)
 
 DIRS=()
@@ -135,6 +158,9 @@ for dir in "${DIRS[@]}"; do
         fi
     done
 done
+
+remove_shell_hook_file "${ZDOTDIR:-$HOME}/.zshrc"
+remove_shell_hook_file "$HOME/.bashrc"
 
 if [ "$DRY_RUN" = true ]; then
     ok "Dry run complete. ${found} matching file(s) found."

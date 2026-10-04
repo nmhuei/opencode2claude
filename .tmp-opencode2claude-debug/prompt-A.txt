@@ -1,0 +1,1 @@
+Use exactly 4 Agent tool calls in parallel. Each Agent must research one independent topic about building a safe study plan for learning web application security. The four topics are: HTTP basics, browser security concepts, authentication concepts, and secure coding concepts. Do not answer directly before the Agent calls finish. After all Agents return, synthesize their findings.

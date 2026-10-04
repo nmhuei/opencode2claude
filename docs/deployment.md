@@ -26,7 +26,7 @@ opencode2api server start --config opencode2api.toml --no-proxy
 
 ### Managed WARP/SOCKS egress
 
-The default topology uses managed primaries on `40001-40003` and protected warm standbys on `40004-40005`. Docker must be available to the bridge user if the application is expected to reconcile managed primaries.
+The default topology uses one managed primary on `40001` and one protected warm standby on `40004`. Larger pools remain configurable. Docker must be available to the bridge user if the application is expected to reconcile managed primaries.
 
 Pin the WARP image by digest in controlled deployments:
 

@@ -38,27 +38,42 @@ fn route_availability_pending_while_required_identity_is_missing() {
 }
 
 #[test]
-fn proxy_pool_mapping_is_sticky() {
+fn proxy_pool_round_robin_distributes_across_primaries() {
     let mut pool = ProxyPool::new(&make_test_urls(3));
     assert_eq!(pool.proxies.len(), 3);
     assert_eq!(pool.active_count, 3);
-    let first = pool.get_client("agent-1").expect("route").2;
-    for _ in 0..100 {
-        assert_eq!(pool.get_client("agent-1").expect("route").2, first);
+    // With 3 healthy primaries, consecutive calls should cycle 0 -> 1 -> 2 -> 0 ...
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..6 {
+        let index = pool.get_client("agent-1").expect("route").2;
+        seen.insert(index);
+        assert_eq!(pool.proxies[index].role, EgressRole::Primary);
     }
-    assert_eq!(pool.proxies[first].role, EgressRole::Primary);
+    // All 3 primaries must have been selected at least once.
+    assert_eq!(seen.len(), 3, "round-robin should use all 3 primaries");
 }
 
 #[test]
-fn stable_hash_has_cross_build_golden_value() {
+fn concurrent_burst_reuses_active_primary_before_advancing_round_robin() {
+    let mut pool = ProxyPool::new(&make_test_urls(3));
+    let first = pool.get_client("claude-burst").expect("first route").2;
+    assert_eq!(first, 0);
+    let _lease = pool.begin_lease(first).expect("active lease");
+
+    let second = pool
+        .get_client("claude-burst")
+        .expect("reuse active route")
+        .2;
     assert_eq!(
-        stable_rendezvous_score("agent-x", "opencode-warp-1"),
-        15_041_632_887_015_498_948
+        second, first,
+        "concurrent Claude Code burst should share the in-flight primary"
     );
-    assert_ne!(
-        stable_rendezvous_score("agent-x", "opencode-warp-1"),
-        stable_rendezvous_score("agent-x", "opencode-warp-2")
-    );
+
+    let retry = pool
+        .get_client_excluding("claude-burst", first)
+        .expect("explicit retry still avoids failed proxy")
+        .2;
+    assert_ne!(retry, first);
 }
 
 #[test]
@@ -84,34 +99,22 @@ fn retry_excludes_failed_proxy_and_prefers_other_primary() {
 }
 
 #[test]
-fn unavailable_sticky_primary_does_not_remap_other_healthy_sessions() {
+fn round_robin_skips_rate_limited_node_and_continues_cycling() {
     let mut pool = five_node_pool();
-    let mut selected = None;
-    for index in 0..200 {
-        let key = format!("session-{index}");
-        let route = pool.select_proxy_for_key(&key).expect("route").2;
-        let other = format!("other-{index}");
-        let other_route = pool.select_proxy_for_key(&other).expect("route").2;
-        if route != other_route {
-            selected = Some((key, route, other, other_route));
-            break;
-        }
+    // Rate-limit node 0 — round-robin should skip it entirely.
+    pool.mark_rate_limited(0, Duration::from_secs(300));
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..10 {
+        let index = pool.select_proxy_for_key("any").expect("route").2;
+        seen.insert(index);
+        assert_ne!(index, 0, "rate-limited node 0 must never be selected");
+        assert_eq!(pool.proxies[index].role, EgressRole::Primary);
     }
-    let (affected_key, affected_primary, healthy_key, healthy_primary) =
-        selected.expect("two distinct primary assignments");
-
-    pool.mark_rate_limited(affected_primary, Duration::from_secs(300));
-    let affected_failover = pool
-        .select_proxy_for_key(&affected_key)
-        .expect("affected failover")
-        .2;
-    assert_ne!(affected_failover, affected_primary);
-    assert_eq!(pool.proxies[affected_failover].role, EgressRole::Primary);
+    // Remaining 2 healthy primaries (index 1 and 2) must both be used.
     assert_eq!(
-        pool.select_proxy_for_key(&healthy_key)
-            .expect("healthy route")
-            .2,
-        healthy_primary
+        seen.len(),
+        2,
+        "round-robin should use both healthy primaries"
     );
 }
 
@@ -141,6 +144,34 @@ fn verified_healthy_standby_is_used_only_after_primaries_are_unavailable() {
 }
 
 #[test]
+fn one_plus_one_standby_keeps_egress_ready_when_primary_is_unhealthy() {
+    let urls = vec![
+        "socks5h://127.0.0.1:40001".to_string(),
+        "socks5h://127.0.0.1:40004".to_string(),
+    ];
+    let mut pool = ProxyPool::new_with_egress_policy(&urls, 1, false, Duration::from_secs(300));
+
+    pool.proxies[0].health = HealthState::Unhealthy;
+    pool.proxies[0].circuit = CircuitState::Open {
+        until: Instant::now() + Duration::from_secs(300),
+    };
+    pool.proxies[1].health = HealthState::Healthy;
+    pool.proxies[1].circuit = CircuitState::Closed;
+    pool.proxies[1].exit_identity = Some(identity("1.1.1.1"));
+
+    let selected = pool
+        .select_proxy_for_key("one-plus-one-failover")
+        .expect("warm standby must remain routable")
+        .2;
+    assert_eq!(selected, 1);
+    assert_eq!(pool.proxies[selected].role, EgressRole::WarmStandby);
+    assert!(
+        pool.egress_ready(1, Duration::from_secs(300)),
+        "readiness must remain true while a verified warm standby is routable"
+    );
+}
+
+#[test]
 fn protected_standby_is_never_normal_route() {
     let mut pool = five_node_pool();
     for key in ["a", "b", "c", "d", "e"] {
@@ -152,15 +183,15 @@ fn protected_standby_is_never_normal_route() {
 #[test]
 fn duplicate_exit_is_excluded_from_routing() {
     let mut pool = ProxyPool::new(&make_test_urls(3));
-    let assigned = pool
-        .rendezvous_assigned_primary("duplicate-session")
-        .expect("assigned primary");
-    pool.proxies[assigned].duplicate_of = Some("opencode-warp-owner".to_string());
-    let selected = pool
-        .select_proxy_for_key("duplicate-session")
-        .expect("alternate primary")
-        .2;
-    assert_ne!(assigned, selected);
+    // Mark node 0 as a duplicate exit — round-robin must skip it.
+    pool.proxies[0].duplicate_of = Some("opencode-warp-owner".to_string());
+    for _ in 0..6 {
+        let selected = pool
+            .select_proxy_for_key("duplicate-session")
+            .expect("alternate primary")
+            .2;
+        assert_ne!(selected, 0, "duplicate node must never be selected");
+    }
 }
 
 #[test]
@@ -215,17 +246,54 @@ fn protected_node_cannot_be_modified_even_without_lease() {
 }
 
 #[test]
-fn mark_rate_limited_opens_circuit() {
+fn provider_rate_limit_does_not_degrade_proxy_transport_health() {
     let mut pool = ProxyPool::new(&make_test_urls(1));
+    pool.proxies[0].health = HealthState::Healthy;
+    pool.proxies[0].circuit = CircuitState::Closed;
+
     pool.mark_rate_limited(0, Duration::from_secs(60));
-    assert_eq!(pool.proxies[0].health, HealthState::Degraded);
-    assert!(matches!(pool.proxies[0].circuit, CircuitState::Open { .. }));
+
+    assert_eq!(
+        pool.proxies[0].health,
+        HealthState::Healthy,
+        "provider cooldown must not be recorded as a proxy transport failure"
+    );
+    assert_eq!(
+        pool.proxies[0].circuit,
+        CircuitState::Closed,
+        "provider cooldown must not open the transport circuit"
+    );
     assert_eq!(
         pool.proxies[0].recovery_cause,
         Some(RecoveryCause::RateLimit)
     );
-    assert_eq!(pool.restart_queue, vec![0]);
-    assert!(pool.select_proxy_for_key("blocked").is_none());
+    assert!(
+        pool.restart_queue.is_empty(),
+        "rate-limit cooldown must not rotate or restart egress identity"
+    );
+    assert!(
+        pool.select_proxy_for_key("blocked").is_none(),
+        "the rate-limited provider route itself must still be excluded"
+    );
+}
+
+#[test]
+fn one_rate_limited_primary_does_not_gate_other_healthy_primaries() {
+    let mut pool = ProxyPool::new(&make_test_urls(3));
+    for node in &mut pool.proxies {
+        node.health = HealthState::Healthy;
+        node.circuit = CircuitState::Closed;
+    }
+
+    pool.mark_rate_limited(0, Duration::from_secs(120));
+
+    let selected = pool
+        .select_proxy_for_key("fresh-claude-request")
+        .expect("healthy non-rate-limited primary should stay routable")
+        .2;
+    assert_ne!(selected, 0);
+    assert_eq!(pool.proxies[selected].health, HealthState::Healthy);
+    assert_eq!(pool.proxies[selected].circuit, CircuitState::Closed);
 }
 
 #[test]
@@ -285,13 +353,23 @@ fn snapshot_exposes_independent_state_dimensions() {
     let stats = pool.snapshot();
     assert_eq!(stats.policy, "primary-with-protected-warm-standby");
     assert_eq!(stats.primary.total, 3);
-    assert_eq!(stats.primary.cooldown, 1);
+    assert_eq!(
+        stats.primary.cooldown, 0,
+        "provider cooldown is tracked separately from transport circuit cooldown"
+    );
     assert_eq!(stats.primary.active_requests, 2);
     assert_eq!(stats.primary.unique_verified_exits, 1);
     assert_eq!(stats.warm_standby.total, 2);
     assert!(stats.warm_standby.protected);
     assert_eq!(stats.nodes[0].health, HealthState::Healthy);
     assert_eq!(stats.nodes[0].circuit, "closed");
+    assert_eq!(stats.nodes[1].health, HealthState::Healthy);
+    assert_eq!(stats.nodes[1].circuit, "closed");
+    assert_eq!(
+        stats.nodes[1].recovery_cause,
+        Some(RecoveryCause::RateLimit)
+    );
+    assert!(stats.nodes[1].cooldown_remaining_secs.is_none());
 }
 
 #[test]

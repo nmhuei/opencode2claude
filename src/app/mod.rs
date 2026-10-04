@@ -47,6 +47,8 @@ pub async fn run_cli() {
         Some(Command::Update(args)) => utility::cmd_update(args, fmt).await,
         Some(Command::Init(args)) => utility::cmd_init(args, fmt).await,
         Some(Command::Env) => utility::cmd_env(fmt),
+        Some(Command::Set(cmd)) => utility::cmd_set(cmd, fmt),
+        Some(Command::Shell(cmd)) => utility::cmd_shell(cmd, fmt),
         Some(Command::ApiKey(cmd)) => utility::cmd_api_key(cmd, fmt),
 
         // Proxy group (unchanged, but uses fmt)

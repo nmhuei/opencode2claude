@@ -10,6 +10,7 @@ TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/opencode2api-cli-e2e.XXXXXX")"
 RUNTIME_DIR="$TEST_ROOT/runtime"
 CONFIG_FILE="$TEST_ROOT/opencode2api.toml"
 INIT_FILE="$TEST_ROOT/generated.toml"
+HOOK_RC="$TEST_ROOT/test-zshrc"
 TEST_PORT="${TEST_PORT:-$(python3 - <<'PY'
 import socket
 s=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1]); s.close()
@@ -143,9 +144,16 @@ assert_failure "invalid shell policy exits non-zero" "$BIN" server start --shell
 assert_json "stopped status JSON" "d.get('status') == 'stopped' or d.get('state') == 'stopped'" "$BIN" --json server status --port "$TEST_PORT"
 assert_json "safe config JSON" "d['bridge_port'] == $TEST_PORT and d['auth_enabled'] is False" "$BIN" --json server config
 assert_json "environment JSON" "isinstance(d, dict)" "$BIN" --json env
+assert_failure "direct set env requires loaded shell hook" "$BIN" set env
+assert_contains "shell hook can be rendered" "opencode2api --quiet env" "$BIN" shell hook --shell zsh
+assert_success "shell hook installs into explicit rc" "$BIN" --quiet shell install --shell zsh --rc "$HOOK_RC"
+if [[ -f "$HOOK_RC" ]] && grep -q '# >>> opencode2api shell integration >>>' "$HOOK_RC"; then pass "shell hook rc contains managed block"; else fail "shell hook rc contains managed block" "missing managed block"; fi
+assert_success "shell hook install is idempotent" "$BIN" --quiet shell install --shell zsh --rc "$HOOK_RC"
+if [[ "$(grep -c '# >>> opencode2api shell integration >>>' "$HOOK_RC")" -eq 1 ]]; then pass "shell hook remains single after reinstall"; else fail "shell hook remains single after reinstall" "duplicate managed block"; fi
 assert_json "doctor JSON" "isinstance(d, dict)" "$BIN" --json doctor
 assert_contains "bash completion generated" "opencode2api" "$BIN" completion bash
 assert_contains "zsh completion generated" "opencode2api" "$BIN" completion zsh
+assert_contains "completion exposes set env" "set" "$BIN" completion zsh
 
 section "Non-destructive proxy commands"
 assert_json "proxy list returns JSON array" "isinstance(d, list)" "$BIN" --json proxy ps

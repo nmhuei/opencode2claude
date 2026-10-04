@@ -36,7 +36,15 @@ pub async fn stop_proxy_containers_with_runtime(
     purge: bool,
 ) -> DockerResult<()> {
     let config = BridgeConfig::from_env_and_cli(Default::default());
-    for port in [40001_u16, 40002, 40003] {
+    stop_proxy_containers_with_runtime_and_config(runtime, &config, purge).await
+}
+
+async fn stop_proxy_containers_with_runtime_and_config(
+    runtime: &dyn ContainerRuntime,
+    config: &BridgeConfig,
+    purge: bool,
+) -> DockerResult<()> {
+    for port in crate::proxy_pool::configured_primary_ports(config) {
         let spec = ProxySpec::new(port, config.runtime.warp_image.clone())?;
         let result = if purge {
             runtime.remove_managed(&spec).await
@@ -109,28 +117,31 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn bulk_stop_never_targets_protected_standby() {
-        let runtime = FakeRuntime::default();
-        stop_proxy_containers_with_runtime(&runtime, false)
-            .await
-            .expect("stop");
-        assert_eq!(
-            *runtime.mutated_ports.lock().unwrap(),
-            vec![40001, 40002, 40003]
-        );
+    fn one_plus_one_config() -> BridgeConfig {
+        let mut config = BridgeConfig::default();
+        config.primary_proxies = Some(vec!["socks5h://127.0.0.1:40001".to_string()]);
+        config.warm_standby_proxies = Some(vec!["socks5h://127.0.0.1:40004".to_string()]);
+        config
     }
 
     #[tokio::test]
-    async fn bulk_purge_never_targets_protected_standby() {
+    async fn bulk_stop_targets_only_configured_primary() {
         let runtime = FakeRuntime::default();
-        stop_proxy_containers_with_runtime(&runtime, true)
+        let config = one_plus_one_config();
+        stop_proxy_containers_with_runtime_and_config(&runtime, &config, false)
+            .await
+            .expect("stop");
+        assert_eq!(*runtime.mutated_ports.lock().unwrap(), vec![40001]);
+    }
+
+    #[tokio::test]
+    async fn bulk_purge_targets_only_configured_primary() {
+        let runtime = FakeRuntime::default();
+        let config = one_plus_one_config();
+        stop_proxy_containers_with_runtime_and_config(&runtime, &config, true)
             .await
             .expect("purge");
-        assert_eq!(
-            *runtime.mutated_ports.lock().unwrap(),
-            vec![40001, 40002, 40003]
-        );
+        assert_eq!(*runtime.mutated_ports.lock().unwrap(), vec![40001]);
     }
 
     #[test]

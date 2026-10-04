@@ -4,27 +4,28 @@
 
 opencode2api uses a two-tier proxy pool:
 
-1. **Primary Managed Pool** (ports 40001–40003)
+1. **Primary Managed Pool** (default: port 40001)
    - Managed by opencode2api CLI
    - Can be started, restarted, recovered, rotated, purged
    - Used as default routing targets for normal traffic
    - Docker containers managed via CLI (`proxy restart`, `proxy purge`)
 
-2. **Warm-Standby Protected Pool** (ports 40004–40005)
+2. **Warm-Standby Protected Pool** (default: port 40004)
    - Protected anchor proxies
-   - **Never** stopped, restarted, purged, or recreated by CLI
-   - Health-checked (read-only) only
-   - Used as temporary failover target when selected primary is unhealthy/cooldown/dead
-   - WarmStandby does not receive normal traffic
+   - **Never** stopped, purged, or recreated by destructive CLI operations
+   - Kept warm and health-checked for failover readiness
+   - Used as temporary failover target when the selected primary is unhealthy/cooldown/dead
+   - WarmStandby does not receive normal traffic while a primary is eligible
 
 ## Configuration
 
 ```
-BRIDGE_PRIMARY_PROXIES=socks5://127.0.0.1:40001,socks5://127.0.0.1:40002,socks5://127.0.0.1:40003
-BRIDGE_WARM_STANDBY_PROXIES=socks5://127.0.0.1:40004,socks5://127.0.0.1:40005
+BRIDGE_PRIMARY_PROXIES=socks5h://127.0.0.1:40001
+BRIDGE_WARM_STANDBY_PROXIES=socks5h://127.0.0.1:40004
+BRIDGE_ACTIVE_PROXY_COUNT=1
 ```
 
-The proxy pool is fixed at **3 primary** ports (40001–40003) and **2 warm-standby** ports (40004–40005). These sizes are hardcoded in `proxy_pool.rs` and are not user-configurable. The routing policy (`primary-with-warm-standby`) is also hardcoded.
+The release default is **1 primary + 1 protected warm standby**, but the URL lists remain configurable for larger pools. CLI status, Docker bootstrap, dashboard proxy controls, doctor checks, and bulk lifecycle operations all derive their ports from the same resolved configuration instead of a fixed 3+2 list.
 
 ## Routing Policy
 
@@ -85,8 +86,8 @@ After cooldown, a proxy recovers via:
 
 ## Safety
 
-- Ports 40004–40005 are protected infrastructure — `is_protected_proxy_port()` guards all destructive Docker operations
-- `ensure_not_protected(port)` returns an error for ports 40004–40005, preventing restart/purge/stop
+- Canonical standby ports `40004-40005` remain protected infrastructure; the default topology uses `40004`.
+- `ensure_not_protected(port)` rejects destructive lifecycle operations on protected standby ports.
 - WarmStandby proxies are excluded from normal routing: `select_proxy_for_key()` never returns a WarmStandby
   proxy unless the rendezvous-assigned primary is unhealthy
 - Deprecated static port 40010 is removed
@@ -113,8 +114,8 @@ The `/health` endpoint exposes proxy pool telemetry:
 {
   "proxy_pool": {
     "policy": "primary-with-warm-standby",
-    "primary": { "ports": [40001,40002,40003], "total": 3, "healthy": 3, ... },
-    "warm_standby": { "ports": [40004,40005], "total": 2, "healthy": 2, "protected": true },
+    "primary": { "ports": [40001], "total": 1, "healthy": 1, ... },
+    "warm_standby": { "ports": [40004], "total": 1, "healthy": 1, "protected": true },
     "nodes": [...]
   }
 }

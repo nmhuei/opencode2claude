@@ -83,7 +83,10 @@ Or via Cargo:
 
 ```bash
 cargo install opencode2api
+opencode2api shell install
 ```
+
+The release installer installs the managed bash/zsh hook automatically. Cargo cannot run a post-install shell hook, so Cargo users run `opencode2api shell install` once and then open a new terminal (or source the reported rc file).
 
 ### 2. Verify
 
@@ -94,16 +97,18 @@ opencode2api status
 
 ### 3. Start Using CLI Commands
 
-Replace `source start.sh` with:
+Replace `source start.sh` with a daemon lifecycle plus per-terminal session setup:
 
 ```bash
-opencode2api start
-eval "$(opencode2api --quiet env)"
-# Exports the configured bridge token and ANTHROPIC_BASE_URL=http://127.0.0.1:4000
-export OPENCODE_MODEL="opencode/deepseek-v4-flash-free"
+# Start once when the daemon is stopped.
+opencode2api server start
+
+# Run in every new terminal that will use Claude Code.
+opencode2api set env
+claude
 ```
 
-Or use the `.env` / TOML config file for persistent settings.
+`opencode2api set env` is handled by the managed shell hook and evaluates the canonical `opencode2api --quiet env` output in the current terminal. Keep persistent bridge/model choices in `.env` or TOML; do not duplicate the generated Claude Code session settings in `.zshrc` or `.bashrc`.
 
 ### 4. Migrate Proxy Workflow
 

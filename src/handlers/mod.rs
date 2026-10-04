@@ -5,6 +5,7 @@ mod metadata;
 mod openai;
 mod prompt;
 mod shell;
+mod title;
 mod types;
 
 pub use messages::handle_messages;
@@ -13,6 +14,7 @@ pub use metadata::{
 };
 pub use openai::{handle_chat_completions, openai_error_response};
 pub use prompt::extract_prompt;
+pub(crate) use prompt::strip_leading_system_reminders;
 pub use types::{
     AnthropicTool, ContentVal, Message, MessageContent, MessagesRequest, OutputConfig,
     ThinkingConfig,

@@ -29,7 +29,7 @@ pub(super) fn last_user_shell_cmd(messages: &[Message]) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn strip_leading_system_reminders(mut text: &str) -> Option<&str> {
+pub(crate) fn strip_leading_system_reminders(mut text: &str) -> Option<&str> {
     const OPEN: &str = "<system-reminder>";
     const CLOSE: &str = "</system-reminder>";
 

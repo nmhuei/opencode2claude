@@ -4,7 +4,10 @@ use super::view::{
     claude_code_base_url, cmd_print_env, print_brand_header, print_error, print_section,
     print_success, print_tip, print_warning, shell_export_lines,
 };
-use crate::cli::{self, ApiKeyCommand, ApiKeyGenerateArgs, CompletionArgs, InitArgs, UpdateArgs};
+use crate::cli::{
+    self, ApiKeyCommand, ApiKeyGenerateArgs, CompletionArgs, InitArgs, SetCommand, ShellCommand,
+    UpdateArgs,
+};
 use crate::config;
 use crate::doctor;
 use crate::output::OutputFormat;
@@ -119,6 +122,7 @@ pub(super) async fn cmd_update(args: UpdateArgs, fmt: OutputFormat) {
     }
 
     if !available && !args.force {
+        let shell_hook = crate::application::shell_integration::install_hook("auto", None).ok();
         match fmt {
             OutputFormat::Json => println!(
                 "{}",
@@ -126,6 +130,7 @@ pub(super) async fn cmd_update(args: UpdateArgs, fmt: OutputFormat) {
                     "status": "up-to-date",
                     "version": current,
                     "updated": false,
+                    "shell_hook": shell_hook.as_ref().map(|result| result.path.display().to_string()),
                 })
             ),
             OutputFormat::Quiet => println!("{current}"),
@@ -168,29 +173,39 @@ pub(super) async fn cmd_update(args: UpdateArgs, fmt: OutputFormat) {
     }
 
     match update::apply_update(&client, asset).await {
-        Ok(path) => match fmt {
-            OutputFormat::Json => println!(
-                "{}",
-                serde_json::json!({
-                    "status": "updated",
-                    "from_version": current,
-                    "to_version": release.version,
-                    "path": path,
-                    "restart_required": true,
-                })
-            ),
-            OutputFormat::Quiet => println!("{}", release.version),
-            OutputFormat::Human => {
-                print_success(&format!("Updated to {}", release.version));
-                println!(
+        Ok(path) => {
+            let shell_hook = crate::application::shell_integration::install_hook("auto", None).ok();
+            match fmt {
+                OutputFormat::Json => println!(
                     "{}",
-                    presentation::facts(&[("Binary", path.display().to_string())])
-                );
-                println!();
-                print_tip("Restart the gateway if it is currently running.");
-                println!();
+                    serde_json::json!({
+                        "status": "updated",
+                        "from_version": current,
+                        "to_version": release.version,
+                        "path": path,
+                        "restart_required": true,
+                        "shell_hook": shell_hook.as_ref().map(|result| result.path.display().to_string()),
+                    })
+                ),
+                OutputFormat::Quiet => println!("{}", release.version),
+                OutputFormat::Human => {
+                    print_success(&format!("Updated to {}", release.version));
+                    println!(
+                        "{}",
+                        presentation::facts(&[("Binary", path.display().to_string())])
+                    );
+                    if let Some(result) = shell_hook {
+                        print_tip(&format!(
+                            "Shell integration is installed at {}.",
+                            result.path.display()
+                        ));
+                    }
+                    println!();
+                    print_tip("Restart the gateway if it is currently running.");
+                    println!();
+                }
             }
-        },
+        }
         Err(error) => {
             emit_error(
                 fmt,
@@ -270,6 +285,149 @@ pub(super) fn cmd_env(fmt: OutputFormat) {
             );
         }
         OutputFormat::Human => cmd_print_env(&resolved),
+    }
+}
+
+pub(super) fn cmd_set(command: SetCommand, fmt: OutputFormat) {
+    match command {
+        SetCommand::Env => {
+            match fmt {
+                OutputFormat::Json => println!(
+                    "{}",
+                    serde_json::json!({
+                        "status": "shell-hook-required",
+                        "command": "opencode2api set env",
+                        "install": "opencode2api shell install",
+                        "fallback": "eval \"$(opencode2api --quiet env)\"",
+                    })
+                ),
+                OutputFormat::Quiet => {
+                    eprintln!("shell integration is not loaded; run: opencode2api shell install");
+                }
+                OutputFormat::Human => {
+                    print_error(
+                        "Shell integration is not loaded",
+                        "A child process cannot change its parent shell environment. Install the managed hook once, then open a new shell or source your rc file.",
+                        &[
+                            "opencode2api shell install",
+                            "eval \"$(opencode2api --quiet env)\"",
+                        ],
+                    );
+                }
+            }
+            std::process::exit(1);
+        }
+    }
+}
+
+pub(super) fn cmd_shell(command: ShellCommand, fmt: OutputFormat) {
+    use crate::application::shell_integration;
+    use std::path::Path;
+
+    match command {
+        ShellCommand::Hook(args) => {
+            if let Err(error) = shell_integration::resolve_shell(&args.shell.to_string()) {
+                emit_error(
+                    fmt,
+                    "shell-hook",
+                    "Could not resolve shell",
+                    &error.to_string(),
+                    &[],
+                );
+                std::process::exit(1);
+            }
+            print!("{}\n", shell_integration::render_hook());
+        }
+        ShellCommand::Install(args) => {
+            let rc = args.rc.as_deref().map(Path::new);
+            match shell_integration::install_hook(&args.shell.to_string(), rc) {
+                Ok(result) => match fmt {
+                    OutputFormat::Json => println!(
+                        "{}",
+                        serde_json::json!({
+                            "status": "ok",
+                            "action": "installed",
+                            "shell": result.shell.name(),
+                            "path": result.path,
+                            "changed": result.changed,
+                        })
+                    ),
+                    OutputFormat::Quiet => println!("{}", result.path.display()),
+                    OutputFormat::Human => {
+                        print_brand_header("Shell integration", "Parent-shell environment hook");
+                        if result.changed {
+                            print_success("Shell hook installed");
+                        } else {
+                            print_success("Shell hook already up to date");
+                        }
+                        println!(
+                            "{}",
+                            presentation::facts(&[
+                                ("Shell", result.shell.name().to_string()),
+                                ("RC file", result.path.display().to_string()),
+                            ])
+                        );
+                        println!();
+                        print_tip(&format!(
+                            "Open a new terminal or run `source {}` once; then `opencode2api set env` updates that terminal session.",
+                            result.path.display()
+                        ));
+                        println!();
+                    }
+                },
+                Err(error) => {
+                    emit_error(
+                        fmt,
+                        "shell-install",
+                        "Could not install shell integration",
+                        &error.to_string(),
+                        &["Use --shell bash or --shell zsh, or pass --rc PATH explicitly."],
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
+        ShellCommand::Uninstall(args) => {
+            let rc = args.rc.as_deref().map(Path::new);
+            match shell_integration::uninstall_hook(&args.shell.to_string(), rc) {
+                Ok(result) => match fmt {
+                    OutputFormat::Json => println!(
+                        "{}",
+                        serde_json::json!({
+                            "status": "ok",
+                            "action": "uninstalled",
+                            "shell": result.shell.name(),
+                            "path": result.path,
+                            "changed": result.changed,
+                        })
+                    ),
+                    OutputFormat::Quiet => println!("{}", result.path.display()),
+                    OutputFormat::Human => {
+                        print_brand_header("Shell integration", "Parent-shell environment hook");
+                        if result.changed {
+                            print_success("Shell hook removed");
+                        } else {
+                            print_success("No managed shell hook was present");
+                        }
+                        println!(
+                            "{}",
+                            presentation::facts(&[("RC file", result.path.display().to_string())])
+                        );
+                        println!();
+                    }
+                },
+                Err(error) => {
+                    emit_error(
+                        fmt,
+                        "shell-uninstall",
+                        "Could not remove shell integration",
+                        &error.to_string(),
+                        &[],
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
     }
 }
 

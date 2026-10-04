@@ -1,0 +1,1 @@
+- Communicates in Vietnamese (Tiếng Việt) when describing tasks and requirements. Confidence: 0.7

@@ -3684,3 +3684,25 @@ Quality gates:
 - Updated `src/application/client_config.rs` so newly generated Claude Code settings include both `model: claude-opus-5` and `ultracode: true`; added a regression assertion first, observed it fail, then implemented the setting and observed it pass.
 - Fresh real PTY verification in `/home/light/GitHub/opencode2claude`: startup displays `Opus 5 with xhigh effort`; status displays `effort: ultracode · xhigh effort + dynamic workflows for maximum thoroughness`; no unsupported-model or effort-override warning.
 - Fresh checks: targeted client-config test PASS, `cargo fmt --check` PASS, `git diff --check` PASS. No bridge restart or proxy mutation was needed; requests remain forced by the Claude integration policy to `opencode/deepseek-v4-flash-free`.
+
+## 2026-08-14 03:47 +0700 — Add proxy-derived X-Real-IP and debug Claude Code upstream path
+
+- Mục tiêu: thêm `X-Real-IP` cho request upstream khi bridge đi qua proxy, rồi kiểm tra bằng Claude Code CLI xem lỗi hiện tại có phải upstream transport/server error hay không.
+- File sửa trực tiếp: `src/opencode/retry/execute.rs`.
+- Logic mới: `SelectedRoute` giữ `upstream_real_ip`, lấy từ `ExitIdentity.public_ip` đã được proxy pool verify và validate bằng `IpAddr`; `prepare_upstream_request()` chỉ gắn header `x-real-ip` outbound khi route proxy có IP verify. Không đọc hoặc tin `X-Real-IP`/`X-Forwarded-For` inbound từ client, nên không tạo đường spoof header.
+- Test mới: `proxy_route_sets_x_real_ip_from_verified_exit_identity` và `upstream_request_includes_x_real_ip_when_route_has_verified_exit`. RED ban đầu fail đúng vì thiếu field/helper; sau implement thì pass.
+- Quality gate đã chạy:
+  - `cargo fmt --check` PASS.
+  - `cargo test -q` PASS: 507 lib/unit + integration suites hiện có, 0 fail, 1 ignored WARP identity test như kỳ vọng.
+  - `cargo build --release --bins` PASS.
+  - `git diff --check` PASS.
+- Claude Code CLI debug:
+  - Version kiểm tra: `claude 2.1.229`.
+  - Global Claude settings đang ép `ANTHROPIC_BASE_URL=http://127.0.0.1:4000`, nên đã dùng `HOME=/tmp/claude-xrealip-home` + `--bare` để buộc CLI trỏ side bridge `http://127.0.0.1:4199` mà không sửa settings thật.
+  - Side bridge `:4199` dùng release binary mới, readiness ban đầu `ready`, proxy mode, `verified_unique_exit_ips=3`.
+  - CLI vẫn nhận HTTP 400 `Egress temporarily unavailable: no unique healthy proxy exit is currently available; managed recovery is still running; retry after 30 second(s)`.
+  - Curl trực tiếp với key mặc định bridge vào `:4199/v1/messages` xác nhận request chọn `opencode-warp-1`, forward tới upstream, upstream trả rate-limit, bridge mở circuit và sau backoff trả `EgressUnavailable` cho client. Đây là upstream quota/rate-limit + proxy recovery gate, không phải upstream 5xx/transport lỗi.
+- Vận hành:
+  - Không restart production `:4000`; process production PID 1820073 vẫn chạy unmanaged trên port 4000.
+  - Side bridge `:4199` đã dừng sau debug. Production `:4000/health/ready` sau đó vẫn `ready`, `verified_unique_exit_ips=2`.
+- Giới hạn: runtime live không thể chứng minh upstream thật đã nhìn thấy header vì không kiểm soát/capture được phía `opencode.ai`; phần header đã được chứng minh bằng unit test request builder và route metadata. Lần live route thật dừng ở rate-limit/recovery path sau request upstream đầu tiên.

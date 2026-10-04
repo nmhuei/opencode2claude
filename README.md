@@ -14,6 +14,7 @@ Using Cargo:
 
 ```bash
 cargo install opencode2api
+opencode2api shell install
 ```
 
 Using a release binary:
@@ -22,36 +23,91 @@ Using a release binary:
 curl -fsSL https://raw.githubusercontent.com/nmhuei/opencode2api/main/install.sh | sh
 ```
 
-The install script downloads the binary and its companion `.sha256` file, verifies the checksum, runs a `--version` smoke check, and only then installs it.
+The release installer downloads the binary and its companion `.sha256` file, verifies the checksum, runs a `--version` smoke check, installs the executable, and installs an idempotent managed bash/zsh shell hook. The hook contains no model, token, endpoint, or effort values; it only makes `opencode2api set env` evaluate the current binary's canonical `--quiet env` output inside the parent shell.
+
+Cargo cannot run a post-install shell hook, so Cargo users run `opencode2api shell install` once after installation. Open a new terminal afterward, or source the rc file printed by that command.
 
 ## Quick start
 
-The default bind address is `127.0.0.1:4000`. The default proxy topology expects three primary SOCKS proxies on ports `40001-40003` and two protected warm-standby proxies on `40004-40005`.
+The default bind address is `127.0.0.1:4000`. The default proxy topology uses one managed primary SOCKS proxy on port `40001` and one protected warm-standby proxy on port `40004`. The topology remains configurable for larger pools.
 
-Start with managed proxy egress:
+### 1. Start the OpenCode2API server once
+
+`opencode2api server start` launches the bridge as a background daemon. Start it once when bringing the server up; opening a new terminal does **not** require starting it again.
 
 ```bash
 opencode2api server start
 opencode2api server status
 ```
 
-Start without Docker/WARP proxy management and use direct host egress:
+Run `opencode2api server start` again only when the daemon is no longer running, for example after `opencode2api server stop`, a reboot, or a failed/stopped server reported by `opencode2api server status`.
+
+To start without Docker/WARP proxy management and use direct host egress instead:
 
 ```bash
 opencode2api server start --no-proxy
 ```
 
-Generate a documented configuration file:
+To use a configuration file:
 
 ```bash
 opencode2api init --output opencode2api.toml
 opencode2api server start --config opencode2api.toml
 ```
 
-Configure Claude Code or another Anthropic-compatible client using the values emitted by:
+### 2. Load the Claude Code environment in each terminal
+
+The server keeps running independently of your shell. For every new terminal session that will use Claude Code, load the client environment with:
+
+```bash
+opencode2api set env
+```
+
+Then start Claude Code normally:
+
+```bash
+claude
+```
+
+`opencode2api set env` is intercepted by the managed shell hook and evaluates `opencode2api --quiet env` inside the **current shell session**, so the exported variables really become part of that terminal's environment. The release installer installs this hook automatically; Cargo/build-from-source users install it once with `opencode2api shell install`.
+
+The rc file contains only the generic hook logic, not model/context/effort values. Those values remain owned by `opencode2api --quiet env`, so updating the binary updates the session configuration without rewriting hard-coded settings into `.zshrc` or `.bashrc`.
+
+For one-off/manual use without the hook, the equivalent command remains:
+
+```bash
+eval "$(opencode2api --quiet env)"
+```
+
+To inspect the bridge connection and model values without exporting them, run:
 
 ```bash
 opencode2api env
+```
+
+For the `opencode/x-preview-f-free` (Ox Alpha Free) backend, `--quiet env` also applies the verified Claude Code session tuning automatically:
+
+```text
+ANTHROPIC_MODEL=sonnet[1m]
+CLAUDE_CODE_DISABLE_1M_CONTEXT=0
+CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000
+CLAUDE_CODE_AUTO_COMPACT_WINDOW=870000
+CLAUDE_CODE_DISABLE_THINKING=0
+CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=0
+CLAUDE_CODE_ALWAYS_ENABLE_EFFORT=1
+CLAUDE_CODE_EFFORT_LEVEL=max
+MAX_THINKING_TOKENS=120000
+```
+
+The Ox Alpha metadata reports a 1,000,000-token context window and a 131,072-token maximum output. With the currently verified Claude Code behavior, `CLAUDE_CODE_AUTO_COMPACT_WINDOW=870000` produces an effective auto-compact threshold of approximately 850,000 tokens, leaving about 150,000 tokens of headroom for reasoning, tool traffic, and output. Claude Code currently caps the requested output at 128,000 tokens, which stays within Ox Alpha's 131,072-token provider limit.
+
+`ANTHROPIC_MODEL=sonnet[1m]` is a Claude Code frontend compatibility alias used to enable its 1M-context accounting. OpenCode2API still routes the effective upstream request to `opencode/x-preview-f-free`.
+
+The environment setup also clears an inherited `ANTHROPIC_AUTH_TOKEN` so it cannot override the bridge's compatibility API key in that shell.
+
+If client authentication is enabled, generate or save a key with:
+
+```bash
 opencode2api api-key generate [--save] [--config PATH]
 ```
 
@@ -134,6 +190,8 @@ opencode2api server start|stop|status|restart|logs|config
 opencode2api proxy ps|restart|purge|logs
 opencode2api dashboard start|status
 opencode2api env
+opencode2api set env
+opencode2api shell install|uninstall|hook
 opencode2api api-key generate [--save] [--config PATH]
 opencode2api doctor
 opencode2api completion <shell>

@@ -20,9 +20,9 @@ pub const DEFAULT_BRIDGE_PORT: u16 = 4000;
 pub const DEFAULT_OPENCODE_PORT: u16 = 4096;
 pub const DEFAULT_HOST: &str = "127.0.0.1";
 pub const DEFAULT_MODEL: &str = "claude-3-5-sonnet";
-pub const DEFAULT_STREAM_BUFFER_SIZE: usize = 4096;
-pub const DEFAULT_CHANNEL_CAPACITY: usize = 256;
-pub const DEFAULT_MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
+pub const DEFAULT_STREAM_BUFFER_SIZE: usize = 64 * 1024;
+pub const DEFAULT_CHANNEL_CAPACITY: usize = 2048;
+pub const DEFAULT_MAX_BODY_SIZE: usize = 64 * 1024 * 1024;
 pub const MSG_ID_SHELL: &str = "msg_local_shell";
 
 /// Load environment variables from a deterministic `.env` location.
@@ -56,9 +56,8 @@ pub fn load_dotenv() -> Option<std::path::PathBuf> {
 }
 
 const DEFAULT_SHELL_ALLOWLIST: &str = "git,ls,pwd,cat,find,grep,echo,wc,head,tail,diff";
-const DEFAULT_PRIMARY_PROXIES: &str =
-    "socks5h://127.0.0.1:40001,socks5h://127.0.0.1:40002,socks5h://127.0.0.1:40003";
-const DEFAULT_WARM_STANDBY_PROXIES: &str = "socks5h://127.0.0.1:40004,socks5h://127.0.0.1:40005";
+const DEFAULT_PRIMARY_PROXIES: &str = "socks5h://127.0.0.1:40001";
+const DEFAULT_WARM_STANDBY_PROXIES: &str = "socks5h://127.0.0.1:40004";
 
 /// Force SOCKS5 hostname resolution through the proxy.
 ///

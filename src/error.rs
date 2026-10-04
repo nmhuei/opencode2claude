@@ -38,6 +38,9 @@ pub enum BridgeError {
     #[error("Rate limited: {0}")]
     RateLimited(String),
 
+    #[error("Egress temporarily unavailable: {0}")]
+    EgressUnavailable(String),
+
     #[allow(dead_code)] // kept for health-check error paths
     #[error("OpenCode daemon unavailable on port {0}")]
     DaemonUnavailable(u16),
@@ -86,6 +89,9 @@ impl IntoResponse for BridgeError {
                 "rate_limit_error",
                 self.to_string(),
             ),
+            BridgeError::EgressUnavailable(_) => {
+                (StatusCode::BAD_REQUEST, "api_error", self.to_string())
+            }
             BridgeError::DaemonUnavailable(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "server_error",
@@ -154,5 +160,12 @@ mod tests {
         let err = BridgeError::PaymentRequired("no credits".to_string());
         let resp = err.into_response();
         assert_eq!(resp.status(), StatusCode::PAYMENT_REQUIRED);
+    }
+
+    #[test]
+    fn egress_unavailable_is_non_retryable_for_claude_code() {
+        let err = BridgeError::EgressUnavailable("proxy recovery running".to_string());
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }

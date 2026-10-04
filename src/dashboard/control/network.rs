@@ -25,8 +25,8 @@ pub async fn handler_proxy_plan(
     }
     Ok(Json(json!({
         "action":action,
-        "ports":proxy_pool::get_primary_ports(),
-        "protected_ports":proxy_pool::get_warm_standby_ports(),
+        "ports":proxy_pool::configured_primary_ports(&state.config),
+        "protected_ports":proxy_pool::configured_warm_standby_ports(&state.config),
         "steps":if action == "purge" { vec!["remove","create"] } else { vec!["recreate"] },
         "dry_run":true
     })))
@@ -50,7 +50,7 @@ pub async fn handler_proxy_restart_all(
         ));
     }
     let mut results = Vec::new();
-    for port in proxy_pool::get_primary_ports() {
+    for port in proxy_pool::configured_primary_ports(&state.config) {
         match service::restart_managed_proxy(&state, port).await {
             Ok(_) => results.push(json!({"port":port,"status":"ok"})),
             Err(error) => results.push(json!({
@@ -76,7 +76,7 @@ pub async fn handler_proxy_purge(
             "confirm=true is required",
         ));
     }
-    let ports = proxy_pool::get_primary_ports();
+    let ports = proxy_pool::configured_primary_ports(&state.config);
     {
         let pool = state.proxy_pool.read().await;
         for port in &ports {
@@ -128,7 +128,7 @@ pub async fn handler_proxy_logs(
         .unwrap_or(100)
         .clamp(1, 1000);
     let mut logs = Vec::new();
-    for port in proxy_pool::get_primary_ports() {
+    for port in proxy_pool::configured_primary_ports(&state.config) {
         let spec = ProxySpec::new(port, state.config.runtime.warp_image.clone())
             .map_err(|error| dashboard_error(StatusCode::BAD_REQUEST, error.to_string()))?;
         match state.container_runtime.logs(&spec, tail).await {

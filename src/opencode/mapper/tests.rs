@@ -790,12 +790,221 @@ fn extracts_search_query_from_nested_and_non_json_arguments() {
 }
 
 #[test]
-fn explicit_fanout_prompt_requires_two_agent_calls() {
+fn fanout_requirement_ignores_leading_system_reminder_agent_count() {
     let payload = MessagesRequest {
         messages: vec![Message {
             role: "user".to_string(),
             content: ContentVal::Single(
-                "fan sub agent search security skills for Claude Code".to_string(),
+                concat!(
+                    "<system-reminder>Compatibility example: use exactly 5 Agent tool calls.</system-reminder>\n",
+                    "Use exactly 4 Agent tool calls in parallel before making any implementation plan."
+                )
+                .to_string(),
+            ),
+        }],
+        tools: Some(vec![AnthropicTool {
+            name: "Agent".to_string(),
+            description: "launch an agent".to_string(),
+            input_schema: serde_json::json!({"type":"object"}),
+            ..Default::default()
+        }]),
+        stream: true,
+        max_tokens: Some(1024),
+        ..Default::default()
+    };
+
+    let mapped = map_anthropic_to_openai(&payload, "opencode/deepseek-v4-flash-free".into());
+    let system = mapped
+        .messages
+        .iter()
+        .find(|message| message.role == "system")
+        .and_then(|message| message.content.as_deref())
+        .unwrap_or_default();
+
+    assert!(
+        system.contains("exactly 4 additional Agent tool call"),
+        "system prompt: {system}"
+    );
+    assert!(
+        !system.contains("exactly 5 additional Agent tool call"),
+        "system prompt: {system}"
+    );
+}
+
+#[test]
+fn fanout_requirement_ignores_leading_system_reminder_web_search_text() {
+    let payload = MessagesRequest {
+        messages: vec![Message {
+            role: "user".to_string(),
+            content: ContentVal::Single(
+                concat!(
+                    "<system-reminder>Example policy: use web search for online research.</system-reminder>\n",
+                    "Use exactly 4 Agent tool calls in parallel to inspect four local repository topics."
+                )
+                .to_string(),
+            ),
+        }],
+        tools: Some(vec![AnthropicTool {
+            name: "Agent".to_string(),
+            description: "launch an agent".to_string(),
+            input_schema: serde_json::json!({"type":"object"}),
+            ..Default::default()
+        }]),
+        stream: true,
+        max_tokens: Some(1024),
+        ..Default::default()
+    };
+
+    let mapped = map_anthropic_to_openai(&payload, "opencode/deepseek-v4-flash-free".into());
+    let system = mapped
+        .messages
+        .iter()
+        .find(|message| message.role == "system")
+        .and_then(|message| message.content.as_deref())
+        .unwrap_or_default();
+
+    assert!(
+        system.contains("The user did not explicitly request online/web research"),
+        "system prompt: {system}"
+    );
+    assert!(
+        !system.contains("The user explicitly requested online/web research"),
+        "system prompt: {system}"
+    );
+}
+
+#[test]
+fn fanout_web_policy_respects_explicit_websearch_negation() {
+    let payload = MessagesRequest {
+        messages: vec![Message {
+            role: "user".to_string(),
+            content: ContentVal::Single(
+                concat!(
+                    "Use exactly 4 Agent tool calls in parallel to inspect four local topics. ",
+                    "Do not use WebSearch or WebFetch."
+                )
+                .to_string(),
+            ),
+        }],
+        tools: Some(vec![AnthropicTool {
+            name: "Agent".to_string(),
+            description: "launch an agent".to_string(),
+            input_schema: serde_json::json!({"type":"object"}),
+            ..Default::default()
+        }]),
+        stream: true,
+        max_tokens: Some(1024),
+        ..Default::default()
+    };
+
+    let mapped = map_anthropic_to_openai(&payload, "opencode/deepseek-v4-flash-free".into());
+    let system = mapped
+        .messages
+        .iter()
+        .find(|message| message.role == "system")
+        .and_then(|message| message.content.as_deref())
+        .unwrap_or_default();
+
+    assert!(
+        system.contains("The user did not explicitly request online/web research"),
+        "system prompt: {system}"
+    );
+    assert!(
+        !system.contains("The user explicitly requested online/web research"),
+        "system prompt: {system}"
+    );
+}
+
+#[test]
+fn fanout_prompt_dispatch_four_agent_calls_injects_remaining_four_requirement() {
+    let payload = MessagesRequest {
+        messages: vec![Message {
+            role: "user".to_string(),
+            content: ContentVal::Single(
+                "Use exactly 4 Agent tool calls in parallel. Each Agent must research one independent topic about building a safe study plan for learning web application security."
+                    .to_string(),
+            ),
+        }],
+        tools: Some(vec![AnthropicTool {
+            name: "Agent".to_string(),
+            description: "launch an agent".to_string(),
+            input_schema: serde_json::json!({"type":"object"}),
+            ..Default::default()
+        }]),
+        stream: true,
+        max_tokens: Some(1024),
+        ..Default::default()
+    };
+
+    let mapped = map_anthropic_to_openai(&payload, "opencode/deepseek-v4-flash-free".into());
+    let system = mapped.messages[0].content.as_deref().unwrap_or_default();
+    assert!(
+        system.contains("fan-out of subagents"),
+        "system prompt: {system}"
+    );
+    assert!(
+        system.contains("exactly 4 additional Agent tool call"),
+        "system prompt: {system}"
+    );
+    assert!(!system.contains("maximum of two Agent calls total"));
+}
+
+#[test]
+fn explicit_agent_tool_prompts_a_b_c_inject_four_agent_compatibility_requirement() {
+    let prompts = [
+        "Use exactly 4 Agent tool calls in parallel. Each Agent must research one independent topic about building a safe study plan for learning web application security. The four topics are: HTTP basics, browser security concepts, authentication concepts, and secure coding concepts. Do not answer directly before the Agent calls finish. After all Agents return, synthesize their findings.",
+        "Use exactly 4 Agent tool calls in parallel to research an authorized web application security assessment methodology in a lab or owned environment. Do not target any real website. Each Agent must cover one scope only: reconnaissance planning, attack-surface mapping, safe vulnerability testing workflow, and reporting/remediation. Do not answer directly before the Agent calls finish. After all Agents return, synthesize a high-level defensive methodology.",
+        "You must use the Agent tool exactly 4 times before writing any final answer. Dispatch these 4 Agent tasks in parallel:\n1. Research safe reconnaissance planning for an authorized web application assessment.\n2. Research attack-surface mapping for an owned lab web app.\n3. Research safe vulnerability verification workflow without exploitation against real targets.\n4. Research reporting and remediation workflow.\n\nRules:\n- Do not answer directly until all 4 Agent results are available.\n- Do not reduce the number of Agent calls.\n- Do not merge tasks.\n- Do not call fewer than 4 Agents.\n- This is for a controlled lab/owned environment only.",
+    ];
+
+    for prompt in prompts {
+        let payload = MessagesRequest {
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: ContentVal::Single(prompt.to_string()),
+            }],
+            tools: Some(vec![AnthropicTool {
+                name: "Agent".to_string(),
+                description: "launch an agent".to_string(),
+                input_schema: serde_json::json!({"type":"object"}),
+                ..Default::default()
+            }]),
+            stream: true,
+            max_tokens: Some(1024),
+            ..Default::default()
+        };
+
+        let mapped = map_anthropic_to_openai(&payload, "opencode/deepseek-v4-flash-free".into());
+        let system = mapped
+            .messages
+            .iter()
+            .find(|message| message.role == "system")
+            .and_then(|message| message.content.as_deref())
+            .unwrap_or_default();
+
+        assert!(
+            system.contains("exactly 4 additional Agent tool call"),
+            "fan-out compatibility requirement missing for prompt: {prompt}\nMapped system: {system}"
+        );
+        assert!(
+            system.contains("run_in_background=true"),
+            "background Agent requirement missing for prompt: {prompt}\nMapped system: {system}"
+        );
+        assert!(
+            system.contains("launch all requested Agent calls before calling TaskOutput"),
+            "launch-before-collect requirement missing for prompt: {prompt}\nMapped system: {system}"
+        );
+    }
+}
+
+#[test]
+fn explicit_fanout_prompt_honors_user_requested_four_agents_without_two_cap() {
+    let payload = MessagesRequest {
+        messages: vec![Message {
+            role: "user".to_string(),
+            content: ContentVal::Single(
+                "Use the Task tool to dispatch at least four subagents for independent scopes"
+                    .to_string(),
             ),
         }],
         tools: Some(vec![AnthropicTool {
@@ -812,22 +1021,24 @@ fn explicit_fanout_prompt_requires_two_agent_calls() {
     let mapped = map_anthropic_to_openai(&payload, "opencode/deepseek-v4-flash-free".into());
     let system = mapped.messages[0].content.as_deref().unwrap_or_default();
     assert!(system.contains("fan-out of subagents"));
-    assert!(system.contains("exactly 2 additional Agent tool call"));
+    assert!(system.contains("exactly 4 additional Agent tool call"));
     assert!(system.contains("same assistant turn"));
-    assert!(system.contains("run_in_background=false"));
-    assert!(system.contains("at most two WebSearch calls"));
+    assert!(system.contains("run_in_background=true"));
+    assert!(system.contains("launch all requested Agent calls before calling TaskOutput"));
     assert!(system.contains("forbid that subagent from spawning Agent children"));
-    assert!(system.contains("fewer than two total Agent calls is incomplete"));
+    assert!(!system.contains("maximum of two Agent calls total"));
+    assert!(!system.contains("fewer than two total Agent calls is incomplete"));
 }
 
 #[test]
-fn explicit_fanout_prompt_requires_one_more_after_first_agent() {
+fn explicit_fanout_prompt_counts_down_from_user_requested_four_after_first_agent() {
     let payload = MessagesRequest {
         messages: vec![
             Message {
                 role: "user".to_string(),
                 content: ContentVal::Single(
-                    "fan sub agent search security skills for Claude Code".to_string(),
+                    "Use the Task tool to dispatch at least four subagents for independent scopes"
+                        .to_string(),
                 ),
             },
             Message {
@@ -854,11 +1065,12 @@ fn explicit_fanout_prompt_requires_one_more_after_first_agent() {
 
     let mapped = map_anthropic_to_openai(&payload, "opencode/deepseek-v4-flash-free".into());
     let system = mapped.messages[0].content.as_deref().unwrap_or_default();
-    assert!(system.contains("exactly 1 additional Agent tool call"));
+    assert!(system.contains("exactly 3 additional Agent tool call"));
+    assert!(!system.contains("maximum of two Agent calls total"));
 }
 
 #[test]
-fn fanout_requirement_stops_after_two_agent_calls() {
+fn fanout_requirement_does_not_stop_after_two_when_user_requested_four() {
     let agent_block = |id: &str| MessageContent {
         content_type: "tool_use".to_string(),
         id: Some(id.to_string()),
@@ -872,7 +1084,8 @@ fn fanout_requirement_stops_after_two_agent_calls() {
             Message {
                 role: "user".to_string(),
                 content: ContentVal::Single(
-                    "fan sub agent search security skills for Claude Code".to_string(),
+                    "Use the Task tool to dispatch at least four subagents for independent scopes"
+                        .to_string(),
                 ),
             },
             Message {
@@ -893,7 +1106,181 @@ fn fanout_requirement_stops_after_two_agent_calls() {
 
     let mapped = map_anthropic_to_openai(&payload, "opencode/deepseek-v4-flash-free".into());
     let system = mapped.messages[0].content.as_deref().unwrap_or_default();
+    assert!(system.contains("base system"));
+    assert!(system.contains("exactly 2 additional Agent tool call"));
+    assert!(!system.contains("maximum of two Agent calls total"));
+}
+
+#[test]
+fn fanout_requirement_stops_after_user_requested_count() {
+    let agent_block = |id: &str| MessageContent {
+        content_type: "tool_use".to_string(),
+        id: Some(id.to_string()),
+        name: Some("Agent".to_string()),
+        input: Some(serde_json::json!({"prompt":id})),
+        ..Default::default()
+    };
+    let payload = MessagesRequest {
+        system: Some(serde_json::json!("base system")),
+        messages: vec![
+            Message {
+                role: "user".to_string(),
+                content: ContentVal::Single(
+                    "Use the Task tool to dispatch at least four subagents for independent scopes"
+                        .to_string(),
+                ),
+            },
+            Message {
+                role: "assistant".to_string(),
+                content: ContentVal::Multiple(vec![
+                    agent_block("agent-1"),
+                    agent_block("agent-2"),
+                    agent_block("agent-3"),
+                    agent_block("agent-4"),
+                ]),
+            },
+        ],
+        tools: Some(vec![AnthropicTool {
+            name: "Agent".to_string(),
+            description: "launch an agent".to_string(),
+            input_schema: serde_json::json!({"type":"object"}),
+            ..Default::default()
+        }]),
+        stream: true,
+        max_tokens: Some(1024),
+        ..Default::default()
+    };
+
+    let mapped = map_anthropic_to_openai(&payload, "opencode/deepseek-v4-flash-free".into());
+    let system = mapped.messages[0].content.as_deref().unwrap_or_default();
     assert_eq!(system, "base system");
+}
+
+#[test]
+fn fanout_compatibility_does_not_force_websearch_when_user_did_not_request_it() {
+    let payload = MessagesRequest {
+        model: Some("claude-opus-5".to_string()),
+        messages: vec![Message {
+            role: "user".to_string(),
+            content: ContentVal::Single(
+                "Use exactly 4 Agent tool calls in parallel. Each Agent must research one independent topic about building a safe study plan for learning web application security. The four topics are: HTTP basics, browser security concepts, authentication concepts, and secure coding concepts. Do not answer directly before the Agent calls finish. After all Agents return, synthesize their findings."
+                    .to_string(),
+            ),
+        }],
+        tools: Some(vec![
+            AnthropicTool {
+                name: "Agent".to_string(),
+                description: "launch an agent".to_string(),
+                input_schema: serde_json::json!({"type":"object"}),
+                ..Default::default()
+            },
+            AnthropicTool {
+                name: "WebSearch".to_string(),
+                description: "search the web".to_string(),
+                input_schema: serde_json::json!({"type":"object"}),
+                ..Default::default()
+            },
+        ]),
+        stream: true,
+        max_tokens: Some(1024),
+        ..Default::default()
+    };
+
+    let mapped = map_anthropic_to_openai(&payload, "opencode/deepseek-v4-flash-free".into());
+    let system = mapped
+        .messages
+        .iter()
+        .find(|message| message.role == "system")
+        .and_then(|message| message.content.as_deref())
+        .unwrap_or_default();
+
+    assert!(
+        !system.contains("require at most two WebSearch calls"),
+        "compatibility instruction must not force WebSearch when the user did not ask for it: {system}"
+    );
+    assert!(
+        system.contains("Do not call WebSearch or WebFetch"),
+        "compatibility instruction should explicitly forbid web tools when the user did not request online research: {system}"
+    );
+}
+
+#[test]
+fn fanout_explicit_online_research_keeps_web_tools_available() {
+    let payload = MessagesRequest {
+        model: Some("claude-opus-5".to_string()),
+        messages: vec![Message {
+            role: "user".to_string(),
+            content: ContentVal::Single(
+                "Use exactly 4 Agent tool calls in parallel. Search the web for current sources about four independent safe web-security study topics."
+                    .to_string(),
+            ),
+        }],
+        tools: Some(vec![
+            AnthropicTool {
+                name: "Agent".to_string(),
+                description: "launch an agent".to_string(),
+                input_schema: serde_json::json!({"type":"object"}),
+                ..Default::default()
+            },
+            AnthropicTool {
+                name: "WebSearch".to_string(),
+                description: "search the web".to_string(),
+                input_schema: serde_json::json!({"type":"object"}),
+                ..Default::default()
+            },
+        ]),
+        stream: true,
+        max_tokens: Some(1024),
+        ..Default::default()
+    };
+
+    let mapped = map_anthropic_to_openai(&payload, "opencode/deepseek-v4-flash-free".into());
+    let system = mapped
+        .messages
+        .iter()
+        .find(|message| message.role == "system")
+        .and_then(|message| message.content.as_deref())
+        .unwrap_or_default();
+
+    assert!(system.contains("WebSearch or WebFetch may be used when needed"));
+    assert!(!system.contains("Do not call WebSearch or WebFetch"));
+}
+
+#[test]
+fn explicit_four_agent_fanout_keeps_parallel_tool_calls_enabled_with_websearch_available() {
+    let payload = MessagesRequest {
+        model: Some("claude-opus-5".to_string()),
+        messages: vec![Message {
+            role: "user".to_string(),
+            content: ContentVal::Single(
+                "Use exactly 4 Agent tool calls in parallel. Each Agent must research one independent topic about building a safe study plan for learning web application security. The four topics are: HTTP basics, browser security concepts, authentication concepts, and secure coding concepts. Do not answer directly before the Agent calls finish. After all Agents return, synthesize their findings."
+                    .to_string(),
+            ),
+        }],
+        tools: Some(vec![
+            AnthropicTool {
+                name: "Agent".to_string(),
+                description: "launch an agent".to_string(),
+                input_schema: serde_json::json!({"type":"object"}),
+                ..Default::default()
+            },
+            AnthropicTool {
+                name: "WebSearch".to_string(),
+                description: "search the web".to_string(),
+                input_schema: serde_json::json!({"type":"object"}),
+                ..Default::default()
+            },
+        ]),
+        stream: true,
+        max_tokens: Some(1024),
+        ..Default::default()
+    };
+
+    let mapped = map_anthropic_to_openai(&payload, "opencode/deepseek-v4-flash-free".into());
+    assert_eq!(
+        mapped.parallel_tool_calls, None,
+        "explicit Agent fan-out must not be serialized just because WebSearch is available"
+    );
 }
 
 #[test]

@@ -45,9 +45,10 @@ download binary and companion .sha256
 → atomically replace
 → run installed binary --version
 → remove backup on success
+→ refresh the managed bash/zsh shell hook (best effort)
 ```
 
-If post-install smoke fails, the previous binary is restored automatically.
+If post-install smoke fails, the previous binary is restored automatically. Shell-hook refresh is idempotent and contains only delegation logic; session values still come from the updated binary's `opencode2api --quiet env` output.
 
 ## Install-script upgrade
 
@@ -66,7 +67,7 @@ OPENCODE2API_DOWNLOAD_URL='https://mirror.example/opencode2api-linux-amd64'
 OPENCODE2API_CHECKSUM_URL='https://mirror.example/opencode2api-linux-amd64.sha256'
 ```
 
-The installer refuses to copy a checksum-mismatched or non-executable candidate.
+The installer refuses to copy a checksum-mismatched or non-executable candidate. After a successful install it also installs or refreshes the managed shell hook, so new terminals can use `opencode2api set env` immediately after the rc file is loaded.
 
 ## Config migration
 

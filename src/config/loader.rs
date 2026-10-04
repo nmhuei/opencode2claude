@@ -335,7 +335,7 @@ pub(super) fn load(overrides: CliOverrides) -> BridgeConfig {
         .unwrap_or(EgressMode::Proxy);
     resolved.egress.active_proxy_count = env_parse("BRIDGE_ACTIVE_PROXY_COUNT")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.active_proxy_count))
-        .unwrap_or(3);
+        .unwrap_or(1);
     resolved.egress.require_verified_exit_ip = env_bool("BRIDGE_REQUIRE_VERIFIED_EXIT_IP")
         .or_else(|| file.as_ref().and_then(|cfg| cfg.require_verified_exit_ip))
         .unwrap_or(true);

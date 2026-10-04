@@ -5,7 +5,7 @@ use super::common::{
     looks_like_unverified_tool_success, matching_tool_name, normalize_dsml_arguments,
     normalize_search_query, prepare_compat_tool_retry, prepare_final_search_synthesis,
     read_bounded_body, resolve_search_query, search_results_with_instruction,
-    split_completed_pre_tool_text, tool_call_fingerprint,
+    tool_call_fingerprint,
 };
 use crate::error::BridgeError;
 use crate::handlers::MessagesRequest;
@@ -566,16 +566,6 @@ pub async fn forward_to_llm_sync(
                     if total_tool_calls > 0 && looks_like_unverified_tool_success(&cleaned) {
                         warn!("Suppressing unverified sync success claim before tool_result");
                         None
-                    } else if !native_tool_calls.is_empty() {
-                        let (completed, unfinished) = split_completed_pre_tool_text(&cleaned);
-                        if !unfinished.trim().is_empty() {
-                            warn!(
-                                dropped_bytes = unfinished.len(),
-                                preview = ?unfinished.chars().take(160).collect::<String>(),
-                                "Dropping unfinished visible text tail before sync native tool call"
-                            );
-                        }
-                        Some(completed)
                     } else {
                         Some(cleaned.as_str())
                     };

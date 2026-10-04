@@ -22,6 +22,12 @@ opencode2api
 │   ├── start
 │   └── status
 ├── env
+├── set
+│   └── env
+├── shell
+│   ├── install
+│   ├── uninstall
+│   └── hook
 ├── api-key
 │   └── generate
 ├── doctor
@@ -98,14 +104,34 @@ opencode2api dashboard status
 
 These commands report or open the dashboard URL; they do not create a second HTTP service.
 
-## Environment and diagnostics
+## Environment, shell integration, and diagnostics
 
 ```bash
 opencode2api env
+opencode2api set env
+opencode2api shell install
+opencode2api shell uninstall
+opencode2api shell hook --shell zsh
 opencode2api doctor
 ```
 
-`env` emits the Claude Code integration variables derived from resolved configuration. `doctor` evaluates configuration, port, runtime, Docker/proxy requirements, and other dependencies appropriate to the selected egress mode. Docker is not treated as required in direct mode.
+`env` displays the Claude Code integration values derived from resolved configuration. `--quiet env` prints eval-safe shell exports and remains the canonical source of all session settings.
+
+`set env` is intentionally implemented through the managed bash/zsh shell hook because a child process cannot mutate its parent shell. The release installer installs this hook automatically. Cargo/build-from-source users run `opencode2api shell install` once, then open a new terminal or source the reported rc file. The hook contains only delegation logic; it does not hard-code model, context, endpoint, token, thinking, or effort settings.
+
+Once the hook is loaded, this command updates the current terminal session:
+
+```bash
+opencode2api set env
+```
+
+The one-off equivalent without the hook is:
+
+```bash
+eval "$(opencode2api --quiet env)"
+```
+
+`doctor` evaluates configuration, port, runtime, Docker/proxy requirements, and other dependencies appropriate to the selected egress mode. Docker is not treated as required in direct mode.
 
 
 ## API keys

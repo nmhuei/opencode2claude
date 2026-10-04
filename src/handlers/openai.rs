@@ -755,6 +755,12 @@ fn openai_bridge_error(error: BridgeError) -> Response {
             Some("rate_limit_exceeded"),
             message,
         ),
+        BridgeError::EgressUnavailable(message) => openai_error_response(
+            StatusCode::BAD_REQUEST,
+            "api_error",
+            Some("egress_unavailable"),
+            message,
+        ),
         other => openai_error_response(
             StatusCode::BAD_GATEWAY,
             "api_error",

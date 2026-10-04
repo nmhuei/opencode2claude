@@ -3390,7 +3390,7 @@ async fn generic_sendmessage_placeholder_message_requests_retry_without_tool_use
 }
 
 #[tokio::test]
-async fn native_tool_call_discards_unfinished_visible_sentence_tail() {
+async fn native_tool_call_preserves_visible_text_when_tool_call_shares_chunk() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let builder = SseEventBuilder::new(
         "msg_native_clipped_preamble".to_string(),
@@ -3444,9 +3444,16 @@ async fn native_tool_call_discards_unfinished_visible_sentence_tail() {
     }
     let body = serialize_sse_events(events).await;
 
-    assert_eq!(ctx.accumulated_text, "Proxy up (200), env đủ. ");
-    assert!(body.contains("Proxy up (200), env đủ."), "{body}");
-    assert!(!body.contains("Copy tinyctfer"), "{body}");
+    assert_eq!(
+        ctx.accumulated_text,
+        "Proxy up (200), env đủ. Copy tinyctfer sang tools/ và đọc code container conf"
+    );
+    assert!(
+        body.contains(
+            "Proxy up (200), env đủ. Copy tinyctfer sang tools/ và đọc code container conf"
+        ),
+        "{body}"
+    );
     assert!(body.contains("tool_use"), "{body}");
     assert!(body.contains("Bash"), "{body}");
     assert!(body.contains("printf PRE_TOOL_OK"), "{body}");

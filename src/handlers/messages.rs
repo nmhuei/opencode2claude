@@ -2,6 +2,7 @@
 
 use super::prompt::{extract_prompt, last_user_shell_cmd};
 use super::shell;
+use super::title;
 use super::{MessagesRequest, OutputConfig, ThinkingConfig};
 use crate::api_key::{is_web_search_tool, ApiKeyPolicyError, AuthenticatedClient, ReasoningMode};
 use crate::config::DEFAULT_MODEL;
@@ -85,6 +86,15 @@ pub async fn handle_messages(
             .and_then(|thinking| thinking.budget_tokens),
         inbound: inbound_request,
     });
+
+    if let Some(response) = title::try_handle(&payload, model.clone()) {
+        capture.finish_success(
+            response.status().as_u16(),
+            Some("local_title"),
+            Some(&model),
+        );
+        return Ok(response);
+    }
 
     match shell::try_handle(&state, &payload, model.clone()).await {
         Ok(Some(response)) => {

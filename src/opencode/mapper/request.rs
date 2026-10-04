@@ -76,13 +76,12 @@ pub fn map_anthropic_to_openai_with_policy(
         }
         system.push_str(&hook_context);
     }
-    if let Some(remaining_agents) = explicit_fanout_agents_remaining(payload) {
+    let fanout_requirement = explicit_fanout_requirement(payload);
+    if let Some(requirement) = fanout_requirement {
         if !system.is_empty() {
             system.push_str("\n\n");
         }
-        system.push_str(&format!(
-            "Claude Code compatibility requirement: the user explicitly requested a fan-out of subagents. Before giving a final answer, issue exactly {remaining_agents} additional Agent tool call(s) with distinct, non-overlapping research scopes, for a maximum of two Agent calls total. If more than one call remains, emit them in the same assistant turn so Claude Code can execute them concurrently. Set run_in_background=false so every Agent returns its full tool_result to this same Claude Code session. In every Agent prompt, require at most two WebSearch calls with distinct queries, real source URLs, and a direct structured final report; explicitly forbid that subagent from spawning Agent children or requesting Bash, Read, TaskOutput, or other unavailable tools. Do not replace the required Agent calls with parent-level WebSearch or WebFetch. A response with fewer than two total Agent calls is incomplete: after the first Agent tool_result, immediately call the remaining Agent before writing any final answer. After both Agent tool_result messages are available, synthesize the combined findings immediately without launching more agents."
-        ));
+        system.push_str(&fanout_system_instruction(requirement));
     }
     if needs_reasoning_hygiene {
         if !system.is_empty() {
@@ -319,14 +318,18 @@ pub fn map_anthropic_to_openai_with_policy(
     // the executor splits mixed batches and collapses pure search batches, so
     // other tool sets keep the upstream default (parallel), which the fan-out
     // instruction above relies on for same-turn concurrent Agent calls.
-    let parallel_tool_calls = tools
-        .as_ref()
-        .filter(|tools: &&Vec<OpenAiTool>| {
-            tools
-                .iter()
-                .any(|tool| is_bridge_search_tool(&tool.function.name))
-        })
-        .map(|_| false);
+    let parallel_tool_calls = if fanout_requirement.is_some() {
+        None
+    } else {
+        tools
+            .as_ref()
+            .filter(|tools: &&Vec<OpenAiTool>| {
+                tools
+                    .iter()
+                    .any(|tool| is_bridge_search_tool(&tool.function.name))
+            })
+            .map(|_| false)
+    };
 
     OpenAiRequest {
         model: mapped_model,
@@ -366,13 +369,32 @@ fn message_content_text(content: &ContentVal) -> String {
     }
 }
 
-fn explicit_fanout_agents_remaining(payload: &MessagesRequest) -> Option<usize> {
-    let agent_available = payload.tools.as_ref().is_some_and(|tools| {
-        tools
-            .iter()
-            .any(|tool| tool.name.eq_ignore_ascii_case("Agent"))
-    });
-    if !agent_available {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FanoutRequirement {
+    requested_total: Option<usize>,
+    remaining: Option<usize>,
+    web_research_requested: bool,
+}
+
+fn fanout_system_instruction(requirement: FanoutRequirement) -> String {
+    let web_tool_policy = if requirement.web_research_requested {
+        "The user explicitly requested online/web research, so WebSearch or WebFetch may be used when needed; limit WebSearch to at most two distinct queries per Agent."
+    } else {
+        "The user did not explicitly request online/web research. In every Agent prompt explicitly state: Do not call WebSearch or WebFetch; use internal knowledge only."
+    };
+
+    match (requirement.requested_total, requirement.remaining) {
+        (Some(total), Some(remaining)) => format!(
+            "Claude Code compatibility requirement: the user explicitly requested a fan-out of subagents. Before giving a final answer, issue exactly {remaining} additional Agent tool call(s) with distinct, non-overlapping research scopes to satisfy the user's requested total of {total} Agent calls. If more than one call remains, emit as many as possible in the same assistant turn so Claude Code can execute them concurrently. Set run_in_background=true on every required Agent call. You must launch all requested Agent calls before calling TaskOutput, waiting for any Agent to complete, or synthesizing findings. If the model emits only part of the requested fan-out in one assistant turn, immediately issue the remaining Agent call(s) in the next turn while the already-launched background Agents continue running; do not wait for their results first. In every Agent prompt, require a direct structured final report and explicitly forbid that subagent from spawning Agent children or requesting Bash, Read, TaskOutput, or other unavailable tools. {web_tool_policy} Do not replace the required Agent calls with parent-level WebSearch or WebFetch. Do not cap the fan-out at two when the user requested more. A response with fewer than {total} total Agent calls is incomplete. Only after all {total} Agent calls have been launched, collect their results with TaskOutput (or completion notifications) and synthesize the combined findings immediately without launching more agents."
+        ),
+        _ => format!(
+            "Claude Code compatibility requirement: the user explicitly requested a fan-out of subagents. Before giving a final answer, issue multiple Agent tool calls with distinct, non-overlapping research scopes. Use the number of agents/scopes explicitly requested by the user; if no count was specified, choose a practical number based on the independent scopes in the request. If more than one call is needed, emit as many as possible in the same assistant turn so Claude Code can execute them concurrently. Set run_in_background=true on every required Agent call. You must launch all requested Agent calls before calling TaskOutput, waiting for any Agent to complete, or synthesizing findings. If only part of the intended fan-out is emitted in one assistant turn, immediately launch the remaining Agent call(s) in the next turn while the already-launched background Agents continue running; do not wait for their results first. In every Agent prompt, require a direct structured final report and explicitly forbid that subagent from spawning Agent children or requesting Bash, Read, TaskOutput, or other unavailable tools. {web_tool_policy} Do not replace the required Agent calls with parent-level WebSearch or WebFetch. Do not cap the fan-out at two when the user requested more. Only after the intended Agent fan-out has been fully launched, collect their results with TaskOutput (or completion notifications) and synthesize the combined findings immediately without launching unnecessary extra agents."
+        ),
+    }
+}
+
+fn explicit_fanout_requirement(payload: &MessagesRequest) -> Option<FanoutRequirement> {
+    if !has_agent_tool(payload) {
         return None;
     }
 
@@ -381,24 +403,16 @@ fn explicit_fanout_agents_remaining(payload: &MessagesRequest) -> Option<usize> 
         if message.role != "user" {
             continue;
         }
-        match &message.content {
-            ContentVal::Single(text) => {
-                user_text.push_str(text);
-                user_text.push('\n');
-            }
-            ContentVal::Multiple(blocks) => {
-                for block in blocks {
-                    if block.content_type == "text" {
-                        if let Some(text) = &block.text {
-                            user_text.push_str(text);
-                            user_text.push('\n');
-                        }
-                    }
-                }
-            }
-        }
+        let text = message_content_text(&message.content);
+        let Some(text) = crate::handlers::strip_leading_system_reminders(&text) else {
+            continue;
+        };
+        user_text.push_str(text);
+        user_text.push('\n');
     }
+
     let normalized = user_text.to_lowercase();
+    let web_research_requested = explicit_web_research_requested(&normalized);
     let explicit = [
         "fan sub agent",
         "fan subagent",
@@ -406,19 +420,29 @@ fn explicit_fanout_agents_remaining(payload: &MessagesRequest) -> Option<usize> 
         "fan out subagent",
         "parallel subagent",
         "multiple subagent",
+        "dispatch subagent",
+        "dispatch at least",
+        "task tool to dispatch",
+        "task tool",
+        "agent tool call",
+        "agent tool calls",
+        "agent tool",
+        "spawn subagent",
+        "launch subagent",
         "nhiều subagent",
         "chia subagent",
         "subagent song song",
     ]
     .iter()
-    .any(|needle| normalized.contains(needle));
+    .any(|needle| normalized.contains(needle))
+        || (normalized.contains("subagent")
+            && ["dispatch", "spawn", "launch", "task tool", "agent tool"]
+                .iter()
+                .any(|needle| normalized.contains(needle)));
     if !explicit {
         return None;
     }
 
-    // A trigger phrase with a negation means the user asked NOT to fan out
-    // ("do not fan out subagents"). Injecting the mandate would override the
-    // user's actual instruction.
     let negated = [
         "do not fan",
         "don't fan",
@@ -429,6 +453,15 @@ fn explicit_fanout_agents_remaining(payload: &MessagesRequest) -> Option<usize> 
         "do not use subagent",
         "don't use subagent",
         "dont use subagent",
+        "do not use agent tool",
+        "do not use the agent tool",
+        "don't use agent tool",
+        "don't use the agent tool",
+        "dont use agent tool",
+        "dont use the agent tool",
+        "no agent tool",
+        "not use agent tool",
+        "not use the agent tool",
         "no subagent",
         "not use subagent",
         "không fan",
@@ -464,5 +497,119 @@ fn explicit_fanout_agents_remaining(payload: &MessagesRequest) -> Option<usize> 
         })
         .count();
 
-    (prior_agent_calls < 2).then_some(2 - prior_agent_calls)
+    if let Some(requested_total) = requested_subagent_count(&normalized) {
+        return (prior_agent_calls < requested_total).then_some(FanoutRequirement {
+            requested_total: Some(requested_total),
+            remaining: Some(requested_total - prior_agent_calls),
+            web_research_requested,
+        });
+    }
+
+    (prior_agent_calls == 0).then_some(FanoutRequirement {
+        requested_total: None,
+        remaining: None,
+        web_research_requested,
+    })
+}
+
+fn explicit_web_research_requested(normalized: &str) -> bool {
+    let negated = [
+        "do not use websearch",
+        "do not use web search",
+        "don't use websearch",
+        "don't use web search",
+        "dont use websearch",
+        "dont use web search",
+        "do not call websearch",
+        "do not call web search",
+        "don't call websearch",
+        "don't call web search",
+        "dont call websearch",
+        "dont call web search",
+        "no websearch",
+        "no web search",
+        "without websearch",
+        "without web search",
+        "do not browse the web",
+        "don't browse the web",
+        "dont browse the web",
+        "do not search the web",
+        "don't search the web",
+        "dont search the web",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle));
+    if negated {
+        return false;
+    }
+
+    [
+        "web search",
+        "search the web",
+        "browse the web",
+        "web research",
+        "search online",
+        "browse online",
+        "research online",
+        "online research",
+        "search the internet",
+        "browse the internet",
+        "look up online",
+        "look up on the web",
+        "find sources online",
+        "find online sources",
+        "use websearch",
+        "use web search",
+        "@web search",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
+}
+
+fn has_agent_tool(payload: &MessagesRequest) -> bool {
+    payload.tools.as_ref().is_some_and(|tools| {
+        tools
+            .iter()
+            .any(|tool| tool.name.eq_ignore_ascii_case("Agent"))
+    })
+}
+
+fn requested_subagent_count(normalized: &str) -> Option<usize> {
+    let tokens = normalized
+        .split(|ch: char| !ch.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+
+    for (index, token) in tokens.iter().enumerate() {
+        if !matches!(*token, "subagent" | "subagents" | "agent" | "agents") {
+            continue;
+        }
+        let start = index.saturating_sub(6);
+        for candidate in tokens[start..index].iter().rev() {
+            if let Some(count) = parse_small_count(candidate) {
+                if count >= 2 {
+                    return Some(count);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn parse_small_count(token: &str) -> Option<usize> {
+    if let Ok(value) = token.parse::<usize>() {
+        return (value > 0 && value <= 64).then_some(value);
+    }
+    match token {
+        "two" | "hai" => Some(2),
+        "three" | "ba" => Some(3),
+        "four" | "bon" | "bốn" | "tu" | "tư" => Some(4),
+        "five" | "nam" | "năm" => Some(5),
+        "six" | "sau" | "sáu" => Some(6),
+        "seven" | "bay" | "bảy" => Some(7),
+        "eight" | "tam" | "tám" => Some(8),
+        "nine" | "chin" | "chín" => Some(9),
+        "ten" | "muoi" | "mười" => Some(10),
+        _ => None,
+    }
 }
