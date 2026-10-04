@@ -253,10 +253,10 @@ def write_claude_settings(profile: Path, bridge_port: int, *, model: str = MODEL
         settings = {"model": model, "alwaysThinkingEnabled": False, "env": env_block}
     else:
         required = {
-            "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL",
             "ANTHROPIC_MODEL", "OPENCODE_MODEL", "CLAUDE_CODE_DISABLE_1M_CONTEXT",
             "CLAUDE_CODE_MAX_CONTEXT_TOKENS", "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
-            "CLAUDE_CODE_AUTO_COMPACT_WINDOW", "MAX_THINKING_TOKENS",
+            "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "MAX_THINKING_TOKENS",
         }
         missing = sorted(required.difference(launcher_env))
         if missing:
@@ -504,16 +504,17 @@ upstream_api_keys = ["{KEY_ONE}", "{KEY_TWO}"]
                     ) if part
                 )
                 normalized = displayed.lower().replace(",", "")
-                has_expected_compact_window = bool(
-                    re.search(r"/\s*(?:800k|800000)(?:\s+tokens?)?\s*(?:\(|$)", normalized)
-                    or re.search(r"auto-compact window:\s*(?:800k|800000)", normalized)
+                has_expected_context_window = bool(
+                    re.search(r"/\s*(?:1m|1000000)(?:\s+tokens?)?\s*(?:\(|$)", normalized)
+                    or re.search(r"context window:\s*(?:1m|1000000)", normalized)
                 )
                 passed = (
                     proc.returncode == 0
                     and alias == "sonnet[1m]"
                     and launcher_env.get("CLAUDE_CODE_MAX_CONTEXT_TOKENS") == "1000000"
-                    and launcher_env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW") == "800000"
-                    and has_expected_compact_window
+                    and launcher_env.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE") == "80"
+                    and "CLAUDE_CODE_AUTO_COMPACT_WINDOW" not in launcher_env
+                    and has_expected_context_window
                 )
                 results.append({
                     "case": "provider_alias_free_1m",
@@ -530,7 +531,7 @@ upstream_api_keys = ["{KEY_ONE}", "{KEY_TWO}"]
                 if not passed:
                     print(
                         f"    compatibility failure: Claude Code {summary_version(claude_bin)} "
-                        f"did not accept launcher model {alias!r} with an 800k auto-compact window"
+                        f"did not accept launcher model {alias!r} with a 1M context window"
                     )
             except subprocess.TimeoutExpired as error:
                 results.append({

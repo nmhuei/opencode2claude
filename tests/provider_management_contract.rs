@@ -25,6 +25,11 @@ fn process_value<'a>(vars: &'a [(String, Option<String>)], key: &str) -> &'a str
         .unwrap_or_else(|| panic!("missing process environment variable {key}"))
 }
 
+fn process_unset(vars: &[(String, Option<String>)], key: &str) -> bool {
+    vars.iter()
+        .any(|(candidate, value)| candidate == key && value.is_none())
+}
+
 #[test]
 fn launcher_environment_preserves_upstream_id_and_exposes_1m_client_contract() {
     let profile = ModelProfile::from_context("route/free-1m", 1_000_000, 128_000, true);
@@ -35,7 +40,6 @@ fn launcher_environment_preserves_upstream_id_and_exposes_1m_client_contract() {
     assert_eq!(value(&vars, "CLAUDE_CODE_DISABLE_1M_CONTEXT"), "0");
     assert_eq!(value(&vars, "CLAUDE_CODE_MAX_CONTEXT_TOKENS"), "1000000");
     assert_eq!(value(&vars, "CLAUDE_CODE_MAX_OUTPUT_TOKENS"), "128000");
-    assert_eq!(value(&vars, "CLAUDE_CODE_AUTO_COMPACT_WINDOW"), "800000");
     assert_eq!(value(&vars, "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"), "80");
 
     let config = BridgeConfig {
@@ -48,10 +52,7 @@ fn launcher_environment_preserves_upstream_id_and_exposes_1m_client_contract() {
         process_value(&process_vars, "OPENCODE_MODEL"),
         "opencode/deepseek-v4-flash-free"
     );
-    assert_eq!(
-        process_value(&process_vars, "ANTHROPIC_AUTH_TOKEN"),
-        "opencode-bridge"
-    );
+    assert!(process_unset(&process_vars, "ANTHROPIC_AUTH_TOKEN"));
     assert_eq!(
         process_value(&process_vars, "ANTHROPIC_MODEL"),
         "sonnet[1m]"
@@ -75,9 +76,13 @@ fn generated_claude_code_settings_use_alias_and_1m_environment() {
 
     assert_eq!(settings["model"], "sonnet[1m]");
     assert_eq!(settings["env"]["ANTHROPIC_MODEL"], "sonnet[1m]");
+    assert!(settings["env"].get("ANTHROPIC_AUTH_TOKEN").is_none());
     assert_eq!(settings["env"]["CLAUDE_CODE_DISABLE_1M_CONTEXT"], "0");
     assert_eq!(settings["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "1000000");
-    assert_eq!(settings["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "800000");
+    assert_eq!(settings["env"]["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"], "80");
+    assert!(settings["env"]
+        .get("CLAUDE_CODE_AUTO_COMPACT_WINDOW")
+        .is_none());
 }
 
 #[test]
@@ -131,10 +136,7 @@ fn configured_non_million_alias_exports_its_context_and_eighty_percent_compactio
         process_value(&vars, "CLAUDE_CODE_MAX_CONTEXT_TOKENS"),
         "200000"
     );
-    assert_eq!(
-        process_value(&vars, "CLAUDE_CODE_AUTO_COMPACT_WINDOW"),
-        "160000"
-    );
+    assert!(process_unset(&vars, "CLAUDE_CODE_AUTO_COMPACT_WINDOW"));
     assert_eq!(
         process_value(&vars, "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"),
         "80"

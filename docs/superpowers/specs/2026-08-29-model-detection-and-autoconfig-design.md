@@ -2,7 +2,7 @@
 
 ## 1. Overview
 This specification defines the architecture and behavior for:
-1. **Dynamic Model Profiles & Context Tuning**: Calculating exact context windows and setting `CLAUDE_CODE_AUTO_COMPACT_WINDOW` to 80% of each model's maximum context length.
+1. **Dynamic Model Profiles & Context Tuning**: Calculating exact context windows, exposing the full value through `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, and setting `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=80` for each model.
 2. **Upstream Free Model Probing & Auto-Detection**: Filtering specifically for FREE models from OpenCode Zen (`*-free`, `big-pickle`, etc.), testing live availability, and auto-fallback to the best working free model when models expire or become unavailable.
 3. **CLI Management**:
    - `opencode2api list` / `opencode2api models`: Displays free model catalog, context window, 80% autocompact window, thinking support, and live availability status.
@@ -41,7 +41,9 @@ export OPENAI_BASE_URL="http://127.0.0.1:<bridge_port>/v1"
 export OPENAI_API_KEY="<api_key>"
 export OPENCODE_MODEL="<active_model>"
 export ANTHROPIC_MODEL="<anthropic_model_alias>"
-export CLAUDE_CODE_AUTO_COMPACT_WINDOW="<auto_compact_window>"
+export CLAUDE_CODE_MAX_CONTEXT_TOKENS="<context_window>"
+export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE="80"
+unset CLAUDE_CODE_AUTO_COMPACT_WINDOW
 export CLAUDE_CODE_MAX_OUTPUT_TOKENS="<max_output_tokens>"
 export CLAUDE_CODE_DISABLE_1M_CONTEXT="<0 or 1>"
 export CLAUDE_CODE_DISABLE_THINKING="<0 or 1>"

@@ -503,8 +503,8 @@ mod tests {
         assert!(vars.iter().any(|(key, value)| {
             *key == "CLAUDE_CODE_MAX_CONTEXT_TOKENS" && value == "1000000"
         }));
-        assert!(vars.iter().any(|(key, value)| {
-            *key == "CLAUDE_CODE_AUTO_COMPACT_WINDOW" && value == "800000"
-        }));
+        assert!(vars
+            .iter()
+            .any(|(key, value)| { *key == "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE" && value == "80" }));
     }
 }

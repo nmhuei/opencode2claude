@@ -137,8 +137,8 @@ model. A strict 1M alias is exposed as `sonnet[1m]` and exports:
 
 ```text
 CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000
-CLAUDE_CODE_AUTO_COMPACT_WINDOW=800000
 CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=80
+# CLAUDE_CODE_AUTO_COMPACT_WINDOW must be unset; it overrides the 1M ceiling.
 CLAUDE_CODE_DISABLE_1M_CONTEXT=0
 ```
 

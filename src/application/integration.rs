@@ -6,7 +6,6 @@ use serde::Serialize;
 pub const OX_ALPHA_MODEL: &str = "opencode/x-preview-f-free";
 pub const OX_ALPHA_CLAUDE_MODEL: &str = "sonnet[1m]";
 pub const OX_ALPHA_MAX_OUTPUT_TOKENS: &str = "128000";
-pub const OX_ALPHA_AUTO_COMPACT_WINDOW: &str = "800000";
 pub const OX_ALPHA_MAX_THINKING_TOKENS: &str = "120000";
 
 #[derive(Debug, Clone, Serialize)]
@@ -54,7 +53,9 @@ pub fn process_environment(config: &BridgeConfig) -> Vec<(String, Option<String>
         ("ANTHROPIC_BASE_URL".to_string(), Some(base.clone())),
         ("OPENAI_API_KEY".to_string(), Some(key.clone())),
         ("OPENAI_BASE_URL".to_string(), Some(format!("{base}/v1"))),
-        ("ANTHROPIC_AUTH_TOKEN".to_string(), Some(key)),
+        // Claude Code warns when both auth mechanisms are present. The bridge
+        // uses the API-key contract; explicitly remove any inherited token.
+        ("ANTHROPIC_AUTH_TOKEN".to_string(), None),
         (
             "ANTHROPIC_MODEL".to_string(),
             Some(client_model_alias(config)),
@@ -65,6 +66,11 @@ pub fn process_environment(config: &BridgeConfig) -> Vec<(String, Option<String>
     for (k, v) in claude_vars {
         vars.push((k.to_string(), Some(v)));
     }
+
+    // Claude Code treats this legacy variable as the effective context
+    // ceiling. Remove stale inherited values so a 1M alias cannot regress to
+    // an 800k `/context` display.
+    vars.push(("CLAUDE_CODE_AUTO_COMPACT_WINDOW".to_string(), None));
 
     vars
 }
@@ -202,8 +208,6 @@ pub fn model_claude_code_vars_for_context(
     max_output_tokens: usize,
     supports_thinking: bool,
 ) -> Vec<(&'static str, String)> {
-    let auto_compact =
-        ((context_window / 100) * 80 + ((context_window % 100) * 80) / 100).to_string();
     let max_output = max_output_tokens.to_string();
     let disable_1m = if context_window >= 1_000_000 {
         "0"
@@ -224,10 +228,8 @@ pub fn model_claude_code_vars_for_context(
         ("CLAUDE_CODE_DISABLE_1M_CONTEXT", disable_1m.to_string()),
         ("CLAUDE_CODE_MAX_CONTEXT_TOKENS", context_window.to_string()),
         ("CLAUDE_CODE_MAX_OUTPUT_TOKENS", max_output),
-        ("CLAUDE_CODE_AUTO_COMPACT_WINDOW", auto_compact),
-        // Claude Code 2.1+ also exposes a percentage override. Keep it in
-        // lockstep with the token boundary so `/context` and automatic
-        // compaction cannot drift apart between CLI versions.
+        // Keep the full model window visible to `/context`; Claude Code uses
+        // this percentage as the compaction trigger independently.
         ("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "80".to_string()),
         ("CLAUDE_CODE_DISABLE_THINKING", disable_thinking.to_string()),
         (
@@ -288,7 +290,10 @@ mod tests {
             .any(|line| line == "export ANTHROPIC_MODEL='claude-sonnet-5'"));
         assert!(exports
             .iter()
-            .any(|line| line == "export CLAUDE_CODE_AUTO_COMPACT_WINDOW='204800'"));
+            .any(|line| line == "export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE='80'"));
+        assert!(exports
+            .iter()
+            .any(|line| line == "unset CLAUDE_CODE_AUTO_COMPACT_WINDOW"));
         assert!(
             exports
                 .iter()
@@ -312,7 +317,7 @@ mod tests {
         let exports_nemotron = environment(&config_nemotron).shell_exports;
         assert!(exports_nemotron
             .iter()
-            .any(|line| line == "export CLAUDE_CODE_AUTO_COMPACT_WINDOW='102400'"));
+            .any(|line| line == "export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE='80'"));
 
         let million = BridgeConfig {
             model: Some("opencode/x-preview-f-free".to_string()),
@@ -324,7 +329,7 @@ mod tests {
             .any(|line| line == "export CLAUDE_CODE_MAX_CONTEXT_TOKENS='1000000'"));
         assert!(exports_million
             .iter()
-            .any(|line| line == "export CLAUDE_CODE_AUTO_COMPACT_WINDOW='800000'"));
+            .any(|line| line == "export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE='80'"));
         assert!(exports_million
             .iter()
             .all(|line| line != "export DISABLE_COMPACT='1'"));
@@ -339,7 +344,7 @@ mod tests {
             .any(|line| line == "export CLAUDE_CODE_MAX_CONTEXT_TOKENS='1000000'"));
         assert!(deepseek_exports
             .iter()
-            .any(|line| line == "export CLAUDE_CODE_AUTO_COMPACT_WINDOW='800000'"));
+            .any(|line| line == "export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE='80'"));
         assert!(deepseek_exports
             .iter()
             .any(|line| line == "export CLAUDE_CODE_MAX_OUTPUT_TOKENS='384000'"));
@@ -354,7 +359,11 @@ mod tests {
             .any(|line| line == "export CLAUDE_CODE_MAX_CONTEXT_TOKENS='1000000'"));
         assert!(glm_exports
             .iter()
-            .any(|line| line == "export CLAUDE_CODE_AUTO_COMPACT_WINDOW='800000'"));
+            .any(|line| line == "export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE='80'"));
+
+        assert!(glm_exports
+            .iter()
+            .all(|line| !line.starts_with("export CLAUDE_CODE_AUTO_COMPACT_WINDOW=")));
         assert!(glm_exports
             .iter()
             .any(|line| line == "export CLAUDE_CODE_MAX_OUTPUT_TOKENS='131072'"));

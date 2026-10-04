@@ -271,7 +271,6 @@ fn launch_claude_code(continue_session: bool, resume: Option<&str>) {
 
     let target_alias = crate::application::integration::client_model_alias(&resolved);
     let context_window = crate::application::integration::client_context_window(&resolved);
-
     match crate::infrastructure::process::run_foreground(
         "claude",
         claude_launch_args(
@@ -311,15 +310,13 @@ fn claude_launch_args(
             args.push(m.to_string());
         }
     }
-    // Current Claude Code exposes a first-class token flag. Supplying it in
-    // addition to the environment contract makes `/context` deterministic;
-    // skip windows below the CLI's documented 100k minimum and let the
-    // environment variables carry those legacy profiles.
-    if let Some(context_window) = context_window {
-        let auto_compact = crate::provider::types::auto_compact_window(context_window);
-        if (100_000..=1_000_000).contains(&auto_compact) {
+    if let Some(window) = context_window {
+        if (100_000..=1_000_000).contains(&window) {
+            // Explicitly override a stale Claude Code user setting such as
+            // autoCompactWindow=800k. The 80% trigger remains controlled by
+            // CLAUDE_AUTOCOMPACT_PCT_OVERRIDE in the child environment.
             args.push("--autocompact".to_string());
-            args.push(auto_compact.to_string());
+            args.push(window.to_string());
         }
     }
     if continue_session {
@@ -382,7 +379,7 @@ mod launcher_tests {
             ["--permission-mode", "bypassPermissions", "--resume"]
         );
         assert_eq!(
-            claude_launch_args(false, Some("session-123"), Some("claude-opus-5"), None),
+            claude_launch_args(false, Some("session-123"), Some("claude-opus-5"), None,),
             [
                 "--permission-mode",
                 "bypassPermissions",
@@ -395,7 +392,7 @@ mod launcher_tests {
     }
 
     #[test]
-    fn launcher_passes_fixed_compaction_for_supported_context_windows() {
+    fn launcher_overrides_settings_with_full_context_window() {
         assert_eq!(
             claude_launch_args(false, None, Some("sonnet[1m]"), Some(1_000_000)),
             [
@@ -404,12 +401,8 @@ mod launcher_tests {
                 "--model",
                 "sonnet[1m]",
                 "--autocompact",
-                "800000"
+                "1000000"
             ]
-        );
-        assert_eq!(
-            claude_launch_args(false, None, Some("small"), Some(64_000)),
-            ["--permission-mode", "bypassPermissions", "--model", "small"]
         );
     }
 }
